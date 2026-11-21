@@ -704,7 +704,7 @@
 
   body.call-live.has-products .call-stage {
     position: absolute;
-    top: var(--c-top);
+    top: 0;
     right: 0;
     bottom: 0;
     left: auto;
