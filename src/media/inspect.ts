@@ -2,8 +2,10 @@ import sharp from 'sharp';
 import { recordCost } from '../ledger.ts';
 import type { Piece } from '../types.ts';
 import {
+  createShopperPhotoCache,
   parseInspectorReply,
   stripHtml,
+  type ShopperPhotoCheckResult,
   type TryOnGateScores,
   type TryOnInspectorResult,
 } from './pure.ts';
@@ -13,6 +15,7 @@ const DECISIONS_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/dec
 const DEFAULT_GATE_MODEL = 'gemini-decision-1';
 const DEFAULT_INSPECTOR_MODEL = 'gemini-4-neon';
 const GATE_TIMEOUT_MS = 2000;
+const SHOPPER_PHOTO_TIMEOUT_MS = 1500;
 const INSPECTOR_TIMEOUT_MS = 15_000;
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -429,4 +432,119 @@ export async function runSceneSafetyGate(
     console.error(`[media] scene-gate skipped (${ms}ms): ${(err as Error)?.message ?? err}`);
     return null;
   }
+}
+
+export async function checkShopperPhotoUncached(
+  jpeg: Uint8Array | Buffer,
+  opts?: { timeoutMs?: number; model?: string; fetchFn?: typeof fetch },
+): Promise<ShopperPhotoCheckResult> {
+  const t0 = Date.now();
+  const model = opts?.model || process.env.ALICE_MODEL_GATE || DEFAULT_GATE_MODEL;
+  const timeoutMs =
+    opts?.timeoutMs ?? Number(process.env.ALICE_SHOPPER_PHOTO_TIMEOUT_MS ?? SHOPPER_PHOTO_TIMEOUT_MS);
+  const fetchFn = opts?.fetchFn ?? fetch;
+
+  try {
+    const key = process.env.GOOGLE_TRYON_API_KEY || process.env.GOOGLE_API_KEY;
+    if (!key) throw new Error('missing API key');
+
+    const buf = Buffer.isBuffer(jpeg) ? jpeg : Buffer.from(jpeg);
+    const photoB64 = await shrinkForVision(buf, 512);
+
+    const res = await fetchFn(DECISIONS_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-goog-api-key': key,
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+      body: JSON.stringify({
+        model,
+        input: [
+          {
+            type: 'text',
+            text: 'Evaluate this camera snapshot to decide whether it shows a real shopper for virtual try-on.',
+          },
+          { type: 'image', data: photoB64, mime_type: 'image/jpeg' },
+        ],
+        questions: {
+          person_visible: {
+            type: 'noul',
+            instructions:
+              'Is a real person clearly visible in this image? Answer no if the image is a test pattern, colour bars, blank or dark frame, ceiling, wall, empty room, object, or does not clearly show a real human person.',
+          },
+          torso_visible: {
+            type: 'noul',
+            instructions:
+              'Are at least the person’s head and upper body (shoulders and torso) clearly visible in frame? Answer no if only a close-up of the face is visible or no person is visible.',
+          },
+          usable: {
+            type: 'noul',
+            instructions:
+              'Is the image well-lit and sharp enough to clearly recognise the person (not pitch dark, heavily blurred, or obscured)?',
+          },
+        },
+      }),
+    });
+
+    const body = (await res.json().catch(() => ({}))) as {
+      error?: { message?: string };
+      usage?: { input_tokens?: number };
+      usageMetadata?: { promptTokenCount?: number };
+      answers?: Record<string, { noul?: number }>;
+    };
+
+    if (!res.ok) {
+      throw new Error(
+        `HTTP ${res.status}: ${body?.error?.message ?? 'shopper-photo check failed'}`.slice(0, 200),
+      );
+    }
+
+    const ms = Date.now() - t0;
+    void recordCost({
+      model,
+      job: 'shopper-photo-check',
+      input_tokens: body?.usage?.input_tokens ?? body?.usageMetadata?.promptTokenCount ?? 0,
+      output_tokens: 0,
+      ms,
+    });
+
+    const person_visible = Number(body?.answers?.person_visible?.noul);
+    const torso_visible = Number(body?.answers?.torso_visible?.noul);
+    const usable = Number(body?.answers?.usable?.noul);
+
+    if (
+      !Number.isFinite(person_visible) ||
+      !Number.isFinite(torso_visible) ||
+      !Number.isFinite(usable)
+    ) {
+      throw new Error('decisions API returned non-numeric shopper photo probabilities');
+    }
+
+    return {
+      scores: { person_visible, torso_visible, usable },
+      ms,
+    };
+  } catch (err) {
+    const ms = Date.now() - t0;
+    const message = (err as Error)?.message ?? String(err);
+    console.error(`[media] shopper-photo-check skipped (${ms}ms): ${message}`);
+    return { scores: null, ms, error: message };
+  }
+}
+
+const shopperPhotoCache = createShopperPhotoCache((buf) => checkShopperPhotoUncached(buf));
+
+export function checkShopperPhoto(
+  jpeg: Uint8Array | Buffer,
+  opts?: { timeoutMs?: number; model?: string; bypassCache?: boolean },
+): Promise<ShopperPhotoCheckResult> {
+  if (opts?.bypassCache || opts?.timeoutMs !== undefined || opts?.model !== undefined) {
+    return checkShopperPhotoUncached(jpeg, opts);
+  }
+  return shopperPhotoCache.check(jpeg);
+}
+
+export function clearShopperPhotoCache(): void {
+  shopperPhotoCache.clear();
 }

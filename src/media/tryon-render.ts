@@ -3,11 +3,12 @@ import path from 'node:path';
 import sharp from 'sharp';
 import { recordCost } from '../ledger.ts';
 import type { Gender, Outfit, Piece } from '../types.ts';
-import { buildContactSheet, runTryOnGate, runTryOnInspector } from './inspect.ts';
+import { buildContactSheet, checkShopperPhoto, runTryOnGate, runTryOnInspector } from './inspect.ts';
 import { RenderCeilingError, getRenderLimiter } from './limits.ts';
 import {
   newTryonId,
   publicUrl,
+  resolveShopperPhoto,
   runTryOnVerifyLoop,
   sortPiecesForTryOn,
   stripHtml,
@@ -179,17 +180,21 @@ export async function getTestShopper(department: Gender): Promise<Buffer> {
   return promise;
 }
 
-export async function prepareShopperJpeg(
-  personInput: Uint8Array | Buffer | null,
-  department: Gender,
-): Promise<Buffer> {
-  const rawBuf = personInput ? Buffer.from(personInput) : await getTestShopper(department);
-  return sharp(rawBuf)
+export async function normalizeShopperJpeg(rawBuf: Uint8Array | Buffer): Promise<Buffer> {
+  return sharp(Buffer.from(rawBuf))
     .rotate()
     .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
     .flatten({ background: '#ffffff' })
     .jpeg({ quality: 90 })
     .toBuffer();
+}
+
+export async function prepareShopperJpeg(
+  personInput: Uint8Array | Buffer | null,
+  department: Gender,
+): Promise<Buffer> {
+  const rawBuf = personInput ? Buffer.from(personInput) : await getTestShopper(department);
+  return normalizeShopperJpeg(rawBuf);
 }
 
 export async function loadPieceForTryOn(piece: Piece): Promise<Buffer | null> {
@@ -260,11 +265,24 @@ export async function renderTryOn(
 
   const sortedPieces = sortPiecesForTryOn(rawPieces);
   const department: Gender = rawPieces[0]?.item?.department === 'women' ? 'women' : 'men';
+  const lookTag = outfit.number ?? opts?.label ?? '?';
 
-  const [shopperBuf, pieceBufs] = await Promise.all([
-    prepareShopperJpeg(personJpeg, department),
+  const [resolvedShopper, pieceBufs] = await Promise.all([
+    resolveShopperPhoto<Buffer>({
+      personInput: personJpeg,
+      checkPhoto: (bytes) => checkShopperPhoto(bytes),
+      prepareSnapshot: (bytes) => normalizeShopperJpeg(bytes),
+      getTestShopper: async () => normalizeShopperJpeg(await getTestShopper(department)),
+    }),
     Promise.all(sortedPieces.map((piece) => loadPieceForTryOn(piece))),
   ]);
+  const shopperBuf = resolvedShopper.shopper;
+
+  if (resolvedShopper.shopper_photo === 'none') {
+    console.log(
+      `[media] shopper-photo look ${lookTag}: no person visible (person_visible=${resolvedShopper.shopper_photo_scores?.person_visible.toFixed(2) ?? '?'}); using test shopper (${department})`,
+    );
+  }
 
   const baseParts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [
     { text: 'Image 0: the shopper (the ONLY source for the person)' },
@@ -325,7 +343,6 @@ export async function renderTryOn(
       : await sharp(generated.data).jpeg({ quality: 90 }).toBuffer();
   };
 
-  const lookTag = outfit.number ?? opts?.label ?? '?';
   const { image: outBuf, check } = await runTryOnVerifyLoop<Buffer>({
     generate: generateOnce,
     gate: async (tryonJpeg) => {
@@ -359,6 +376,18 @@ export async function renderTryOn(
     capMs,
   });
 
+  const fullCheck: TryOnCheck = {
+    ...check,
+    shopper_photo: resolvedShopper.shopper_photo,
+    ...(resolvedShopper.shopper_notes ? { shopper_notes: resolvedShopper.shopper_notes } : {}),
+    ...(resolvedShopper.shopper_photo_scores !== undefined
+      ? { shopper_photo_scores: resolvedShopper.shopper_photo_scores }
+      : {}),
+    ...(resolvedShopper.shopper_photo !== 'test'
+      ? { ms_shopper_photo: resolvedShopper.ms_shopper_photo }
+      : {}),
+  };
+
   const id = newTryonId();
   const name = tryonFileName(id);
   const filePath = path.join(tryonDir(), name);
@@ -366,7 +395,7 @@ export async function renderTryOn(
 
   const ms = Date.now() - t0;
   console.log(
-    `tryon ${id} look ${lookTag} ready in ${ms} ms (path=${check.path} attempts=${check.attempts} passed=${check.passed} gate=${check.ms_gate}ms inspect=${check.ms_inspector}ms)`,
+    `tryon ${id} look ${lookTag} ready in ${ms} ms (shopper=${fullCheck.shopper_photo} path=${fullCheck.path} attempts=${fullCheck.attempts} passed=${fullCheck.passed} gate=${fullCheck.ms_gate}ms inspect=${fullCheck.ms_inspector}ms)`,
   );
 
   return {
@@ -374,6 +403,6 @@ export async function renderTryOn(
     path: filePath,
     ms,
     id,
-    check,
+    check: fullCheck,
   };
 }
