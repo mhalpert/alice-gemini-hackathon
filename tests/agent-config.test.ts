@@ -1,9 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { isAgent } from '@livekit/agents';
-import { loadConfig } from '../src/agent/config.ts';
+import { buildAutomaticActivityDetection, loadConfig } from '../src/agent/config.ts';
 import { ALICE_SYSTEM_PROMPT, GREETING_INSTRUCTIONS } from '../src/agent/prompt.ts';
-import workerAgent, { bindStoreCallRoom, warmCallMedia } from '../src/agent/worker.ts';
+import workerAgent, {
+  bindStoreCallRoom,
+  resolveNoiseCancellation,
+  startSessionWithNoiseCancel,
+  warmCallMedia,
+} from '../src/agent/worker.ts';
 
 test('loadConfig returns expected defaults when env is empty', () => {
   const cfg = loadConfig({});
@@ -15,6 +20,22 @@ test('loadConfig returns expected defaults when env is empty', () => {
   assert.equal(cfg.avatar, 'none');
   assert.equal(cfg.vision, true);
   assert.equal(cfg.visionFrameMs, 1000);
+  assert.equal(cfg.noiseCancel, 'bvc');
+  assert.equal(cfg.roomMode, 'noisy');
+  assert.deepEqual(cfg.vad, {
+    room: 'noisy',
+    startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
+    endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+    silenceDurationMs: 500,
+    prefixPaddingMs: 150,
+  });
+  assert.deepEqual(buildAutomaticActivityDetection(cfg.vad), {
+    disabled: false,
+    startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
+    endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+    silenceDurationMs: 500,
+    prefixPaddingMs: 150,
+  });
 });
 
 test('loadConfig reads and normalizes env overrides', () => {
@@ -26,6 +47,8 @@ test('loadConfig reads and normalizes env overrides', () => {
     AVATAR: 'NONE',
     VISION: 'off',
     VISION_FRAME_MS: '2500',
+    ALICE_NOISE_CANCEL: ' NC ',
+    ALICE_ROOM: ' QUIET ',
   });
 
   assert.equal(cfg.googleApiKey, 'test-key-123');
@@ -35,15 +58,92 @@ test('loadConfig reads and normalizes env overrides', () => {
   assert.equal(cfg.avatar, 'none');
   assert.equal(cfg.vision, false);
   assert.equal(cfg.visionFrameMs, 2500);
+  assert.equal(cfg.noiseCancel, 'nc');
+  assert.equal(cfg.roomMode, 'quiet');
+  assert.deepEqual(cfg.vad, {
+    room: 'quiet',
+    startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
+    endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+    silenceDurationMs: 500,
+    prefixPaddingMs: undefined,
+  });
+  const aad = buildAutomaticActivityDetection(cfg.vad);
+  assert.deepEqual(aad, {
+    disabled: false,
+    startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
+    endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+    silenceDurationMs: 500,
+  });
+  assert.equal('prefixPaddingMs' in aad, false);
 });
 
-test('loadConfig handles invalid numeric and boolean env values safely', () => {
+test('loadConfig parses explicit VAD overrides on top of room presets', () => {
+  const fromNoisy = loadConfig({
+    ALICE_ROOM: 'noisy',
+    ALICE_VAD_START: 'high',
+    ALICE_VAD_END: 'low',
+    ALICE_VAD_SILENCE_MS: '750',
+    ALICE_VAD_PREFIX_MS: '200',
+  });
+  assert.deepEqual(fromNoisy.vad, {
+    room: 'noisy',
+    startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
+    endOfSpeechSensitivity: 'END_SENSITIVITY_LOW',
+    silenceDurationMs: 750,
+    prefixPaddingMs: 200,
+  });
+
+  const fullEnumsAndZeroPrefix = loadConfig({
+    ALICE_ROOM: 'quiet',
+    ALICE_VAD_START: 'START_SENSITIVITY_LOW',
+    ALICE_VAD_END: 'END_SENSITIVITY_UNSPECIFIED',
+    ALICE_VAD_SILENCE_MS: '350',
+    ALICE_VAD_PREFIX_MS: '0',
+  });
+  assert.deepEqual(fullEnumsAndZeroPrefix.vad, {
+    room: 'quiet',
+    startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
+    endOfSpeechSensitivity: 'END_SENSITIVITY_UNSPECIFIED',
+    silenceDurationMs: 350,
+    prefixPaddingMs: 0,
+  });
+  assert.equal(buildAutomaticActivityDetection(fullEnumsAndZeroPrefix.vad).prefixPaddingMs, 0);
+
+  const prefixOff = loadConfig({
+    ALICE_ROOM: 'noisy',
+    ALICE_VAD_PREFIX_MS: 'off',
+  });
+  assert.equal(prefixOff.vad.prefixPaddingMs, undefined);
+  assert.equal('prefixPaddingMs' in buildAutomaticActivityDetection(prefixOff.vad), false);
+});
+
+test('loadConfig handles invalid numeric, boolean, noise cancel, and VAD env values safely', () => {
   const cfg = loadConfig({
     VISION: 'maybe',
     VISION_FRAME_MS: '-50',
+    ALICE_NOISE_CANCEL: 'turbo',
+    ALICE_ROOM: 'stadium',
+    ALICE_VAD_START: 'medium',
+    ALICE_VAD_END: 'medium',
+    ALICE_VAD_SILENCE_MS: '0',
+    ALICE_VAD_PREFIX_MS: '-10',
   });
   assert.equal(cfg.vision, true);
   assert.equal(cfg.visionFrameMs, 1000);
+  assert.equal(cfg.noiseCancel, 'bvc');
+  assert.equal(cfg.roomMode, 'noisy');
+  assert.deepEqual(cfg.vad, {
+    room: 'noisy',
+    startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
+    endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+    silenceDurationMs: 500,
+    prefixPaddingMs: 150,
+  });
+});
+
+test('loadConfig supports ALICE_NOISE_CANCEL=off', () => {
+  const cfg = loadConfig({ ALICE_NOISE_CANCEL: 'off' });
+  assert.equal(cfg.noiseCancel, 'off');
 });
 
 test('persona prompt and greeting instructions contain key rules', () => {
@@ -56,6 +156,141 @@ test('persona prompt and greeting instructions contain key rules', () => {
 test('importing worker.ts exports a valid AgentDefinition without starting a worker', () => {
   assert.equal(isAgent(workerAgent), true);
   assert.equal(typeof workerAgent.entry, 'function');
+});
+
+test('resolveNoiseCancellation selects bvc, nc, or off and logs session_error on load or constructor failure', async () => {
+  const logs: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+  const log = (room: string, ev: string, data?: Record<string, unknown>) =>
+    logs.push({ room, ev, data });
+
+  // 1) off skips loading entirely.
+  let loadCalls = 0;
+  const offRes = await resolveNoiseCancellation('room-off', 'off', {
+    loadModule: async () => {
+      loadCalls += 1;
+      return {};
+    },
+    log,
+  });
+  assert.deepEqual(offRes, { mode: 'off', requested: 'off' });
+  assert.equal(loadCalls, 0);
+  assert.equal(logs.length, 0);
+
+  // 2) bvc invokes BackgroundVoiceCancellation().
+  const bvcOpts = { moduleId: 'livekit.plugins.noise_cancellation', options: { modelPath: 'bvc.kef' } };
+  const bvcRes = await resolveNoiseCancellation('room-bvc', 'bvc', {
+    loadModule: async () => ({
+      BackgroundVoiceCancellation: () => bvcOpts,
+    }),
+    log,
+  });
+  assert.deepEqual(bvcRes, { mode: 'bvc', requested: 'bvc', noiseCancellation: bvcOpts });
+  assert.equal(logs.length, 0);
+
+  // 3) nc invokes NoiseCancellation().
+  const ncOpts = { moduleId: 'livekit.plugins.noise_cancellation', options: { modelPath: 'nc.kef' } };
+  const ncRes = await resolveNoiseCancellation('room-nc', 'nc', {
+    loadModule: async () => ({
+      NoiseCancellation: () => ncOpts,
+    }),
+    log,
+  });
+  assert.deepEqual(ncRes, { mode: 'nc', requested: 'nc', noiseCancellation: ncOpts });
+  assert.equal(logs.length, 0);
+
+  // 4) Dynamic import failure logs session_error(noise_cancel) and falls back to off.
+  const importFail = await resolveNoiseCancellation('room-import-fail', 'bvc', {
+    loadModule: async () => {
+      throw new Error('module not found');
+    },
+    log,
+  });
+  assert.deepEqual(importFail, { mode: 'off', requested: 'bvc' });
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0]!.ev, 'session_error');
+  assert.equal(logs[0]!.data?.source, 'noise_cancel');
+  assert.equal(logs[0]!.data?.mode, 'bvc');
+  assert.match(String((logs[0]!.data?.error as Error)?.message), /module not found/);
+
+  // 5) Filter constructor throwing logs session_error(noise_cancel) and falls back to off.
+  const ctorFail = await resolveNoiseCancellation('room-ctor-fail', 'nc', {
+    loadModule: async () => ({
+      NoiseCancellation: () => {
+        throw new Error('Resource not found: model.kef');
+      },
+    }),
+    log,
+  });
+  assert.deepEqual(ctorFail, { mode: 'off', requested: 'nc' });
+  assert.equal(logs.length, 2);
+  assert.equal(logs[1]!.ev, 'session_error');
+  assert.equal(logs[1]!.data?.source, 'noise_cancel');
+  assert.equal(logs[1]!.data?.mode, 'nc');
+  assert.match(String((logs[1]!.data?.error as Error)?.message), /Resource not found/);
+});
+
+test('startSessionWithNoiseCancel wires inputOptions.noiseCancellation, logs mode, and retries without it if start throws', async () => {
+  const logs: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+  const log = (room: string, ev: string, data?: Record<string, unknown>) =>
+    logs.push({ room, ev, data });
+  const fakeAgent = { id: 'agent' } as never;
+  const fakeRoom = { name: 'room-1' } as never;
+  const bvcOpts = { moduleId: 'livekit.plugins.noise_cancellation', options: { modelPath: 'bvc.kef' } };
+
+  // 1) Happy path: starts with inputOptions.noiseCancellation and logs noise_cancel(bvc).
+  const startCalls1: Array<Record<string, unknown>> = [];
+  const res1 = await startSessionWithNoiseCancel({
+    roomName: 'room-1',
+    session: {
+      start: async (opts) => {
+        startCalls1.push(opts as Record<string, unknown>);
+      },
+    },
+    agent: fakeAgent,
+    room: fakeRoom,
+    requestedMode: 'bvc',
+    loadModule: async () => ({ BackgroundVoiceCancellation: () => bvcOpts }),
+    log,
+  });
+  assert.deepEqual(res1, { mode: 'bvc', requested: 'bvc' });
+  assert.equal(startCalls1.length, 1);
+  assert.deepEqual(startCalls1[0]!.inputOptions, { noiseCancellation: bvcOpts });
+  assert.equal(logs.length, 1);
+  assert.deepEqual(logs[0], { room: 'room-1', ev: 'noise_cancel', data: { mode: 'bvc' } });
+
+  // 2) Filter throws inside session.start -> logs session_error(noise_cancel), retries without inputOptions, logs noise_cancel(off, fallback).
+  const startCalls2: Array<Record<string, unknown>> = [];
+  let attempt = 0;
+  const res2 = await startSessionWithNoiseCancel({
+    roomName: 'room-2',
+    session: {
+      start: async (opts) => {
+        attempt += 1;
+        startCalls2.push(opts as Record<string, unknown>);
+        if (attempt === 1) {
+          throw new Error('AudioFilter init failed');
+        }
+      },
+    },
+    agent: fakeAgent,
+    room: fakeRoom,
+    requestedMode: 'bvc',
+    loadModule: async () => ({ BackgroundVoiceCancellation: () => bvcOpts }),
+    log,
+  });
+  assert.deepEqual(res2, { mode: 'off', requested: 'bvc' });
+  assert.equal(startCalls2.length, 2);
+  assert.deepEqual(startCalls2[0]!.inputOptions, { noiseCancellation: bvcOpts });
+  assert.equal('inputOptions' in startCalls2[1]!, false);
+  assert.equal(logs.length, 3);
+  assert.equal(logs[1]!.ev, 'session_error');
+  assert.equal(logs[1]!.data?.source, 'noise_cancel');
+  assert.match(String((logs[1]!.data?.error as Error)?.message), /AudioFilter init failed/);
+  assert.deepEqual(logs[2], {
+    room: 'room-2',
+    ev: 'noise_cancel',
+    data: { mode: 'off', requested: 'bvc', fallback: true },
+  });
 });
 
 test('bindStoreCallRoom calls store setCallRoom once and guards against import or export failures', async () => {

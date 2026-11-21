@@ -9,6 +9,7 @@ import {
 } from '@livekit/agents';
 import * as google from '@livekit/agents-plugin-google';
 import {
+  type NoiseCancellationOptions,
   type Participant,
   type RemoteParticipant,
   type RemoteTrack,
@@ -17,7 +18,11 @@ import {
   type TrackPublication,
 } from '@livekit/rtc-node';
 import { calllog, installCrashLogging, startCallLog } from '../calllog.ts';
-import { loadConfig } from './config.ts';
+import {
+  buildAutomaticActivityDetection,
+  loadConfig,
+  type NoiseCancelMode,
+} from './config.ts';
 import {
   AppContextSender,
   type CameraStatusValue,
@@ -208,6 +213,125 @@ export async function warmCallMedia(
   }
 }
 
+export interface NoiseCancelModuleLike {
+  BackgroundVoiceCancellation?: () => NoiseCancellationOptions;
+  NoiseCancellation?: () => NoiseCancellationOptions;
+}
+
+export interface NoiseCancelResolution {
+  mode: NoiseCancelMode;
+  requested: NoiseCancelMode;
+  noiseCancellation?: NoiseCancellationOptions;
+}
+
+export async function resolveNoiseCancellation(
+  roomName: string,
+  requestedMode: NoiseCancelMode,
+  opts?: {
+    loadModule?: () => Promise<NoiseCancelModuleLike | null>;
+    log?: (room: string, ev: string, data?: Record<string, unknown>) => void;
+  },
+): Promise<NoiseCancelResolution> {
+  if (requestedMode === 'off') {
+    return { mode: 'off', requested: 'off' };
+  }
+
+  const logFn = opts?.log ?? calllog;
+  const loadModule =
+    opts?.loadModule ??
+    (async () => {
+      const modName = '@livekit/noise-cancellation-node';
+      return (await import(modName)) as NoiseCancelModuleLike;
+    });
+
+  try {
+    const mod = await loadModule();
+    const factoryName =
+      requestedMode === 'bvc' ? 'BackgroundVoiceCancellation' : 'NoiseCancellation';
+    const factory = mod?.[factoryName];
+    if (typeof factory !== 'function') {
+      throw new Error(`noise cancellation module does not export ${factoryName}`);
+    }
+    const noiseCancellation = factory();
+    if (!noiseCancellation || typeof noiseCancellation !== 'object') {
+      throw new Error(`${factoryName}() returned an invalid noise cancellation config`);
+    }
+    return {
+      mode: requestedMode,
+      requested: requestedMode,
+      noiseCancellation,
+    };
+  } catch (err) {
+    logFn(roomName, 'session_error', {
+      source: 'noise_cancel',
+      mode: requestedMode,
+      error: err instanceof Error ? err : new Error(String(err)),
+    });
+    return { mode: 'off', requested: requestedMode };
+  }
+}
+
+export interface StartableSessionLike {
+  start: (opts: {
+    agent: voice.Agent;
+    room: JobContext['room'];
+    inputOptions?: { noiseCancellation?: NoiseCancellationOptions };
+  }) => Promise<void>;
+}
+
+export async function startSessionWithNoiseCancel(params: {
+  roomName: string;
+  session: StartableSessionLike;
+  agent: voice.Agent;
+  room: JobContext['room'];
+  requestedMode: NoiseCancelMode;
+  loadModule?: () => Promise<NoiseCancelModuleLike | null>;
+  log?: (room: string, ev: string, data?: Record<string, unknown>) => void;
+}): Promise<{ mode: NoiseCancelMode; requested: NoiseCancelMode }> {
+  const { roomName, session, agent, room, requestedMode } = params;
+  const logFn = params.log ?? calllog;
+  const resolved = await resolveNoiseCancellation(roomName, requestedMode, {
+    loadModule: params.loadModule,
+    log: logFn,
+  });
+
+  let activeMode: NoiseCancelMode = resolved.mode;
+  if (resolved.noiseCancellation) {
+    try {
+      await session.start({
+        agent,
+        room,
+        inputOptions: {
+          noiseCancellation: resolved.noiseCancellation,
+        },
+      });
+    } catch (err) {
+      logFn(roomName, 'session_error', {
+        source: 'noise_cancel',
+        mode: resolved.mode,
+        error: err instanceof Error ? err : new Error(String(err)),
+      });
+      activeMode = 'off';
+      await session.start({
+        agent,
+        room,
+      });
+    }
+  } else {
+    await session.start({
+      agent,
+      room,
+    });
+  }
+
+  logFn(roomName, 'noise_cancel', {
+    mode: activeMode,
+    ...(activeMode !== requestedMode ? { requested: requestedMode, fallback: true } : {}),
+  });
+
+  return { mode: activeMode, requested: requestedMode };
+}
+
 export default defineAgent({
   entry: async (ctx: JobContext) => {
     const config = loadConfig();
@@ -249,12 +373,7 @@ export default defineAgent({
         languageCodes: ['en-US'],
       },
       realtimeInputConfig: {
-        automaticActivityDetection: {
-          disabled: false,
-          startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH' as never,
-          endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH' as never,
-          silenceDurationMs: 500,
-        },
+        automaticActivityDetection: buildAutomaticActivityDetection(config.vad) as never,
       },
       toolBehavior: Behavior.NON_BLOCKING,
       toolResponseScheduling: FunctionResponseScheduling.WHEN_IDLE,
@@ -372,7 +491,12 @@ export default defineAgent({
       });
     });
 
+    let sessionStarted = false;
+
     session.on(voice.AgentSessionEventTypes.Close, (ev) => {
+      if (!sessionStarted) {
+        return;
+      }
       calllog(roomName, 'session_close', {
         reason: ev.reason,
         ...(ev.error ? { error: ev.error } : {}),
@@ -410,10 +534,14 @@ export default defineAgent({
       attributes: shopper.attributes,
     });
 
-    await session.start({
+    await startSessionWithNoiseCancel({
+      roomName,
+      session,
       agent,
       room: ctx.room,
+      requestedMode: config.noiseCancel,
     });
+    sessionStarted = true;
 
     // Fallback check in case session creation bypassed model.session.
     const liveRtSession =
@@ -426,6 +554,16 @@ export default defineAgent({
     } else if (!liveRtSession) {
       applyRealtimeSessionPatches(undefined, { room: roomName });
     }
+
+    calllog(roomName, 'vad_config', {
+      room: config.vad.room,
+      start: config.vad.startOfSpeechSensitivity,
+      end: config.vad.endOfSpeechSensitivity,
+      silence_ms: config.vad.silenceDurationMs,
+      ...(config.vad.prefixPaddingMs !== undefined
+        ? { prefix_ms: config.vad.prefixPaddingMs }
+        : {}),
+    });
 
     calllog(roomName, 'session_started', {
       face: false,
