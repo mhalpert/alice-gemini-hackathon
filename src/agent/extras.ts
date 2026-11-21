@@ -42,8 +42,15 @@ export interface RevealSequencerOptions {
   clearTimeoutFn?: (handle: TimerHandle) => void;
 }
 
+export interface SwapStudioRevealParams {
+  outfit: number;
+  pieceTitle?: string;
+  slot?: string;
+}
+
 export interface RevealSequencer {
   startStudio(params: StartRevealSequenceParams): void;
+  announceSwapStudioReady?(params: SwapStudioRevealParams): void;
   onExtraReady(
     outfit: number,
     kind: TryOnExtraKind,
@@ -125,24 +132,86 @@ export function shortenSettingPhrase(raw: string | null | undefined): string {
   return clipped.join(' ').replace(/[,;:]+$/, '');
 }
 
+export const SCENE_REVEAL_VARIANT_COUNT = 3;
+export const VIDEO_REVEAL_VARIANT_COUNT = 3;
+
+/**
+ * Returns one of three short (<14 words), varied scene-beat lines in Alice's
+ * New York friend voice, naming the occasion/place when known.
+ */
+export function buildSceneRevealLine(setting: string, variantIndex = 0): string {
+  const shortSetting = shortenSettingPhrase(setting);
+  const idx = ((Math.trunc(variantIndex) % SCENE_REVEAL_VARIANT_COUNT) + SCENE_REVEAL_VARIANT_COUNT) % SCENE_REVEAL_VARIANT_COUNT;
+  if (shortSetting) {
+    const lines = [
+      `Now picture it: you, walking into that ${shortSetting}.`,
+      `Okay wait, you at that ${shortSetting} is iconic.`,
+      `Hold on—this is literally your moment at that ${shortSetting}.`,
+    ];
+    return lines[idx]!;
+  }
+  const fallbackLines = [
+    'Now picture it: you, walking right into the room.',
+    'Okay wait, you stepping into that room is iconic.',
+    'Hold on—this is literally your main-character arrival.',
+  ];
+  return fallbackLines[idx]!;
+}
+
+/**
+ * Returns one of three short (<14 words), varied video-beat lines in Alice's
+ * New York friend voice, naming the occasion/place when known.
+ */
+export function buildVideoRevealLine(setting?: string, variantIndex = 0): string {
+  const shortSetting = shortenSettingPhrase(setting);
+  const idx = ((Math.trunc(variantIndex) % VIDEO_REVEAL_VARIANT_COUNT) + VIDEO_REVEAL_VARIANT_COUNT) % VIDEO_REVEAL_VARIANT_COUNT;
+  if (shortSetting) {
+    const lines = [
+      `Stop. Look at you move at that ${shortSetting}.`,
+      `Oh, I cannot—watch that walk at the ${shortSetting}.`,
+      `No, because look at you owning that ${shortSetting} in motion.`,
+    ];
+    return lines[idx]!;
+  }
+  const fallbackLines = [
+    'Stop. Look at you move.',
+    'Oh, I cannot—watch that walk in motion.',
+    'No, because look at you owning the whole room.',
+  ];
+  return fallbackLines[idx]!;
+}
+
 /**
  * Builds the one-line spoken instruction for Beat 2 (on-location scene still).
  */
-export function buildSceneRevealInstruction(setting: string): string {
+export function buildSceneRevealInstruction(setting: string, variantIndex = 0): string {
   const shortSetting = shortenSettingPhrase(setting);
+  const line = buildSceneRevealLine(setting, variantIndex);
   const settingPart = shortSetting
-    ? `naming the setting ("${shortSetting}") in a few words (like "and this is you at the ${shortSetting}")`
-    : 'naming the event setting in a few words from the occasion';
-  return `The on-location shot of them in this look just came up on screen. Give ONE short line in your voice as Alice saying this is them at the event, ${settingPart}. Do not invent any visual details and do not ask a question.`;
+    ? `naming "${shortSetting}"`
+    : 'naming the event from the occasion';
+  return `The on-location shot of them in this look just came up on screen. Give ONE short line in your voice as Alice (${settingPart}), like "${line}" Do not invent any visual details and do not ask a question.`;
 }
 
 /**
  * Builds the one-line spoken instruction for Beat 3 (short motion video).
  */
-export function buildVideoRevealInstruction(setting?: string): string {
+export function buildVideoRevealInstruction(setting?: string, variantIndex = 0): string {
   const shortSetting = shortenSettingPhrase(setting);
+  const line = buildVideoRevealLine(setting, variantIndex);
   const eventPart = shortSetting ? ` at the ${shortSetting}` : ' at the event';
-  return `The short video of them in this look just came up on screen. Give ONE short line in your voice as Alice saying this is them in motion${eventPart}. Do not invent any visual details and do not ask a question.`;
+  return `The short video of them in this look just came up on screen. Give ONE short line in your voice as Alice for them in motion${eventPart}, like "${line}" Do not invent any visual details and do not ask a question.`;
+}
+
+/**
+ * Builds the one-line spoken instruction when a post-swap studio try-on
+ * finishes and is revealed automatically on screen.
+ */
+export function buildSwapStudioRevealInstruction(pieceTitle?: string, slot?: string): string {
+  const cleanTitle = typeof pieceTitle === 'string' ? pieceTitle.trim() : '';
+  const cleanSlot = typeof slot === 'string' ? slot.trim() : '';
+  const pieceRef = cleanTitle || (cleanSlot ? `new ${cleanSlot}` : 'new piece');
+  return `The refreshed try-on with the ${pieceRef} just came up on screen. Give ONE short line in your voice as Alice saying the new piece is on them now. Do not replay any other view, do not invent visual details, and do not ask a question.`;
 }
 
 /**
@@ -177,7 +246,10 @@ export function createRevealSequencer(options: RevealSequencerOptions): RevealSe
   let disposed = false;
   let timer: TimerHandle | null = null;
   let active: ActiveSequence | null = null;
+  let pendingSwapAnnouncement: SwapStudioRevealParams | null = null;
   let syntheticToolCounter = 0;
+  let sceneVariantCursor = 0;
+  let videoVariantCursor = 0;
 
   const activeTools = new Set<string>();
 
@@ -201,6 +273,38 @@ export function createRevealSequencer(options: RevealSequencerOptions): RevealSe
 
   function isSpeechBlocked(): boolean {
     return agentState === 'speaking' || userState === 'speaking' || activeTools.size > 0;
+  }
+
+  function flushPendingSwapAnnouncement(): void {
+    if (disposed || !pendingSwapAnnouncement) return;
+    if (isSpeechBlocked()) return;
+
+    const announcement = pendingSwapAnnouncement;
+    pendingSwapAnnouncement = null;
+
+    let spoken = false;
+    try {
+      const instructions = buildSwapStudioRevealInstruction(
+        announcement.pieceTitle,
+        announcement.slot,
+      );
+      options.generateReply({ instructions });
+      spoken = true;
+    } catch (err) {
+      logFn(options.room, 'session_error', {
+        source: 'swap_reveal_beat',
+        outfit: announcement.outfit,
+        error: err instanceof Error ? err : new Error(String(err)),
+      });
+    }
+
+    logFn(options.room, 'reveal_beat', {
+      outfit: announcement.outfit,
+      kind: 'studio',
+      spoken,
+      waited_ms: 0,
+      swap: true,
+    });
   }
 
   function nextTargetBeat(seq: ActiveSequence): TryOnExtraKind | 'sizes' | null {
@@ -282,8 +386,8 @@ export function createRevealSequencer(options: RevealSequencerOptions): RevealSe
         if (!seq.shopperSpoke) {
           const instructions =
             target === 'scene'
-              ? buildSceneRevealInstruction(seq.setting)
-              : buildVideoRevealInstruction(seq.setting);
+              ? buildSceneRevealInstruction(seq.setting, sceneVariantCursor++)
+              : buildVideoRevealInstruction(seq.setting, videoVariantCursor++);
           try {
             options.generateReply({ instructions });
             spoken = true;
@@ -356,6 +460,7 @@ export function createRevealSequencer(options: RevealSequencerOptions): RevealSe
     startStudio(params: StartRevealSequenceParams): void {
       if (disposed) return;
       cancelTimer();
+      pendingSwapAnnouncement = null;
 
       const now = nowFn();
       const sizesAlreadyPrompted = Boolean(params.sizesAlreadyPrompted);
@@ -440,37 +545,55 @@ export function createRevealSequencer(options: RevealSequencerOptions): RevealSe
       evaluate();
     },
 
+    announceSwapStudioReady(params: SwapStudioRevealParams): void {
+      if (disposed) return;
+      pendingSwapAnnouncement = {
+        outfit: params.outfit,
+        ...(params.pieceTitle ? { pieceTitle: params.pieceTitle } : {}),
+        ...(params.slot ? { slot: params.slot } : {}),
+      };
+      flushPendingSwapAnnouncement();
+    },
+
     onAgentStateChanged(nextState: AgentStateValue): void {
       if (disposed) return;
       const prevState = agentState;
       agentState = nextState;
 
-      if (!active) return;
+      if (active) {
+        if (nextState === 'speaking') {
+          active.beatSpeechStarted = true;
+          active.sizesReadySince = null;
+          return;
+        }
 
-      if (nextState === 'speaking') {
-        active.beatSpeechStarted = true;
-        active.sizesReadySince = null;
-        return;
+        if (prevState === 'speaking' && active.beatSpeechStarted) {
+          active.beatSpeechDone = true;
+        }
+
+        evaluate();
       }
 
-      if (prevState === 'speaking' && active.beatSpeechStarted) {
-        active.beatSpeechDone = true;
+      if (nextState !== 'speaking') {
+        flushPendingSwapAnnouncement();
       }
-
-      evaluate();
     },
 
     onUserStateChanged(nextState: string): void {
       if (disposed) return;
       userState = nextState;
 
-      if (!active) return;
+      if (active) {
+        if (nextState === 'speaking') {
+          active.shopperSpoke = true;
+        }
 
-      if (nextState === 'speaking') {
-        active.shopperSpoke = true;
+        evaluate();
       }
 
-      evaluate();
+      if (nextState !== 'speaking') {
+        flushPendingSwapAnnouncement();
+      }
     },
 
     onShopperSpoke(): void {
@@ -506,9 +629,13 @@ export function createRevealSequencer(options: RevealSequencerOptions): RevealSe
       if (active) {
         evaluate();
       }
+      flushPendingSwapAnnouncement();
     },
 
     cancel(outfit?: number): void {
+      if (pendingSwapAnnouncement && (outfit === undefined || pendingSwapAnnouncement.outfit === outfit)) {
+        pendingSwapAnnouncement = null;
+      }
       if (!active) return;
       if (outfit !== undefined && active.outfit !== outfit) return;
       cancelTimer();
@@ -519,6 +646,7 @@ export function createRevealSequencer(options: RevealSequencerOptions): RevealSe
       disposed = true;
       cancelTimer();
       active = null;
+      pendingSwapAnnouncement = null;
       activeTools.clear();
     },
   };

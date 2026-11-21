@@ -37,6 +37,7 @@ const REQUIRED_TOOLS = [
   'pick_outfit',
   'show_on_me',
   'add_to_bag',
+  'remove_from_bag',
   'swap_piece',
   'show_product',
   'hide_product',
@@ -76,9 +77,9 @@ test('ALICE_SYSTEM_PROMPT mentions CALL STATE and CAMERA STATUS', () => {
   assert.match(ALICE_SYSTEM_PROMPT, /\bCAMERA STATUS\b/);
 });
 
-test('ALICE_SYSTEM_PROMPT word count is within 450 to 1320 words and avoids tables/emoji', () => {
+test('ALICE_SYSTEM_PROMPT word count is within 450 to 1380 words and avoids tables/emoji', () => {
   const words = countWords(ALICE_SYSTEM_PROMPT);
-  assert.ok(words >= 450 && words <= 1320, `expected word count between 450 and 1320, got ${words}`);
+  assert.ok(words >= 450 && words <= 1380, `expected word count between 450 and 1380, got ${words}`);
 
   assert.equal(ALICE_SYSTEM_PROMPT.includes('|---'), false, 'prompt must not contain markdown tables');
   assert.equal(/\p{Extended_Pictographic}/u.test(ALICE_SYSTEM_PROMPT), false, 'prompt must not contain emoji');
@@ -264,6 +265,15 @@ test('ALICE_SYSTEM_PROMPT encodes opening rack flow: one-sentence read, show_rac
   assert.match(ALICE_SYSTEM_PROMPT, /dressing for an occasion or looking for one specific item\?/i);
   assert.match(ALICE_SYSTEM_PROMPT, /camera off or cannot see them: skip the rack/i);
   assert.match(ALICE_SYSTEM_PROMPT, /specific item: use search_products/i);
+});
+
+test('ALICE_SYSTEM_PROMPT encodes polish10 rules: remove_from_bag, pick-based swaps, and loud-room silence', () => {
+  assert.match(ALICE_SYSTEM_PROMPT, /remove_from_bag.*what is left and the new total from the result, never before it/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /search_products.*ONE specific result.*swap_piece with pick/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never recommend a product not from a tool result/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /unclear or background noise, stay silent and wait/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never say audio was garbled/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /at most once in a row/i);
 });
 
 test('banned corporate phrases never appear in prompt, greeting, filler bits, silence check-ins, nudges, or tool result texts', () => {

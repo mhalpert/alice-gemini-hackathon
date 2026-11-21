@@ -14,8 +14,13 @@ import {
   DEFAULT_SCENE_HOLD_MS,
   DEFAULT_SIZES_FALLBACK_MS,
   DEFAULT_STUDIO_HOLD_MS,
+  SCENE_REVEAL_VARIANT_COUNT,
+  VIDEO_REVEAL_VARIANT_COUNT,
   buildSceneRevealInstruction,
+  buildSceneRevealLine,
+  buildSwapStudioRevealInstruction,
   buildVideoRevealInstruction,
+  buildVideoRevealLine,
   createRevealSequencer,
   shortenSettingPhrase,
 } from '../src/agent/extras.ts';
@@ -23,7 +28,9 @@ import type { PageSender } from '../src/agent/page.ts';
 import { createCallStateStore } from '../src/agent/state.ts';
 import {
   createAgentTools,
+  resolvePrewarmScene,
   resolveTryOnExtras,
+  type PrewarmSceneOptions,
   type TimerLike,
   type ToolDeps,
   type TryOnExtrasOptions,
@@ -903,4 +910,289 @@ test('shortenSettingPhrase, buildSceneRevealInstruction, and buildVideoRevealIns
   assert.match(videoInstr, /in motion/i);
   assert.match(videoInstr, /do not ask a question/i);
   assert.equal(videoInstr.includes('?'), false);
+});
+
+test('scene and video reveal lines have 3 varied <14-word NY lines rotated without repeats in one call', async () => {
+  const countWords = (s: string) => s.trim().split(/\s+/).filter(Boolean).length;
+
+  const sceneLines = Array.from({ length: SCENE_REVEAL_VARIANT_COUNT }, (_, i) =>
+    buildSceneRevealLine('a beach wedding in Capri', i),
+  );
+  const videoLines = Array.from({ length: VIDEO_REVEAL_VARIANT_COUNT }, (_, i) =>
+    buildVideoRevealLine('a beach wedding in Capri', i),
+  );
+
+  assert.equal(new Set(sceneLines).size, 3, 'scene beat must have 3 distinct lines');
+  assert.equal(new Set(videoLines).size, 3, 'video beat must have 3 distinct lines');
+
+  for (const line of [...sceneLines, ...videoLines]) {
+    assert.ok(countWords(line) < 14, `expected <14 words, got ${countWords(line)}: "${line}"`);
+    assert.match(line, /beach wedding in Capri/);
+    assert.equal(line.includes('?'), false);
+  }
+
+  for (let i = 0; i < 3; i++) {
+    const sFallback = buildSceneRevealLine('', i);
+    const vFallback = buildVideoRevealLine('', i);
+    assert.ok(countWords(sFallback) < 14, `fallback scene line too long: "${sFallback}"`);
+    assert.ok(countWords(vFallback) < 14, `fallback video line too long: "${vFallback}"`);
+  }
+
+  // Rotation across 3 reveals in a single call never repeats a scene or video line.
+  const clock = createFakeClock(60_000);
+  const replies: string[] = [];
+  const seq = createRevealSequencer({
+    room: 'r-rotate',
+    sendReveal: () => {},
+    generateReply: (opts) => replies.push(opts.instructions),
+    initialAgentState: 'listening',
+    initialUserState: 'listening',
+    log: () => {},
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+  });
+
+  const sceneReplies: string[] = [];
+  const videoReplies: string[] = [];
+  for (let outfit = 1; outfit <= 3; outfit++) {
+    replies.length = 0;
+    seq.startStudio({
+      outfit,
+      setting: 'beach wedding in Capri',
+      scene: 'ready',
+      video: 'ready',
+      sizesAlreadyPrompted: true,
+      getSizesInstruction: () => '',
+    });
+    await clock.advance(DEFAULT_STUDIO_HOLD_MS);
+    sceneReplies.push(replies[0]!);
+    await clock.advance(DEFAULT_SCENE_HOLD_MS);
+    videoReplies.push(replies[1]!);
+  }
+
+  assert.equal(new Set(sceneReplies).size, 3, 'scene reveal instruction must not repeat in one call');
+  assert.equal(new Set(videoReplies).size, 3, 'video reveal instruction must not repeat in one call');
+});
+
+test('swap on picked look instructs about twenty seconds, auto-reveals studio with one spoken line, skips auto scene/video, and allows show_on_me extras later', async () => {
+  const clock = createFakeClock(70_000);
+  const logs: RecordedLog[] = [];
+  const replies: Array<{ instructions: string }> = [];
+  const { page, calls } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-swap-reveal', log: () => {} });
+
+  let resolveSwapTryOn!: (v: { url: string; path: string; ms: number; id: string }) => void;
+  let tryOnSeq = 0;
+  let extrasCalls = 0;
+
+  const sequencer = createRevealSequencer({
+    room: 'r-swap-reveal',
+    sendReveal: (payload) => page.send('reveal', payload),
+    generateReply: (opts) => replies.push(opts),
+    initialAgentState: 'listening',
+    initialUserState: 'listening',
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+  });
+
+  const tools = createAgentTools({
+    room: 'r-swap-reveal',
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+    page,
+    state,
+    revealSequencer: sequencer,
+    deps: makeBaseDeps({
+      async tryOn(_jpeg, outfit) {
+        tryOnSeq += 1;
+        if (tryOnSeq <= 3) {
+          return {
+            url: `https://media.local/studio-${outfit.number}-initial.jpg`,
+            path: `/tmp/studio-${outfit.number}-initial.jpg`,
+            ms: 20,
+            id: `init-${tryOnSeq}`,
+          };
+        }
+        return new Promise((resolve) => {
+          resolveSwapTryOn = resolve;
+        });
+      },
+      async tryOnExtras() {
+        extrasCalls += 1;
+        return new Promise<TryOnExtrasResult>(() => {});
+      },
+      async swapPiece(outfit, slot, _request) {
+        const replacement = {
+          slot,
+          why: 'Sleeker heel.',
+          item: makeItem({
+            id: 'shoe-new-swap',
+            variant_id: 'var-shoe-new',
+            title: 'Metallic Kitten Heel',
+            price: 115,
+            sizes: ['7', '8', '9'],
+          }),
+        };
+        const pieces = outfit.pieces.map((p) => (p.slot === slot ? replacement : p));
+        const total = pieces.reduce((s, p) => s + p.item.price, 0);
+        return { outfit: { ...outfit, pieces, total }, piece: replacement };
+      },
+      async addToBag(bagOutfit, sizes) {
+        return {
+          carts: [
+            {
+              store: 'Everlane',
+              store_domain: 'everlane.myshopify.com',
+              cart_id: 'cart-1',
+              continue_url: 'https://everlane.example/cart/1',
+              total_usd: bagOutfit.total,
+              added: bagOutfit.pieces.map((p) => ({
+                variant_id: p.item.variant_id,
+                title: p.item.title,
+                size: sizes[p.slot.toLowerCase()] ?? 'M',
+              })),
+              not_added: [],
+              ms: 10,
+            },
+          ],
+          summary: 'Added look.',
+          total_usd: bagOutfit.total,
+        };
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'women' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute(
+    { occasion: 'beach wedding', where: 'Capri', budget_usd: 350 },
+    fakeToolOpts('b1'),
+  );
+  await flushMicrotasks();
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+  assert.equal(extrasCalls, 1, 'initial pick starts extras once');
+
+  // Bag Look 1 so we also verify polish9 NOT IN THE BAG YET prefix is preserved!
+  await tools.add_to_bag.execute({ outfit: 1, sizes: { top: 'M', shoes: '8' } }, fakeToolOpts('bag1'));
+
+  calls.length = 0;
+  replies.length = 0;
+  const swapRes = await tools.swap_piece.execute(
+    { slot: 'shoes', request: 'metallic kitten heels' },
+    fakeToolOpts('sw1'),
+  );
+
+  // Result starts with NOT IN THE BAG YET (polish9), names exact product, and gives the ~20s instruction!
+  assert.equal(swapRes.startsWith('NOT IN THE BAG YET:'), true);
+  assert.match(swapRes, /Metallic Kitten Heel/);
+  assert.match(swapRes, /about twenty seconds/i);
+  assert.equal(calls.some((c) => c.action === 'reveal'), false, 'must not reveal before refreshed try-on is ready');
+  assert.equal(extrasCalls, 1, 'swap must NOT auto-start tryOnExtras');
+
+  // Refreshed try-on finishes -> auto-reveals studio on page + speaks one short line + still NO auto extras!
+  resolveSwapTryOn({
+    url: 'https://media.local/studio-1-swapped.jpg',
+    path: '/tmp/studio-1-swapped.jpg',
+    ms: 19_500,
+    id: 'swap-1',
+  });
+  await flushMicrotasks();
+
+  assert.deepEqual(
+    calls.filter((c) => c.action === 'tryOnReady' || c.action === 'reveal'),
+    [
+      { action: 'tryOnReady', payload: { outfit: 1, url: 'https://media.local/studio-1-swapped.jpg' } },
+      { action: 'reveal', payload: { outfit: 1, url: 'https://media.local/studio-1-swapped.jpg' } },
+    ],
+  );
+  assert.equal(state.get().revealsDone.includes(1), true);
+  assert.equal(replies.length, 1, 'must speak exactly one short studio line after swap try-on finishes');
+  assert.match(replies[0]!.instructions, /Metallic Kitten Heel/);
+  assert.match(replies[0]!.instructions, /new piece is on/i);
+  assert.equal(replies[0]!.instructions.includes('?'), false);
+  assert.equal(extrasCalls, 1, '3b: swap try-on completion must NOT auto-make scene or video');
+
+  // Advancing clock does not replay scene/video beats or sizes prompt.
+  await clock.advance(30_000);
+  assert.equal(replies.length, 1);
+
+  // If shopper explicitly asks for show_on_me on the swapped look, extras may start then (3b).
+  await tools.show_on_me.execute({ outfit: 1 }, fakeToolOpts('show-after-swap'));
+  assert.equal(extrasCalls, 2, 'explicit show_on_me on swapped look may start scene/video extras');
+
+  // Direct helper check.
+  const swapInstr = buildSwapStudioRevealInstruction('Linen Shirt', 'top');
+  assert.match(swapInstr, /Linen Shirt/);
+  assert.equal(swapInstr.includes('?'), false);
+});
+
+test('prewarmScene runs once per look on try-on ready with brief/weather, swallows errors, logs scene_prewarm, and skips swaps', async () => {
+  assert.equal(resolvePrewarmScene({}), undefined);
+  assert.equal(resolvePrewarmScene(null), undefined);
+
+  const logs: RecordedLog[] = [];
+  const { page } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-prewarm', log: () => {} });
+  const prewarmCalls: Array<{ studioPath: string; outfitNum: number; opts: PrewarmSceneOptions }> = [];
+
+  const tools = createAgentTools({
+    room: 'r-prewarm',
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    page,
+    state,
+    deps: makeBaseDeps({
+      tryOnExtras: null,
+      async forecast() {
+        return { ok: true, line: '76F and sunny in Capri' };
+      },
+      async prewarmScene(studio, outfit, opts) {
+        prewarmCalls.push({ studioPath: studio.path, outfitNum: outfit.number ?? 0, opts });
+        if (outfit.number === 2) {
+          throw new Error('prewarm boom should be swallowed');
+        }
+      },
+      async swapPiece(outfit, slot) {
+        const replacement = {
+          slot,
+          why: 'Fresh option.',
+          item: makeItem({ id: 'sw-item', variant_id: 'v-sw', title: 'Swapped Heel', price: 95 }),
+        };
+        const pieces = outfit.pieces.map((p) => (p.slot === slot ? replacement : p));
+        return { outfit: { ...outfit, pieces, total: 215 }, piece: replacement };
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'women' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute(
+    { occasion: 'beach wedding', where: 'Capri', when: 'Saturday', budget_usd: 400 },
+    fakeToolOpts('b1'),
+  );
+  await flushMicrotasks();
+
+  assert.equal(prewarmCalls.length, 3, 'prewarmScene must run once per look when try-on becomes ready');
+  assert.deepEqual(
+    prewarmCalls.map((c) => c.outfitNum).sort(),
+    [1, 2, 3],
+  );
+  assert.equal(prewarmCalls[0]!.studioPath, '/tmp/studio-1.jpg');
+  assert.deepEqual(prewarmCalls[0]!.opts, {
+    occasion: 'beach wedding',
+    where: 'Capri',
+    when: 'Saturday',
+    weather: '76F and sunny in Capri',
+  });
+  assert.equal(logs.filter((l) => l.ev === 'scene_prewarm').length, 3);
+  assert.equal(state.get().tryOn[2]?.status, 'ready', 'prewarm error must never break try-on ready state');
+
+  // Swap on Look 1 must NOT call prewarmScene.
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+  await tools.swap_piece.execute({ slot: 'shoes', request: 'gold heels' }, fakeToolOpts('sw1'));
+  await flushMicrotasks();
+
+  assert.equal(prewarmCalls.length, 3, 'prewarmScene must NOT run after swaps');
 });
