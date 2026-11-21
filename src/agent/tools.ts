@@ -1,12 +1,11 @@
 import { llm } from '@livekit/agents';
 import { z } from 'zod';
 import { buildOutfits as defaultBuildOutfits, swapPiece as defaultSwapPiece } from '../brain/index.ts';
-import type { BuildOptions, SwapResult } from '../brain/index.ts';
+import type { BuildOptions, SwapOptions, SwapResult } from '../brain/index.ts';
 import { calllog } from '../calllog.ts';
-import {
-  outfitCollage as defaultOutfitCollage,
-  productImages as defaultProductImages,
-} from '../media/index.ts';
+import * as defaultMediaModule from '../media/index.ts';
+import type { SearchOpts } from '../store/catalog.ts';
+import type { BagLineAdded, BagLineNotAdded } from '../store/index.ts';
 import { tryOn as defaultTryOn } from '../tryon.ts';
 import type {
   BagLine,
@@ -68,21 +67,34 @@ export interface TimerLike {
 }
 
 export interface StoreModuleLike {
+  searchMixed?: (
+    query: string,
+    gender: Gender,
+    opts?: SearchOpts,
+  ) => Promise<SearchResult>;
   search?: (
     query: string,
     gender: Gender,
-    opts?: { limit?: number; maxPrice?: number },
+    opts?: SearchOpts,
   ) => Promise<SearchResult>;
   addToBag?: (
     outfit: Outfit,
     sizes: Record<string, string>,
     gender: Gender,
   ) => Promise<BagOut>;
+  productImages?: (item: Item) => Promise<string[]>;
+  setCallRoom?: (room: string | null) => void;
 }
 
 export interface ToolDeps {
   buildOutfits?: (brief: Brief, opts?: BuildOptions) => Promise<BuildResult>;
-  swapPiece?: (outfit: Outfit, slot: string, request: string, brief: Brief) => Promise<SwapResult>;
+  swapPiece?: (
+    outfit: Outfit,
+    slot: string,
+    request: string,
+    brief: Brief,
+    opts?: SwapOptions,
+  ) => Promise<SwapResult>;
   outfitCollage?: (outfit: Outfit, label?: string) => Promise<string | null>;
   productImages?: (item: Item) => Promise<string[]>;
   tryOn?: (
@@ -93,7 +105,7 @@ export interface ToolDeps {
   searchProducts?: (
     query: string,
     gender: Gender,
-    opts?: { limit?: number; maxPrice?: number },
+    opts?: SearchOpts,
   ) => Promise<SearchResult>;
   addToBag?: (
     outfit: Outfit,
@@ -240,7 +252,12 @@ function findPieceForCartEntry(
   variantId: string,
   title: string | undefined,
   store: string,
+  itemId?: string,
 ): Piece | undefined {
+  if (itemId) {
+    const byId = outfit.pieces.find((p) => p.item.id === itemId);
+    if (byId) return byId;
+  }
   for (const p of outfit.pieces) {
     if (p.item.variant_id === variantId) return p;
     if (p.item.variants_by_size && Object.values(p.item.variants_by_size).includes(variantId)) {
@@ -259,6 +276,20 @@ function findPieceForCartEntry(
 }
 
 /**
+ * Returns true only when the store created at least one real cart (cart_id or continue_url)
+ * containing at least one added line.
+ */
+export function hasRealCart(bagOut: BagOut): boolean {
+  return (bagOut.carts ?? []).some(
+    (cart) =>
+      ((typeof cart.cart_id === 'string' && cart.cart_id.trim().length > 0) ||
+        (typeof cart.continue_url === 'string' && cart.continue_url.trim().length > 0)) &&
+      Array.isArray(cart.added) &&
+      cart.added.length > 0,
+  );
+}
+
+/**
  * Converts a store `BagOut` into the page's `bagReady` RPC payload.
  */
 export function bagOutToPagePayload(
@@ -271,25 +302,48 @@ export function bagOutToPagePayload(
 
   for (const cart of bagOut.carts) {
     const added: BagLine[] = (cart.added ?? []).map((entry) => {
-      const piece = findPieceForCartEntry(outfit, entry.variant_id, entry.title, cart.store);
-      const slot = piece?.slot ?? '';
-      const fallbackSize = slot ? (sizes[slot.toLowerCase()] ?? sizes[normalizeSlotKey(slot)] ?? null) : null;
+      const ext = entry as Partial<BagLineAdded>;
+      const piece = findPieceForCartEntry(
+        outfit,
+        entry.variant_id,
+        entry.title,
+        cart.store,
+        ext.item_id,
+      );
+      const slot = ext.slot || piece?.slot || '';
+      const fallbackSize = slot
+        ? (sizes[slot.toLowerCase()] ?? sizes[normalizeSlotKey(slot)] ?? null)
+        : null;
       return {
         title: entry.title || piece?.item.title || 'Item',
         slot,
-        image: piece?.item.image ?? '',
-        price: piece?.item.price ?? 0,
+        image: ext.image || piece?.item.image || '',
+        price:
+          typeof ext.price === 'number' && Number.isFinite(ext.price)
+            ? ext.price
+            : (piece?.item.price ?? 0),
         size: entry.size !== undefined ? entry.size : fallbackSize,
       };
     });
 
     const not_added: BagLine[] = (cart.not_added ?? []).map((entry) => {
-      const piece = findPieceForCartEntry(outfit, entry.variant_id, entry.title, cart.store);
+      const ext = entry as Partial<BagLineNotAdded>;
+      const piece = findPieceForCartEntry(
+        outfit,
+        entry.variant_id,
+        entry.title,
+        cart.store,
+        ext.item_id,
+      );
       return {
         title: entry.title || piece?.item.title || 'Item',
-        slot: piece?.slot ?? '',
-        image: piece?.item.image ?? '',
-        price: piece?.item.price ?? 0,
+        slot: ext.slot || piece?.slot || '',
+        image: ext.image || piece?.item.image || '',
+        price:
+          typeof ext.price === 'number' && Number.isFinite(ext.price)
+            ? ext.price
+            : (piece?.item.price ?? 0),
+        ...(ext.size !== undefined ? { size: ext.size } : {}),
         reason: entry.reason,
       };
     });
@@ -482,8 +536,17 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
   const buildOutfitsFn = options.deps?.buildOutfits ?? defaultBuildOutfits;
   const swapPieceFn = options.deps?.swapPiece ?? defaultSwapPiece;
-  const outfitCollageFn = options.deps?.outfitCollage ?? defaultOutfitCollage;
-  const productImagesFn = options.deps?.productImages ?? defaultProductImages;
+  const outfitCollageFn =
+    options.deps?.outfitCollage ??
+    (typeof defaultMediaModule.outfitCollage === 'function'
+      ? defaultMediaModule.outfitCollage
+      : async () => null);
+  const mediaProductImagesFn =
+    options.deps && 'productImages' in options.deps
+      ? options.deps.productImages
+      : typeof defaultMediaModule.productImages === 'function'
+        ? defaultMediaModule.productImages
+        : undefined;
   const tryOnFn = options.deps?.tryOn ?? defaultTryOn;
   const loadStoreModuleFn = options.deps?.loadStoreModule ?? defaultLoadStoreModule;
 
@@ -816,7 +879,10 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           startBackgroundMediaForLook(numbered);
         };
 
-        const result = await buildOutfitsFn(brief, { onOutfit: handleOutfit });
+        const result = await buildOutfitsFn(brief, {
+          onOutfit: handleOutfit,
+          room: options.room,
+        });
 
         for (const [idx, outfit] of (result.outfits ?? []).entries()) {
           handleOutfit(outfit, idx);
@@ -979,7 +1045,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         const targetSlot = existingPiece?.slot ?? slot;
         const started = nowFn();
 
-        const swapResult = await swapPieceFn(outfit, targetSlot, request, currentBrief());
+        const swapResult = await swapPieceFn(outfit, targetSlot, request, currentBrief(), {
+          room: options.room,
+        });
         const ms = Math.max(0, Math.round(nowFn() - started));
 
         const updatedOutfit: Outfit = { ...swapResult.outfit, number: lookNum };
@@ -1043,13 +1111,32 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         }
 
         let images: string[] = [];
-        try {
-          const fetched = await productImagesFn(piece.item);
-          if (Array.isArray(fetched)) {
-            images = fetched.filter((u): u is string => typeof u === 'string' && u.trim().length > 0);
+        if (typeof mediaProductImagesFn === 'function') {
+          try {
+            const fetched = await mediaProductImagesFn(piece.item);
+            if (Array.isArray(fetched)) {
+              images = fetched.filter(
+                (u): u is string => typeof u === 'string' && u.trim().length > 0,
+              );
+            }
+          } catch {
+            images = [];
           }
-        } catch {
-          images = [];
+        }
+        if (images.length === 0) {
+          try {
+            const storeMod = await loadStoreModuleFn();
+            if (typeof storeMod?.productImages === 'function') {
+              const storeFetched = await storeMod.productImages(piece.item);
+              if (Array.isArray(storeFetched)) {
+                images = storeFetched.filter(
+                  (u): u is string => typeof u === 'string' && u.trim().length > 0,
+                );
+              }
+            }
+          } catch {
+            images = [];
+          }
         }
         if (images.length === 0 && piece.item.image) {
           images = [piece.item.image];
@@ -1114,7 +1201,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         let searchFn = options.deps?.searchProducts;
         if (!searchFn) {
           const storeMod = await loadStoreModuleFn();
-          if (typeof storeMod?.search === 'function') {
+          if (typeof storeMod?.searchMixed === 'function') {
+            searchFn = storeMod.searchMixed;
+          } else if (typeof storeMod?.search === 'function') {
             searchFn = storeMod.search;
           }
         }
@@ -1124,7 +1213,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         }
 
         const gender: Gender = stateStore.get().department ?? 'women';
-        const searchOpts: { limit?: number; maxPrice?: number } = { limit: 8 };
+        const searchOpts: SearchOpts = { limit: 8 };
         if (max_price !== undefined) {
           searchOpts.maxPrice = max_price;
         }
@@ -1170,18 +1259,21 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
         const rememberedSizes = stateStore.get().sizes;
         const missingSlots: string[] = [];
-        const resolvedSizes: Record<string, string> = {};
+        const resolvedSizes: Record<string, string> = { ...rememberedSizes };
 
         for (const piece of outfit.pieces) {
           const slotLower = piece.slot.toLowerCase();
           const slotNorm = normalizeSlotKey(piece.slot);
-          const heard = rememberedSizes[slotLower] ?? rememberedSizes[slotNorm];
+          const heard =
+            rememberedSizes[slotLower] ??
+            rememberedSizes[slotNorm] ??
+            (slotNorm === 'dress' || slotNorm === 'layer' ? rememberedSizes.top : undefined);
 
           if (heard) {
             resolvedSizes[slotLower] = heard;
           }
 
-          if (Array.isArray(piece.item.sizes) && piece.item.sizes.length > 0 && !heard) {
+          if (Array.isArray(piece.item.sizes) && piece.item.sizes.length > 1 && !heard) {
             if (!missingSlots.includes(piece.slot)) {
               missingSlots.push(piece.slot);
             }
@@ -1209,9 +1301,12 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
         let addToBagFn = options.deps?.addToBag;
         let usedMock = false;
+        let storeImportFailed = false;
         if (!addToBagFn) {
           const storeMod = await loadStoreModuleFn();
-          if (typeof storeMod?.addToBag === 'function') {
+          if (storeMod === null) {
+            storeImportFailed = true;
+          } else if (typeof storeMod.addToBag === 'function') {
             addToBagFn = storeMod.addToBag;
           }
         }
@@ -1220,13 +1315,14 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         let bagOut: BagOut;
         if (addToBagFn) {
           bagOut = await addToBagFn(outfit, resolvedSizes, gender);
-        } else {
+        } else if (storeImportFailed) {
           usedMock = true;
           bagOut = mockAddToBag(outfit, resolvedSizes, gender);
+        } else {
+          return 'NOT DONE: Store shopping bag is not available right now. Do not claim the bag is ready.';
         }
 
         const bagPayload = bagOutToPagePayload(bagOut, outfit, resolvedSizes);
-        const reply = await page.send('bagReady', bagPayload);
 
         const notAdded: BagNotAdded[] = [];
         for (const store of bagPayload.stores) {
@@ -1238,6 +1334,53 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             });
           }
         }
+
+        const rawSummary = typeof bagOut.summary === 'string' ? bagOut.summary.trim() : '';
+        const isNotDoneSummary = /^NOT DONE:/i.test(rawSummary);
+
+        if (!usedMock && isNotDoneSummary) {
+          const afterPrefix = rawSummary.replace(/^NOT DONE:\s*/i, '').trim();
+          const notAddedLines = bagPayload.stores.flatMap((store) =>
+            store.not_added.map((line) => ({
+              title: line.title,
+              slot: line.slot,
+              reason: line.reason ?? '',
+            })),
+          );
+          const missingSizeLines = notAddedLines.filter((l) => /size/i.test(l.reason));
+          const targetLines = missingSizeLines.length > 0 ? missingSizeLines : notAddedLines;
+          const summaryMentionsAll =
+            afterPrefix.length > 0 &&
+            (targetLines.length === 0 ||
+              targetLines.every((l) =>
+                afterPrefix.toLowerCase().includes(l.title.toLowerCase()),
+              ));
+
+          if (summaryMentionsAll) {
+            const sentence = afterPrefix.endsWith('.') ? afterPrefix : `${afterPrefix}.`;
+            return `NOT DONE: ${sentence} Ask for just those in one question, then call add_to_bag again.`;
+          }
+          if (targetLines.length > 0) {
+            const pieceList = targetLines
+              .map((l) => (l.slot ? `${l.title} (${l.slot})` : l.title))
+              .join(', ');
+            return `NOT DONE: Still need sizes for: ${pieceList}. Ask for just those in one question, then call add_to_bag again.`;
+          }
+          return `NOT DONE: ${afterPrefix || 'Some pieces still need a size.'} Ask for the missing sizes in one question, then call add_to_bag again.`;
+        }
+
+        if (!usedMock && !hasRealCart(bagOut)) {
+          const skippedSummaries = notAdded.map(
+            (na) => `${na.title} at ${na.store} (${na.reason})`,
+          );
+          if (skippedSummaries.length > 0) {
+            return `NOT DONE: No store cart could be created. Not added: ${skippedSummaries.join('; ')}. Suggest the nearest size or a swap.`;
+          }
+          const reason = rawSummary ? ` ${rawSummary}` : '';
+          return `NOT DONE: No store cart could be created.${reason} Suggest trying another size or swapping a piece.`;
+        }
+
+        const reply = await page.send('bagReady', bagPayload);
 
         stateStore.dispatch({
           type: 'set_bag',

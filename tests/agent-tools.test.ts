@@ -12,6 +12,9 @@ import type {
   PageActions,
   SearchResult,
 } from '../src/types.ts';
+import type { BuildOptions, SwapOptions } from '../src/brain/index.ts';
+import type { SearchOpts } from '../src/store/catalog.ts';
+import type { BagLineAdded, BagLineNotAdded } from '../src/store/index.ts';
 import type { PageSender } from '../src/agent/page.ts';
 import { createCallStateStore } from '../src/agent/state.ts';
 import {
@@ -384,6 +387,7 @@ test('build_outfits requires department, caps budget at $10000, streams looks, s
   });
 
   let capturedBrief: Brief | null = null;
+  let capturedBuildOpts: BuildOptions | undefined;
   let tryOnReceivedJpeg: Buffer | null = null;
   const fakeSnap: CameraSnapshot = {
     jpeg: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
@@ -405,6 +409,7 @@ test('build_outfits requires department, caps budget at $10000, streams looks, s
     deps: makeFakeDeps({
       async buildOutfits(brief, opts) {
         capturedBrief = brief;
+        capturedBuildOpts = opts;
         return makeFakeDeps().buildOutfits!(brief, opts);
       },
       async tryOn(jpeg, outfit) {
@@ -436,8 +441,10 @@ test('build_outfits requires department, caps budget at $10000, streams looks, s
 
   // Slow working note sent immediately.
   assert.equal(notes.filter((n) => n.name === 'build_outfits').length, 2);
-  // Budget capped at 10000.
+  // Budget capped at 10000 and room forwarded to buildOutfits alongside onOutfit.
   assert.equal(capturedBrief!.budget_usd, 10_000);
+  assert.equal(capturedBuildOpts?.room, 'r-build');
+  assert.equal(typeof capturedBuildOpts?.onOutfit, 'function');
   assert.equal(state.get().budget.given, 10_000);
   assert.match(res, /capped at \$10000/i);
   assert.match(res, /now on screen/i);
@@ -642,6 +649,7 @@ test('swap_piece updates state, sends updateOutfit, restarts try-on & collage, a
   const state = createCallStateStore({ roomName: 'r-swap', log: () => {} });
   let tryOnCalls = 0;
   let collageCalls = 0;
+  let capturedSwapOpts: SwapOptions | undefined;
 
   const tools = createAgentTools({
     room: 'r-swap',
@@ -649,6 +657,10 @@ test('swap_piece updates state, sends updateOutfit, restarts try-on & collage, a
     page,
     state,
     deps: makeFakeDeps({
+      async swapPiece(outfit, slot, request, brief, opts) {
+        capturedSwapOpts = opts;
+        return makeFakeDeps().swapPiece!(outfit, slot, request, brief, opts);
+      },
       async tryOn(_jpeg, outfit) {
         tryOnCalls++;
         return { url: `https://media.local/tryon-${outfit.number}-v${tryOnCalls}.jpg`, path: '', ms: 5, id: `id-${tryOnCalls}` };
@@ -680,6 +692,7 @@ test('swap_piece updates state, sends updateOutfit, restarts try-on & collage, a
   assert.match(swapRes, /\$145/);
   assert.match(swapRes, /Saved \$15 on the swap/);
 
+  assert.equal(capturedSwapOpts?.room, 'r-swap', 'swapPiece must receive { room }');
   assert.ok(calls.some((c) => c.action === 'updateOutfit'));
   assert.equal(tryOnCalls, beforeTryOn + 1, 'swap must restart tryOn');
   assert.equal(collageCalls, beforeCollage + 1, 'swap must restart collage');
@@ -915,4 +928,362 @@ test('add_to_bag falls back to local mock when store module is missing', async (
   const bagPayload = bagCall!.payload as PageActions['bagReady'];
   assert.deepEqual(bagPayload.links, [], 'mock cart must have continue_url null (no links)');
   assert.equal(bagPayload.total, 160);
+});
+
+test('search_products prefers searchMixed when exported and falls back to search otherwise', async () => {
+  const { page, calls } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-search-mixed', log: () => {} });
+
+  let mixedCalls = 0;
+  let searchCalls = 0;
+  let capturedArgs: { query: string; gender: string; opts?: SearchOpts } | null = null;
+  const mixedItem = makeItem({ title: 'Mixed Linen Overshirt', price: 78, store: 'Kith' });
+
+  const toolsMixed = createAgentTools({
+    room: 'r-search-mixed',
+    log: () => {},
+    page,
+    state,
+    deps: makeFakeDeps({
+      async loadStoreModule() {
+        return {
+          async searchMixed(query, gender, opts): Promise<SearchResult> {
+            mixedCalls++;
+            capturedArgs = { query, gender, opts };
+            return { items: [mixedItem], source: 'live', ms: 22 };
+          },
+          async search(): Promise<SearchResult> {
+            searchCalls++;
+            return { items: [], source: 'empty', ms: 5 };
+          },
+        };
+      },
+    }),
+  });
+
+  await toolsMixed.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  const resMixed = await toolsMixed.search_products.execute(
+    { query: 'linen overshirt', max_price: 90 },
+    fakeToolOpts('sm1'),
+  );
+
+  assert.equal(mixedCalls, 1);
+  assert.equal(searchCalls, 0);
+  assert.deepEqual(capturedArgs, {
+    query: 'linen overshirt',
+    gender: 'men',
+    opts: { limit: 8, maxPrice: 90 },
+  });
+  assert.match(resMixed, /Mixed Linen Overshirt/);
+  assert.ok(calls.some((c) => c.action === 'showSearch'));
+
+  // Without searchMixed, falls back to search.
+  const searchOnlyItem = makeItem({ title: 'Plain Cotton Tee', price: 28, store: 'Everlane' });
+  const toolsSearchOnly = createAgentTools({
+    room: 'r-search-only',
+    log: () => {},
+    page,
+    state,
+    deps: makeFakeDeps({
+      async loadStoreModule() {
+        return {
+          async search(_q, _g, _opts): Promise<SearchResult> {
+            searchCalls++;
+            return { items: [searchOnlyItem], source: 'live', ms: 18 };
+          },
+        };
+      },
+    }),
+  });
+
+  const resFallback = await toolsSearchOnly.search_products.execute(
+    { query: 'cotton tee' },
+    fakeToolOpts('sr1'),
+  );
+  assert.equal(searchCalls, 1);
+  assert.match(resFallback, /Plain Cotton Tee/);
+});
+
+test('add_to_bag honors store NOT DONE missing-size response without sending bagReady or marking state done', async () => {
+  const logs: RecordedLog[] = [];
+  const { page, calls } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-bag-notdone', log: () => {} });
+  let storeAddCalls = 0;
+
+  const tools = createAgentTools({
+    room: 'r-bag-notdone',
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    page,
+    state,
+    deps: makeFakeDeps({
+      async loadStoreModule() {
+        return {
+          async addToBag(_outfit, sizes): Promise<BagOut> {
+            storeAddCalls++;
+            // Simulate store discovering bottom (whose Item.sizes was []) actually needs a size.
+            if (!sizes.bottom) {
+              const addedLine: BagLineAdded = {
+                variant_id: 'var-top-m-live',
+                title: 'Merino Knit Polo - Espresso',
+                size: sizes.top ?? 'M',
+                slot: 'top',
+                image: 'https://cdn.shopify.com/polo.jpg',
+                price: 45,
+                item_id: 'item-top',
+              };
+              const missingLine: BagLineNotAdded = {
+                variant_id: 'var-bottom-1',
+                title: 'Pleated Wool Trouser - Charcoal',
+                size: null,
+                reason: 'no bottom size given (sizes: 30, 32, 34)',
+                slot: 'bottom',
+                image: 'https://cdn.shopify.com/trouser.jpg',
+                price: 60,
+                item_id: 'item-bottom-1',
+              };
+              return {
+                carts: [
+                  {
+                    store: 'Everlane',
+                    store_domain: 'everlane.myshopify.com',
+                    cart_id: null,
+                    continue_url: null,
+                    total_usd: null,
+                    added: [addedLine],
+                    not_added: [missingLine],
+                    ms: 0,
+                  },
+                ],
+                summary: 'NOT DONE: Pleated Wool Trouser - Charcoal (bottom) still need a size.',
+                total_usd: 0,
+              };
+            }
+
+            const topAdded: BagLineAdded = {
+              variant_id: 'var-top-m-resolved',
+              title: 'Merino Knit Polo - Espresso',
+              size: sizes.top,
+              slot: 'top',
+              image: 'https://cdn.shopify.com/polo-store.jpg',
+              price: 45,
+              item_id: 'item-top',
+            };
+            const bottomAdded: BagLineAdded = {
+              variant_id: 'var-bottom-32-resolved',
+              title: 'Pleated Wool Trouser - Charcoal',
+              size: sizes.bottom,
+              slot: 'bottom',
+              image: 'https://cdn.shopify.com/trouser-store.jpg',
+              price: 60,
+              item_id: 'item-bottom-1',
+            };
+            const shoesNotAdded: BagLineNotAdded = {
+              variant_id: 'var-shoes-10-resolved',
+              title: 'Minimal Leather Sneaker - White',
+              size: sizes.shoes,
+              reason: '10 is sold out; nearest 10.5',
+              slot: 'shoes',
+              image: 'https://cdn.shopify.com/sneaker-store.jpg',
+              price: 55,
+              item_id: 'item-shoes-1',
+            };
+            return {
+              carts: [
+                {
+                  store: 'Everlane',
+                  store_domain: 'everlane.myshopify.com',
+                  cart_id: 'cart-ev-real',
+                  continue_url: 'https://everlane.com/cart/c/real',
+                  total_usd: 105,
+                  added: [topAdded, bottomAdded],
+                  not_added: [],
+                  ms: 42,
+                },
+                {
+                  store: 'Steve Madden',
+                  store_domain: 'stevemadden.myshopify.com',
+                  cart_id: null,
+                  continue_url: null,
+                  total_usd: null,
+                  added: [],
+                  not_added: [shoesNotAdded],
+                  ms: 15,
+                },
+              ],
+              summary: 'Everlane: 2 added, $105.00. Minimal Leather Sneaker - White: 10 is sold out; nearest 10.5. 1 checkout link ready.',
+              total_usd: 105,
+            };
+          },
+        };
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute({ occasion: 'dinner', budget_usd: 200 }, fakeToolOpts('b1'));
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+  calls.length = 0;
+
+  // First call supplies top + shoes; store discovers bottom still needs a size.
+  const firstRes = await tools.add_to_bag.execute(
+    { sizes: { top: 'M', shoes: '10' } },
+    fakeToolOpts('bag-nd-1'),
+  );
+  assert.equal(storeAddCalls, 1);
+  assert.equal(firstRes.startsWith('NOT DONE:'), true);
+  assert.match(firstRes, /Pleated Wool Trouser - Charcoal \(bottom\)/);
+  assert.equal(
+    calls.some((c) => c.action === 'bagReady'),
+    false,
+    'bagReady must NOT be sent when store returns NOT DONE',
+  );
+  assert.equal(state.get().bag, null, 'flow state must NOT record bag as done');
+
+  // Second call supplies missing bottom size -> real cart created -> done!
+  const secondRes = await tools.add_to_bag.execute(
+    { sizes: { bottom: '32' } },
+    fakeToolOpts('bag-nd-2'),
+  );
+  assert.equal(storeAddCalls, 2);
+  assert.equal(secondRes.startsWith('NOT DONE:'), false);
+  assert.match(secondRes, /Bag is ready on screen/i);
+  assert.ok(state.get().bag, 'flow state must record bag once a real cart exists');
+
+  const bagCall = calls.find((c) => c.action === 'bagReady');
+  assert.ok(bagCall);
+  const payload = bagCall!.payload as PageActions['bagReady'];
+  assert.equal(payload.stores[0]!.added[0]!.image, 'https://cdn.shopify.com/polo-store.jpg');
+  assert.equal(payload.stores[0]!.added[1]!.slot, 'bottom');
+  assert.equal(payload.stores[0]!.added[1]!.size, '32');
+  assert.equal(payload.stores[1]!.not_added[0]!.size, '10');
+  assert.equal(payload.stores[1]!.not_added[0]!.image, 'https://cdn.shopify.com/sneaker-store.jpg');
+  assert.deepEqual(payload.links, [{ store: 'Everlane', url: 'https://everlane.com/cart/c/real' }]);
+});
+
+test('add_to_bag does not count as done when store creates no real cart (all sold out or cart failure)', async () => {
+  const { page, calls } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-bag-nocart', log: () => {} });
+
+  const tools = createAgentTools({
+    room: 'r-bag-nocart',
+    log: () => {},
+    page,
+    state,
+    deps: makeFakeDeps({
+      async loadStoreModule() {
+        return {
+          async addToBag(): Promise<BagOut> {
+            return {
+              carts: [
+                {
+                  store: 'Everlane',
+                  store_domain: 'everlane.myshopify.com',
+                  cart_id: null,
+                  continue_url: null,
+                  total_usd: null,
+                  added: [],
+                  not_added: [
+                    {
+                      variant_id: 'var-top-m',
+                      title: 'Merino Knit Polo - Espresso',
+                      reason: 'M is sold out; nearest L',
+                    },
+                  ],
+                  ms: 25,
+                },
+              ],
+              summary: 'Merino Knit Polo - Espresso: M is sold out; nearest L. 0 checkout links ready.',
+              total_usd: 0,
+            };
+          },
+        };
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute({ occasion: 'dinner', budget_usd: 200 }, fakeToolOpts('b1'));
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+  calls.length = 0;
+
+  const res = await tools.add_to_bag.execute(
+    { sizes: { top: 'M', shoes: '10' } },
+    fakeToolOpts('bag-nc-1'),
+  );
+  assert.equal(res.startsWith('NOT DONE:'), true);
+  assert.match(res, /M is sold out; nearest L/);
+  assert.equal(calls.some((c) => c.action === 'bagReady'), false);
+  assert.equal(state.get().bag, null);
+});
+
+test('show_product falls back to store productImages when media version is absent or returns empty', async () => {
+  const { page, calls } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-prod-store', log: () => {} });
+  let storeImgCalls = 0;
+
+  // 1) Media productImages returns empty -> uses store productImages.
+  const toolsEmptyMedia = createAgentTools({
+    room: 'r-prod-store',
+    log: () => {},
+    page,
+    state,
+    deps: makeFakeDeps({
+      async productImages() {
+        return [];
+      },
+      async loadStoreModule() {
+        return {
+          async productImages(item) {
+            storeImgCalls++;
+            return [item.image, 'https://store.cdn/polo-back.jpg'];
+          },
+        };
+      },
+    }),
+  });
+
+  await toolsEmptyMedia.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  await toolsEmptyMedia.build_outfits.execute({ occasion: 'dinner', budget_usd: 200 }, fakeToolOpts('b1'));
+  await toolsEmptyMedia.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+  calls.length = 0;
+
+  await toolsEmptyMedia.show_product.execute({ slot: 'top' }, fakeToolOpts('sp-store-1'));
+  assert.equal(storeImgCalls, 1);
+  const firstPayload = calls.find((c) => c.action === 'showProduct')!.payload as PageActions['showProduct'];
+  assert.deepEqual(firstPayload.images, [
+    'https://cdn.shopify.com/polo.jpg',
+    'https://store.cdn/polo-back.jpg',
+  ]);
+
+  // 2) Media productImages is absent (undefined) -> uses store productImages.
+  const toolsAbsentMedia = createAgentTools({
+    room: 'r-prod-absent',
+    log: () => {},
+    page,
+    state,
+    deps: makeFakeDeps({
+      productImages: undefined,
+      async loadStoreModule() {
+        return {
+          async productImages() {
+            storeImgCalls++;
+            return ['https://store.cdn/polo-front.jpg', 'https://store.cdn/polo-detail.jpg'];
+          },
+        };
+      },
+    }),
+  });
+
+  await toolsAbsentMedia.set_department.execute({ department: 'men' }, fakeToolOpts('d2'));
+  await toolsAbsentMedia.build_outfits.execute({ occasion: 'dinner', budget_usd: 200 }, fakeToolOpts('b2'));
+  await toolsAbsentMedia.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p2'));
+  calls.length = 0;
+
+  await toolsAbsentMedia.show_product.execute({ slot: 'top' }, fakeToolOpts('sp-store-2'));
+  assert.equal(storeImgCalls, 2);
+  const secondPayload = calls.find((c) => c.action === 'showProduct')!.payload as PageActions['showProduct'];
+  assert.deepEqual(secondPayload.images, [
+    'https://store.cdn/polo-front.jpg',
+    'https://store.cdn/polo-detail.jpg',
+  ]);
 });

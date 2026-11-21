@@ -129,6 +129,45 @@ export function attachCameraStatusWatcher(params: {
   };
 }
 
+export interface StoreRoomModuleLike {
+  setCallRoom?: (room: string | null) => void;
+}
+
+export async function bindStoreCallRoom(
+  roomName: string,
+  opts?: {
+    loadStoreModule?: () => Promise<StoreRoomModuleLike | null>;
+    log?: (room: string, ev: string, data?: Record<string, unknown>) => void;
+  },
+): Promise<boolean> {
+  const logFn = opts?.log ?? calllog;
+  const loadStore =
+    opts?.loadStoreModule ??
+    (async () => {
+      const modPath = '../store/index.ts';
+      return (await import(modPath)) as StoreRoomModuleLike;
+    });
+
+  try {
+    const storeMod = await loadStore();
+    if (typeof storeMod?.setCallRoom === 'function') {
+      storeMod.setCallRoom(roomName);
+      return true;
+    }
+    logFn(roomName, 'session_error', {
+      source: 'store_room',
+      error: new Error('store module does not export setCallRoom'),
+    });
+    return false;
+  } catch (err) {
+    logFn(roomName, 'session_error', {
+      source: 'store_room',
+      error: err instanceof Error ? err : new Error(String(err)),
+    });
+    return false;
+  }
+}
+
 export default defineAgent({
   entry: async (ctx: JobContext) => {
     const config = loadConfig();
@@ -136,6 +175,7 @@ export default defineAgent({
 
     startCallLog(roomName);
     const uninstallCrashLogging = installCrashLogging(roomName);
+    await bindStoreCallRoom(roomName);
 
     if (config.avatar !== 'none') {
       console.warn(`[alice] AVATAR="${config.avatar}" is not supported yet; running with avatar=none.`);
