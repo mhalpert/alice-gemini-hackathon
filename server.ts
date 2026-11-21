@@ -5,7 +5,7 @@ import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http
 import https from 'node:https';
 import net from 'node:net';
 import path from 'node:path';
-import { AccessToken, RoomAgentDispatch, RoomConfiguration } from 'livekit-server-sdk';
+import { AccessToken, RoomAgentDispatch, RoomConfiguration, RoomServiceClient } from 'livekit-server-sdk';
 import { calllog as defaultCalllog } from './src/calllog.ts';
 import type { Gender, Item, Outfit, Piece, SearchResult } from './src/types.ts';
 import type { ProductDetail, SearchOpts, SizeVariantOpts, SizeVariantResult } from './src/store/catalog.ts';
@@ -53,6 +53,21 @@ export type LibraryLoaderFn = () => Promise<{
   matchOccasionWords?: unknown;
 } | null>;
 
+export interface LiveKitRoomInfo {
+  name: string;
+  numParticipants?: number;
+}
+
+export interface LiveKitParticipantInfo {
+  identity: string;
+  kind?: number | string;
+}
+
+export interface ActiveCallsClient {
+  listRooms(): Promise<LiveKitRoomInfo[]>;
+  listParticipants(roomName: string): Promise<LiveKitParticipantInfo[]>;
+}
+
 export interface AliceBudgetOptions {
   storefrontMs?: number;
   productMs?: number;
@@ -60,6 +75,7 @@ export interface AliceBudgetOptions {
   looksMs?: number;
   looksDefaultMs?: number;
   bagMs?: number;
+  activeCallsMs?: number;
 }
 
 export interface AliceServerOptions {
@@ -72,6 +88,7 @@ export interface AliceServerOptions {
   budgets?: AliceBudgetOptions;
   remoteAddress?: (req: IncomingMessage) => string | undefined;
   now?: () => number;
+  activeCallsClient?: ActiveCallsClient;
 }
 
 export interface AliceHttpsServerOptions extends AliceServerOptions {
@@ -80,6 +97,15 @@ export interface AliceHttpsServerOptions extends AliceServerOptions {
 }
 
 const TOKEN_TTL_SECONDS = 1800;
+const ROOM_PREFIX = 'alice-';
+const SHOPPER_IDENTITY_PREFIX = 'shopper-';
+const AGENT_PARTICIPANT_KIND = 4; // ParticipantInfo_Kind.AGENT in @livekit/protocol
+const ACTIVE_CALLS_TIMEOUT_MS = 1500;
+const ACTIVE_CALLS_CACHE_MS = 2000;
+const ACTIVE_CALLS_RESERVATION_MS = 50_000;
+const ACTIVE_CALLS_RETRY_AFTER_S = 20;
+const ACTIVE_CALLS_FAIL_LOG_WINDOW_MS = 60_000;
+const CALL_IN_PROGRESS_MESSAGE = "There's already someone talking to Alice. Please stand by.";
 const MAX_TOKEN_BODY_BYTES = 4096;
 const MAX_BAG_BODY_BYTES = 16 * 1024;
 const BAG_RATE_LIMIT_MAX = 6;
@@ -519,6 +545,34 @@ function isTrustProxyEnabled(env: Record<string, string | undefined>): boolean {
   return env.ALICE_TRUST_PROXY?.trim() === '1';
 }
 
+function parseMaxActiveCalls(env: Record<string, string | undefined>): number | null {
+  const raw = env.ALICE_MAX_ACTIVE_CALLS;
+  if (raw === undefined) {
+    return env.AVATAR?.trim().toLowerCase() === 'tavus' ? 1 : null;
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  if (!Number.isInteger(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function toLiveKitHttpUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim();
+  if (trimmed.startsWith('wss://')) return `https://${trimmed.slice(6)}`;
+  if (trimmed.startsWith('ws://')) return `http://${trimmed.slice(5)}`;
+  return trimmed;
+}
+
+function isNonAgentParticipant(p: LiveKitParticipantInfo): boolean {
+  const id = typeof p?.identity === 'string' ? p.identity : '';
+  if (id.startsWith(SHOPPER_IDENTITY_PREFIX)) return true;
+  if (p?.kind === AGENT_PARTICIPANT_KIND || p?.kind === 'AGENT') return false;
+  const lower = id.toLowerCase();
+  if (lower.startsWith('agent-') || lower.startsWith('tavus')) return false;
+  return id.length > 0;
+}
+
 function parseMaxCallsPerHour(env: Record<string, string | undefined>): number | null {
   const raw = env.ALICE_MAX_CALLS_PER_HOUR;
   if (!raw || !raw.trim()) return null;
@@ -911,6 +965,12 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
   let hourlyTokenTimestamps: number[] = [];
   let proxyGlobalBrowseTimestamps: number[] = [];
   let lastOriginMismatchLogMs = -Infinity;
+  const activeCallReservations = new Map<string, number>();
+  let cachedLiveRooms: { fetchedAt: number; rooms: Set<string> } | null = null;
+  let inFlightLiveLookup: Promise<Set<string> | null> | null = null;
+  let lastActiveCallsFailLogMs = -Infinity;
+  let cachedRoomServiceKey = '';
+  let cachedRoomServiceClient: ActiveCallsClient | null = null;
   const inFlightLooks = new Map<string, Promise<Outfit[] | null>>();
   const logSink = opts.calllog ?? defaultCalllog;
   const loadLibraryFn = opts.loadLibrary ?? defaultLoadLibrary;
@@ -920,6 +980,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
   const looksBudgetMs = opts.budgets?.looksMs ?? LOOKS_BUDGET_MS;
   const looksDefaultBudgetMs = opts.budgets?.looksDefaultMs ?? LOOKS_DEFAULT_BUDGET_MS;
   const bagBudgetMs = opts.budgets?.bagMs ?? BAG_BUDGET_MS;
+  const activeCallsTimeoutMs = opts.budgets?.activeCallsMs ?? ACTIVE_CALLS_TIMEOUT_MS;
 
   const searchMixedFn = opts.store?.searchMixed ?? defaultSearchMixed;
   const searchFn = opts.store?.search ?? defaultSearch;
@@ -1108,6 +1169,110 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
     hourlyTokenTimestamps.push(now);
   }
 
+  function getActiveCallsClient(
+    livekitUrl: string,
+    apiKey: string,
+    apiSecret: string,
+  ): ActiveCallsClient {
+    if (opts.activeCallsClient) {
+      return opts.activeCallsClient;
+    }
+    const httpUrl = toLiveKitHttpUrl(livekitUrl);
+    const key = `${httpUrl}\0${apiKey}\0${apiSecret}`;
+    if (!cachedRoomServiceClient || cachedRoomServiceKey !== key) {
+      const rsc = new RoomServiceClient(httpUrl, apiKey, apiSecret);
+      cachedRoomServiceClient = {
+        listRooms: () => rsc.listRooms(),
+        listParticipants: (roomName: string) => rsc.listParticipants(roomName),
+      };
+      cachedRoomServiceKey = key;
+    }
+    return cachedRoomServiceClient;
+  }
+
+  async function lookupLiveActiveRooms(
+    livekitUrl: string,
+    apiKey: string,
+    apiSecret: string,
+  ): Promise<Set<string> | null> {
+    const now = nowFn();
+    if (cachedLiveRooms && now - cachedLiveRooms.fetchedAt < ACTIVE_CALLS_CACHE_MS) {
+      return cachedLiveRooms.rooms;
+    }
+    if (inFlightLiveLookup) {
+      return inFlightLiveLookup;
+    }
+
+    const logLookupFailure = (reason: string): void => {
+      const failNow = nowFn();
+      if (failNow - lastActiveCallsFailLogMs >= ACTIVE_CALLS_FAIL_LOG_WINDOW_MS) {
+        lastActiveCallsFailLogMs = failNow;
+        logServerEvent('active_calls_lookup_failed', { reason });
+      }
+    };
+
+    const run = (async (): Promise<Set<string> | null> => {
+      try {
+        const client = getActiveCallsClient(livekitUrl, apiKey, apiSecret);
+        const query = (async (): Promise<Set<string>> => {
+          const rooms = await client.listRooms();
+          const candidateNames = (Array.isArray(rooms) ? rooms : [])
+            .filter(
+              (r) =>
+                r &&
+                typeof r.name === 'string' &&
+                r.name.startsWith(ROOM_PREFIX) &&
+                (typeof r.numParticipants !== 'number' || r.numParticipants >= 1),
+            )
+            .map((r) => r.name);
+
+          const activeNames = new Set<string>();
+          if (candidateNames.length > 0) {
+            const participantLists = await Promise.all(
+              candidateNames.map(async (roomName) => ({
+                roomName,
+                participants: await client.listParticipants(roomName),
+              })),
+            );
+            for (const { roomName, participants } of participantLists) {
+              if (Array.isArray(participants) && participants.some(isNonAgentParticipant)) {
+                activeNames.add(roomName);
+              }
+            }
+          }
+          return activeNames;
+        })();
+
+        const raced = await raceWithBudget(query, activeCallsTimeoutMs);
+        if (raced.timedOut) {
+          logLookupFailure('timeout');
+          return null;
+        }
+        cachedLiveRooms = { fetchedAt: nowFn(), rooms: raced.value };
+        return raced.value;
+      } catch (err) {
+        logLookupFailure(err instanceof Error ? err.message.slice(0, 120) : 'error');
+        return null;
+      } finally {
+        if (inFlightLiveLookup === run) {
+          inFlightLiveLookup = null;
+        }
+      }
+    })();
+
+    inFlightLiveLookup = run;
+    return run;
+  }
+
+  function pruneReservations(liveRooms: Set<string> | null): void {
+    const now = nowFn();
+    for (const [roomName, expiresAt] of activeCallReservations) {
+      if (expiresAt <= now || (liveRooms !== null && liveRooms.has(roomName))) {
+        activeCallReservations.delete(roomName);
+      }
+    }
+  }
+
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const startMs = Date.now();
     const method = (req.method ?? 'GET').toUpperCase();
@@ -1224,11 +1389,9 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         }
 
         const expectedPasscode = env.ALICE_PASSCODE;
-        const isLocalCaller =
-          !trustProxy &&
-          isLoopbackHost(socketAddr) &&
-          !proxied &&
-          isLocalHostHeader(req.headers.host);
+        const isDirectLocal =
+          isLoopbackHost(socketAddr) && !proxied && isLocalHostHeader(req.headers.host);
+        const isLocalCaller = !trustProxy && isDirectLocal;
         if (!expectedPasscode && !isLocalCaller) {
           if (proxied && !warnedProxiedNoPasscode) {
             warnedProxiedNoPasscode = true;
@@ -1358,20 +1521,65 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         }
 
         const maxCallsPerHour = parseMaxCallsPerHour(env);
+        let bypassedHourlyCap = false;
         const hourlyBefore = checkHourlyCap(maxCallsPerHour);
         if (!hourlyBefore.allowed) {
-          logServerEvent('token_refused', { reason: 'hourly_cap', ...addrLog });
-          sendJson(
-            res,
-            429,
-            { error: 'busy', retry_after_s: hourlyBefore.retryAfterS },
-            { 'Retry-After': String(hourlyBefore.retryAfterS), 'Cache-Control': 'no-store' },
-          );
-          return;
+          if (isDirectLocal) {
+            bypassedHourlyCap = true;
+            logServerEvent('hourly_cap_bypass_local', { ...addrLog });
+          } else {
+            logServerEvent('token_refused', { reason: 'hourly_cap', ...addrLog });
+            sendJson(
+              res,
+              429,
+              { error: 'busy', retry_after_s: hourlyBefore.retryAfterS },
+              { 'Retry-After': String(hourlyBefore.retryAfterS), 'Cache-Control': 'no-store' },
+            );
+            return;
+          }
         }
 
-        const room = `alice-${crypto.randomBytes(5).toString('hex')}`;
-        const identity = `shopper-${crypto.randomBytes(4).toString('hex')}`;
+        const room = `${ROOM_PREFIX}${crypto.randomBytes(5).toString('hex')}`;
+        const maxActiveCalls = parseMaxActiveCalls(env);
+        let reservedRoom = false;
+
+        if (maxActiveCalls !== null) {
+          if (isDirectLocal) {
+            logServerEvent('active_calls_bypass_local', { ...addrLog });
+            // Still reserve the slot synchronously so tunnel callers cannot interrupt the local operator's call.
+            pruneReservations(null);
+            activeCallReservations.set(room, nowFn() + ACTIVE_CALLS_RESERVATION_MS);
+            reservedRoom = true;
+          } else {
+            const liveRooms = await lookupLiveActiveRooms(url, apiKey, apiSecret);
+            // Synchronous check-and-reserve critical section (no await between check and set).
+            pruneReservations(liveRooms);
+            const liveCount = liveRooms ? liveRooms.size : 0;
+            const activeCount = liveCount + activeCallReservations.size;
+            if (activeCount >= maxActiveCalls) {
+              logServerEvent('token_refused', { reason: 'call_in_progress', ...addrLog });
+              sendJson(
+                res,
+                429,
+                {
+                  error: 'busy',
+                  reason: 'call_in_progress',
+                  message: CALL_IN_PROGRESS_MESSAGE,
+                  retry_after_s: ACTIVE_CALLS_RETRY_AFTER_S,
+                },
+                {
+                  'Retry-After': String(ACTIVE_CALLS_RETRY_AFTER_S),
+                  'Cache-Control': 'no-store',
+                },
+              );
+              return;
+            }
+            activeCallReservations.set(room, nowFn() + ACTIVE_CALLS_RESERVATION_MS);
+            reservedRoom = true;
+          }
+        }
+
+        const identity = `${SHOPPER_IDENTITY_PREFIX}${crypto.randomBytes(4).toString('hex')}`;
         const trimmedName = typeof body.name === 'string' ? body.name.trim().slice(0, 40) : '';
         const displayName = trimmedName || 'Shopper';
 
@@ -1392,18 +1600,35 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
           agents: [new RoomAgentDispatch({ agentName: agent })],
         });
 
-        const token = await at.toJwt();
+        let token: string;
+        try {
+          token = await at.toJwt();
+        } catch (err) {
+          if (reservedRoom) {
+            activeCallReservations.delete(room);
+          }
+          throw err;
+        }
 
         const hourlyAfter = checkHourlyCap(maxCallsPerHour);
         if (!hourlyAfter.allowed) {
-          logServerEvent('token_refused', { reason: 'hourly_cap', ...addrLog });
-          sendJson(
-            res,
-            429,
-            { error: 'busy', retry_after_s: hourlyAfter.retryAfterS },
-            { 'Retry-After': String(hourlyAfter.retryAfterS), 'Cache-Control': 'no-store' },
-          );
-          return;
+          if (isDirectLocal) {
+            if (!bypassedHourlyCap) {
+              logServerEvent('hourly_cap_bypass_local', { ...addrLog });
+            }
+          } else {
+            if (reservedRoom) {
+              activeCallReservations.delete(room);
+            }
+            logServerEvent('token_refused', { reason: 'hourly_cap', ...addrLog });
+            sendJson(
+              res,
+              429,
+              { error: 'busy', retry_after_s: hourlyAfter.retryAfterS },
+              { 'Retry-After': String(hourlyAfter.retryAfterS), 'Cache-Control': 'no-store' },
+            );
+            return;
+          }
         }
         recordSuccessfulMint();
 
@@ -2353,9 +2578,11 @@ if (import.meta.main) {
     const trustProxy = isTrustProxyEnabled(process.env);
     const maxCallsPerHour = parseMaxCallsPerHour(process.env);
     const callsPerHourLabel = maxCallsPerHour !== null ? String(maxCallsPerHour) : 'none';
+    const maxActiveCalls = parseMaxActiveCalls(process.env);
+    const maxActiveCallsLabel = maxActiveCalls !== null ? String(maxActiveCalls) : 'none';
     const displayHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
     console.log(
-      `[server] listening on ${scheme}://${displayHost}:${port} livekit=${livekitConfigured} passcode=${passcodeRequired} trust_proxy=${trustProxy} calls_per_hour=${callsPerHourLabel}`,
+      `[server] listening on ${scheme}://${displayHost}:${port} livekit=${livekitConfigured} passcode=${passcodeRequired} trust_proxy=${trustProxy} calls_per_hour=${callsPerHourLabel} max_active_calls=${maxActiveCallsLabel}`,
     );
     if (trustProxy && !passcodeRequired) {
       console.error(

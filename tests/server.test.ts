@@ -4006,3 +4006,511 @@ describe('POST /api/bag and bagToPagePayload', () => {
     assert.ok(!serverSrc.includes(checkoutToolName));
   });
 });
+
+describe('POST /api/token active-call limit (ALICE_MAX_ACTIVE_CALLS)', () => {
+  const baseLkEnv: Record<string, string | undefined> = {
+    LIVEKIT_API_KEY: 'devkey',
+    LIVEKIT_API_SECRET: 'x'.repeat(40),
+    LIVEKIT_URL: 'wss://example.livekit.cloud',
+    ALICE_PASSCODE: 'stage-demo-passcode-12',
+    ALICE_TRUST_PROXY: '1',
+  };
+
+  async function withActiveLimitServer(
+    opts: Parameters<typeof createAliceServer>[0],
+    fn: (port: number) => Promise<void>,
+  ): Promise<void> {
+    const srv = createAliceServer(opts);
+    await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => resolve()));
+    const srvPort = (srv.address() as AddressInfo).port;
+    try {
+      await fn(srvPort);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        srv.close((err) => (err ? reject(err) : resolve())),
+      );
+    }
+  }
+
+  it('refuses tunnel callers at limit 1 with exact 429 body, exempts local operator, ignores agent-only and other-prefix rooms, and does not consume hourly cap', async () => {
+    let nowMs = 10_000_000;
+    const events: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+    let rooms: Array<{ name: string; numParticipants?: number }> = [];
+    const participantsByRoom = new Map<string, Array<{ identity: string; kind?: number | string }>>();
+    const participantLookups: string[] = [];
+
+    const env: Record<string, string | undefined> = {
+      ...baseLkEnv,
+      ALICE_MAX_ACTIVE_CALLS: '1',
+      ALICE_MAX_CALLS_PER_HOUR: '2',
+    };
+
+    await withActiveLimitServer(
+      {
+        env,
+        now: () => nowMs,
+        calllog: (room, ev, data) => events.push({ room, ev, data }),
+        activeCallsClient: {
+          listRooms: async () => rooms,
+          listParticipants: async (roomName) => {
+            participantLookups.push(roomName);
+            return participantsByRoom.get(roomName) ?? [];
+          },
+        },
+      },
+      async (srvPort) => {
+        // 1. Live room with shopper -> tunnel caller gets exact 429 body (no room names, no counts)
+        rooms = [
+          { name: 'alice-live000001', numParticipants: 2 },
+          { name: 'other-project-room', numParticipants: 3 },
+        ];
+        participantsByRoom.set('alice-live000001', [
+          { identity: 'shopper-11112222', kind: 0 },
+          { identity: 'agent-AJ_1', kind: 4 },
+        ]);
+        participantsByRoom.set('other-project-room', [
+          { identity: 'shopper-99999999', kind: 0 },
+        ]);
+
+        const tunnelBusy = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'stage-demo-passcode-12',
+            'CF-Connecting-IP': '203.0.113.10',
+          },
+        });
+        assert.equal(tunnelBusy.status, 429);
+        assert.equal(tunnelBusy.headers['retry-after'], '20');
+        assert.equal(tunnelBusy.headers['cache-control'], 'no-store');
+        const busyBody = JSON.parse(tunnelBusy.body.toString('utf8')) as Record<string, unknown>;
+        assert.deepEqual(busyBody, {
+          error: 'busy',
+          reason: 'call_in_progress',
+          message: "There's already someone talking to Alice. Please stand by.",
+          retry_after_s: 20,
+        });
+        assert.deepEqual(Object.keys(busyBody).sort(), [
+          'error',
+          'message',
+          'reason',
+          'retry_after_s',
+        ]);
+        assert.equal(events[events.length - 1].ev, 'token_refused');
+        assert.equal(events[events.length - 1].data?.reason, 'call_in_progress');
+        // Other-prefix room was ignored (listParticipants never called for it)
+        assert.deepEqual(participantLookups, ['alice-live000001']);
+
+        // 2. Wrong passcode while call is in progress -> 401 bad_passcode, NOT 429 (Addendum F)
+        const wrongPass = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'wrong-passcode',
+            'CF-Connecting-IP': '203.0.113.11',
+          },
+        });
+        assert.equal(wrongPass.status, 401);
+        assert.equal(JSON.parse(wrongPass.body.toString('utf8')).error, 'bad_passcode');
+
+        // 3. Operator on local machine (loopback, no proxy headers, local Host) is EXEMPT -> 200 (Addendum A)
+        const localOp = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            Host: `localhost:${srvPort}`,
+            'x-alice-passcode': 'stage-demo-passcode-12',
+          },
+        });
+        assert.equal(localOp.status, 200);
+        assert.ok(events.some((e) => e.ev === 'active_calls_bypass_local'));
+
+        // 4. Advance past 50 s reservation & 2 s cache: agent-only room and other-prefix room do NOT count -> 200
+        nowMs += 51_000;
+        rooms = [
+          { name: 'alice-agentonly1', numParticipants: 2 },
+          { name: 'other-prefix-99', numParticipants: 4 },
+        ];
+        participantsByRoom.set('alice-agentonly1', [
+          { identity: 'agent-AJ_99', kind: 4 },
+          { identity: 'tavus-avatar-agent', kind: 4 },
+        ]);
+
+        // Hourly cap is 2; localOp used 1, the earlier 429 call_in_progress did NOT consume hourly cap,
+        // so this 2nd real mint must still succeed (200)!
+        const allowedOverAgentOnly = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'stage-demo-passcode-12',
+            'CF-Connecting-IP': '203.0.113.12',
+          },
+        });
+        assert.equal(allowedOverAgentOnly.status, 200);
+        const okData = JSON.parse(allowedOverAgentOnly.body.toString('utf8')) as Record<string, unknown>;
+        assert.equal(typeof okData.token, 'string');
+      },
+    );
+  });
+
+  it('reserves synchronously for two simultaneous requests, expires reservations at 50 s, and releases early when shopper joins', async () => {
+    let nowMs = 20_000_000;
+    let rooms: Array<{ name: string; numParticipants?: number }> = [];
+    const participantsByRoom = new Map<string, Array<{ identity: string; kind?: number | string }>>();
+
+    await withActiveLimitServer(
+      {
+        env: { ...baseLkEnv, ALICE_MAX_ACTIVE_CALLS: '1' },
+        now: () => nowMs,
+        activeCallsClient: {
+          listRooms: async () => {
+            await new Promise((r) => setTimeout(r, 20));
+            return rooms;
+          },
+          listParticipants: async (roomName) => participantsByRoom.get(roomName) ?? [],
+        },
+      },
+      async (srvPort) => {
+        // 1. Two simultaneous requests with empty LiveKit -> exactly ONE 200 and ONE 429 (Addendum C)
+        const [r1, r2] = await Promise.all([
+          requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/token',
+            method: 'POST',
+            headers: {
+              'x-alice-passcode': 'stage-demo-passcode-12',
+              'CF-Connecting-IP': '203.0.113.20',
+            },
+          }),
+          requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/token',
+            method: 'POST',
+            headers: {
+              'x-alice-passcode': 'stage-demo-passcode-12',
+              'CF-Connecting-IP': '203.0.113.21',
+            },
+          }),
+        ]);
+        const statuses = [r1.status, r2.status].sort((a, b) => a - b);
+        assert.deepEqual(statuses, [200, 429]);
+
+        // 2. Reservation still blocks at 49 s, expires at 50 s (Addendum B)
+        nowMs += 49_000;
+        const at49s = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'stage-demo-passcode-12',
+            'CF-Connecting-IP': '203.0.113.22',
+          },
+        });
+        assert.equal(at49s.status, 429);
+
+        nowMs += 1_001;
+        const at50s = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'stage-demo-passcode-12',
+            'CF-Connecting-IP': '203.0.113.23',
+          },
+        });
+        assert.equal(at50s.status, 200);
+        const mintedRoom = String(
+          (JSON.parse(at50s.body.toString('utf8')) as { room: string }).room,
+        );
+
+        // 3. Shopper joins mintedRoom at t+5 s -> LiveKit sees shopper -> reservation released, room counts as 1
+        nowMs += 5_000;
+        rooms = [{ name: mintedRoom, numParticipants: 1 }];
+        participantsByRoom.set(mintedRoom, [{ identity: 'shopper-joined01', kind: 0 }]);
+        const whileJoined = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'stage-demo-passcode-12',
+            'CF-Connecting-IP': '203.0.113.24',
+          },
+        });
+        assert.equal(whileJoined.status, 429);
+
+        // 4. Shopper leaves at t+10 s (well before 50 s) -> LiveKit empty & reservation was released -> 200!
+        nowMs += 5_000;
+        rooms = [];
+        participantsByRoom.clear();
+        const afterLeave = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'stage-demo-passcode-12',
+            'CF-Connecting-IP': '203.0.113.25',
+          },
+        });
+        assert.equal(afterLeave.status, 200);
+      },
+    );
+  });
+
+  it('caches LiveKit lookup for 2 s, fails open on error or >1.5 s timeout, honors AVATAR=tavus default, and supports limit 2', async () => {
+    let nowMs = 30_000_000;
+    let listRoomCalls = 0;
+    let mode: 'ok' | 'throw' | 'hang' = 'ok';
+    const events: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+    const env: Record<string, string | undefined> = { ...baseLkEnv };
+
+    await withActiveLimitServer(
+      {
+        env,
+        now: () => nowMs,
+        budgets: { activeCallsMs: 80 },
+        calllog: (room, ev, data) => events.push({ room, ev, data }),
+        activeCallsClient: {
+          listRooms: async () => {
+            listRoomCalls += 1;
+            if (mode === 'throw') throw new Error('livekit 503');
+            if (mode === 'hang') {
+              await new Promise((r) => setTimeout(r, 400));
+            }
+            return [{ name: 'alice-busy1', numParticipants: 1 }];
+          },
+          listParticipants: async () => [{ identity: 'shopper-aa11bb22', kind: 0 }],
+        },
+      },
+      async (srvPort) => {
+        // 1. Limit unset and AVATAR not tavus -> lookup NEVER called
+        const noLimit1 = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'stage-demo-passcode-12',
+            'CF-Connecting-IP': '203.0.113.30',
+          },
+        });
+        assert.equal(noLimit1.status, 200);
+        assert.equal(listRoomCalls, 0);
+
+        // 2. Limit unset and AVATAR=tavus -> limit defaults to 1; 5 requests in 1 s make ONLY 1 LiveKit lookup (Addendum D)
+        env.AVATAR = 'tavus';
+        for (let i = 0; i < 5; i += 1) {
+          nowMs += 150;
+          const res = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/token',
+            method: 'POST',
+            headers: {
+              'x-alice-passcode': 'stage-demo-passcode-12',
+              'CF-Connecting-IP': `203.0.113.${31 + i}`,
+            },
+          });
+          assert.equal(res.status, 429);
+        }
+        assert.equal(listRoomCalls, 1, '5 requests within 2 s must reuse one cached LiveKit lookup');
+
+        // 3. Limit 2 allows a 2nd call alongside the 1 live room, then refuses the 3rd
+        env.ALICE_MAX_ACTIVE_CALLS = '2';
+        const secondAllowed = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'stage-demo-passcode-12',
+            'CF-Connecting-IP': '203.0.113.40',
+          },
+        });
+        assert.equal(secondAllowed.status, 200);
+
+        const thirdRefused = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'stage-demo-passcode-12',
+            'CF-Connecting-IP': '203.0.113.41',
+          },
+        });
+        assert.equal(thirdRefused.status, 429);
+
+        // 4. Lookup throws -> fails open using reservations only (200 when none) and logs once/min
+        nowMs += 55_000;
+        env.ALICE_MAX_ACTIVE_CALLS = '1';
+        mode = 'throw';
+        const failOpenThrow = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'stage-demo-passcode-12',
+            'CF-Connecting-IP': '203.0.113.42',
+          },
+        });
+        assert.equal(failOpenThrow.status, 200);
+        // Second caller while reservation from failOpenThrow is active still gets 429
+        const reservedWhileThrow = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'stage-demo-passcode-12',
+            'CF-Connecting-IP': '203.0.113.43',
+          },
+        });
+        assert.equal(reservedWhileThrow.status, 429);
+        assert.equal(
+          events.filter((e) => e.ev === 'active_calls_lookup_failed').length,
+          1,
+          'active_calls_lookup_failed must log at most once per minute',
+        );
+
+        // 5. Lookup slower than budget -> fails open using reservations only (200 when none)
+        nowMs += 65_000;
+        mode = 'hang';
+        const failOpenTimeout = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'stage-demo-passcode-12',
+            'CF-Connecting-IP': '203.0.113.44',
+          },
+        });
+        assert.equal(failOpenTimeout.status, 200);
+        assert.equal(events.filter((e) => e.ev === 'active_calls_lookup_failed').length, 2);
+      },
+    );
+  });
+
+  it('exempts direct local operator from ALICE_MAX_CALLS_PER_HOUR (logging hourly_cap_bypass_local) while refusing tunnel callers including Host: localhost', async () => {
+    let nowMs = 40_000_000;
+    const events: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+
+    await withActiveLimitServer(
+      {
+        env: { ...baseLkEnv, ALICE_MAX_CALLS_PER_HOUR: '2' },
+        now: () => nowMs,
+        calllog: (room, ev, data) => events.push({ room, ev, data }),
+      },
+      async (srvPort) => {
+        // Fill hourly cap of 2 with two tunnel callers
+        for (const ip of ['203.0.113.60', '203.0.113.61']) {
+          const r = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/token',
+            method: 'POST',
+            headers: {
+              'x-alice-passcode': 'stage-demo-passcode-12',
+              'CF-Connecting-IP': ip,
+            },
+          });
+          assert.equal(r.status, 200);
+        }
+
+        // Tunnel caller -> 429 busy with long retry_after_s
+        const tunnelCapped = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'stage-demo-passcode-12',
+            'CF-Connecting-IP': '203.0.113.62',
+          },
+        });
+        assert.equal(tunnelCapped.status, 429);
+        const cappedBody = JSON.parse(tunnelCapped.body.toString('utf8')) as {
+          error: string;
+          retry_after_s: number;
+        };
+        assert.equal(cappedBody.error, 'busy');
+        assert.ok(cappedBody.retry_after_s >= 3590);
+
+        // Tunnel visitor sending Host: localhost -> STILL 429 busy
+        const tunnelLocalHost = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            Host: `localhost:${srvPort}`,
+            'x-alice-passcode': 'stage-demo-passcode-12',
+            'CF-Connecting-IP': '203.0.113.63',
+          },
+        });
+        assert.equal(tunnelLocalHost.status, 429);
+        assert.equal(JSON.parse(tunnelLocalHost.body.toString('utf8')).error, 'busy');
+
+        // Direct local caller (loopback, no proxy headers, local Host) -> 200 + hourly_cap_bypass_local logged
+        nowMs += 10_000;
+        const localOp = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            Host: `localhost:${srvPort}`,
+            'x-alice-passcode': 'stage-demo-passcode-12',
+          },
+        });
+        assert.equal(localOp.status, 200);
+        assert.ok(events.some((e) => e.ev === 'hourly_cap_bypass_local'));
+
+        // Local mint still counts in the hourly window: even after the first 2 expire (if cap were 1),
+        // let's advance past the first 2 mints (not the local mint) and verify the local mint still counts!
+        // At nowMs = +10_000: mints at t=0, t=0, t=10_000. Advance +3_595_000 -> t=3_605_000:
+        // first 2 expired, local mint at t=10_000 is still inside the 1-hour window (count=1).
+        nowMs += 3_595_000;
+        const oneSlotLeft = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'stage-demo-passcode-12',
+            'CF-Connecting-IP': '203.0.113.64',
+          },
+        });
+        assert.equal(oneSlotLeft.status, 200);
+
+        // Now window has 2 (local mint + .64), so .65 is capped again!
+        const cappedAgain = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'stage-demo-passcode-12',
+            'CF-Connecting-IP': '203.0.113.65',
+          },
+        });
+        assert.equal(cappedAgain.status, 429);
+      },
+    );
+  });
+});
