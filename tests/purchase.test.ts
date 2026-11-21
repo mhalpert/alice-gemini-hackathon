@@ -149,6 +149,7 @@ function makeBag(
     cartId: string | null;
     total: number;
     variantId?: string;
+    itemId?: string;
     title?: string;
     url?: string;
   }>,
@@ -160,6 +161,7 @@ function makeBag(
       cartId: 'cart-ev-1',
       total: 68,
       variantId: 'gid://shopify/ProductVariant/111',
+      itemId: 'prod-1',
       title: 'Linen Shirt',
       url: 'https://everlane.com/cart/c1',
     },
@@ -179,7 +181,7 @@ function makeBag(
           slot: 'top',
           image: 'https://cdn.example.com/1.jpg',
           price: s.total,
-          item_id: 'prod-1',
+          item_id: s.itemId ?? 'prod-1',
         } as any,
       ],
       not_added: [],
@@ -254,10 +256,11 @@ function makeSignedInAuth(
   });
 
   async function completeSignIn() {
+    const before = scheduled.length;
     const start = await auth.startSignIn();
     assert.equal(auth.signInStatus(), 'pending');
-    assert.equal(scheduled.length, 1);
-    scheduled[0].fn();
+    assert.equal(scheduled.length, before + 1);
+    scheduled[scheduled.length - 1].fn();
     await new Promise((r) => setImmediate(r));
     assert.equal(auth.signInStatus(), 'signed_in');
     return start;
@@ -1741,6 +1744,7 @@ describe('placeOrder safety gates, cart locks, session cap, polling, and purging
       const calls: Array<{ name: string }> = [];
       let idx = 0;
 
+      const cartMetaByCheckout = new Map<string, string>();
       const mcp = createShopMcp({
         fetch: async (_u, init) => {
           const body = JSON.parse(String(init?.body ?? '{}'));
@@ -1751,32 +1755,40 @@ describe('placeOrder safety gates, cart locks, session cap, polling, and purging
             idx += 1;
             const cartId = body.params?.arguments?.checkout?.cart_id;
             const cents = cartId === 'cart-over-order' ? 16000 : 14000;
+            const variantId = `gid://shopify/ProductVariant/${cartId}`;
+            const coId = `chk_cap_${idx}`;
+            cartMetaByCheckout.set(coId, variantId);
             return jsonRpcOk(
               makeCheckoutDoc({
-                id: `chk_cap_${idx}`,
+                id: coId,
                 status: 'ready_for_complete',
                 withAddress: true,
                 totalCents: cents,
+                variantId,
               }),
             );
           }
           if (name === 'get_checkout') {
+            const coId = body.params?.arguments?.id;
             return jsonRpcOk(
               makeCheckoutDoc({
-                id: body.params?.arguments?.id,
+                id: coId,
                 status: 'ready_for_complete',
                 withAddress: true,
                 totalCents: 14000,
+                variantId: cartMetaByCheckout.get(coId),
               }),
             );
           }
           if (name === 'complete_checkout') {
+            const coId = body.params?.arguments?.id;
             return jsonRpcOk(
               makeCheckoutDoc({
-                id: body.params?.arguments?.id,
+                id: coId,
                 status: 'completed',
                 withAddress: true,
                 totalCents: 14000,
+                variantId: cartMetaByCheckout.get(coId),
               }),
             );
           }
@@ -1797,7 +1809,14 @@ describe('placeOrder safety gates, cart locks, session cap, polling, and purging
 
       // Exceeds per-order env cap ($160 > $150) -> refused with 0 network calls
       const rOver = await purchase.prepareOrder(
-        makeBag([{ store: 'Everlane', domain: 'm34kzg-ke.myshopify.com', cartId: 'cart-over-order', total: 160 }]),
+        makeBag([{
+          store: 'Everlane',
+          domain: 'm34kzg-ke.myshopify.com',
+          cartId: 'cart-over-order',
+          total: 160,
+          variantId: 'gid://shopify/ProductVariant/cart-over-order',
+          itemId: 'prod-over',
+        }]),
       );
       const callsBeforeOver = calls.length;
       const pOver = await purchase.placeOrder(rOver.order_id, { idempotencyKey: 'o1', confirmedByTap: true });
@@ -1805,22 +1824,43 @@ describe('placeOrder safety gates, cart locks, session cap, polling, and purging
       assert.equal(pOver.stores[0].status, 'handoff');
       assert.match(pOver.stores[0].note ?? '', /150/);
 
-      // Order 1 ($140) + Order 2 ($140) = $280 <= $300 -> both placed
+      // Order 1 ($140) + Order 2 ($140) = $280 <= $300 -> both placed (distinct items)
       const r1 = await purchase.prepareOrder(
-        makeBag([{ store: 'Everlane', domain: 'm34kzg-ke.myshopify.com', cartId: 'cart-s1', total: 140 }]),
+        makeBag([{
+          store: 'Everlane',
+          domain: 'm34kzg-ke.myshopify.com',
+          cartId: 'cart-s1',
+          total: 140,
+          variantId: 'gid://shopify/ProductVariant/cart-s1',
+          itemId: 'prod-s1',
+        }]),
       );
       const p1 = await purchase.placeOrder(r1.order_id, { idempotencyKey: 's1', confirmedByTap: true });
       assert.equal(p1.stores[0].status, 'placed');
 
       const r2 = await purchase.prepareOrder(
-        makeBag([{ store: 'Everlane', domain: 'm34kzg-ke.myshopify.com', cartId: 'cart-s2', total: 140 }]),
+        makeBag([{
+          store: 'Everlane',
+          domain: 'm34kzg-ke.myshopify.com',
+          cartId: 'cart-s2',
+          total: 140,
+          variantId: 'gid://shopify/ProductVariant/cart-s2',
+          itemId: 'prod-s2',
+        }]),
       );
       const p2 = await purchase.placeOrder(r2.order_id, { idempotencyKey: 's2', confirmedByTap: true });
       assert.equal(p2.stores[0].status, 'placed');
 
       // Order 3 ($140 -> $420 > $300 session cap) -> refused with 0 network calls
       const r3 = await purchase.prepareOrder(
-        makeBag([{ store: 'Everlane', domain: 'm34kzg-ke.myshopify.com', cartId: 'cart-s3', total: 140 }]),
+        makeBag([{
+          store: 'Everlane',
+          domain: 'm34kzg-ke.myshopify.com',
+          cartId: 'cart-s3',
+          total: 140,
+          variantId: 'gid://shopify/ProductVariant/cart-s3',
+          itemId: 'prod-s3',
+        }]),
       );
       const callsBefore3 = calls.length;
       const p3 = await purchase.placeOrder(r3.order_id, { idempotencyKey: 's3', confirmedByTap: true });
@@ -2056,6 +2096,548 @@ describe('placeOrder safety gates, cart locks, session cap, polling, and purging
     assert.equal(res.stores[1].store, 'Kith');
     assert.equal(res.stores[1].status, 'placed');
     assert.equal(res.stores[1].order_number, 'KITH-99');
+  });
+});
+
+describe('re-made bag double-charge protection (R1 unclear store, R2 already ordered, definite refusals)', () => {
+  function makeRebagHarness(opts: {
+    completeFn: (shop: string, args: any, callIdx: number) => Response | Promise<Response> | Error;
+    afterCompleteGetFn?: (shop: string, args: any) => any;
+    getRoom?: () => string | null;
+  }) {
+    let clock = 40_000_000;
+    const activeRoom = opts.getRoom ?? (() => VALID_ROOM);
+    const { auth, completeSignIn } = makeSignedInAuth('tok_rebag_secret_999', () => clock, {
+      getRoom: activeRoom,
+    });
+
+    const calls: Array<{ name: string; shop?: string; args: any }> = [];
+    const checkoutById = new Map<string, { variantId: string; title: string; totalCents: number; shop: string }>();
+    const sentCheckout = new Set<string>();
+    let checkoutSeq = 0;
+    let completeSeq = 0;
+
+    // Cart catalog for mapping cart_id -> item details in create_checkout
+    const cartMeta = new Map<string, { variantId: string; title: string; totalCents: number }>();
+
+    const mcp = createShopMcp({
+      fetch: async (_u, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}'));
+        const name = body.params?.name as string;
+        const args = body.params?.arguments ?? {};
+        const shop = args.shop as string | undefined;
+        calls.push({ name, shop, args });
+
+        if (name === 'get_account') return jsonRpcOk(makeFakeAccount());
+
+        if (name === 'create_checkout') {
+          checkoutSeq += 1;
+          const id = `co_${checkoutSeq}`;
+          const cartId = String(args.checkout?.cart_id ?? '');
+          const meta = cartMeta.get(cartId) ?? {
+            variantId: 'gid://shopify/ProductVariant/111',
+            title: 'Linen Shirt',
+            totalCents: 10000,
+          };
+          checkoutById.set(id, { ...meta, shop: shop ?? 'everlane.com' });
+          return jsonRpcOk(
+            makeCheckoutDoc({
+              id,
+              status: 'ready_for_complete',
+              withAddress: true,
+              totalCents: meta.totalCents,
+              variantId: meta.variantId,
+              title: meta.title,
+              continueUrl: `https://${shop ?? 'everlane.com'}/checkouts/${id}`,
+            }),
+          );
+        }
+
+        if (name === 'get_checkout') {
+          const id = String(args.id ?? '');
+          const meta = checkoutById.get(id) ?? {
+            variantId: 'gid://shopify/ProductVariant/111',
+            title: 'Linen Shirt',
+            totalCents: 10000,
+            shop: shop ?? 'everlane.com',
+          };
+          if (sentCheckout.has(id) && opts.afterCompleteGetFn) {
+            const custom = opts.afterCompleteGetFn(shop ?? meta.shop, args);
+            if (custom instanceof Error) throw custom;
+            return jsonRpcOk(custom);
+          }
+          return jsonRpcOk(
+            makeCheckoutDoc({
+              id,
+              status: 'ready_for_complete',
+              withAddress: true,
+              totalCents: meta.totalCents,
+              variantId: meta.variantId,
+              title: meta.title,
+              continueUrl: `https://${shop ?? meta.shop}/checkouts/${id}`,
+            }),
+          );
+        }
+
+        if (name === 'complete_checkout') {
+          completeSeq += 1;
+          sentCheckout.add(String(args.id ?? ''));
+          const out = await opts.completeFn(shop ?? '', args, completeSeq);
+          if (out instanceof Error) throw out;
+          return out;
+        }
+
+        throw new Error(`Unexpected MCP tool: ${name}`);
+      },
+      isPurchaseEnabled: () => true,
+      getAuthToken: () => auth.getToken(),
+      now: () => clock,
+    });
+
+    const purchase = createPurchaseClient({
+      mcp,
+      auth,
+      now: () => clock,
+      isPurchaseEnabled: () => true,
+      maxUsd: () => null,
+      sessionMaxUsd: () => null,
+      getRoom: activeRoom,
+      isHarnessEnv: () => false,
+      reconcileDelaysMs: [0, 0],
+    });
+
+    const registerCart = (
+      cartId: string,
+      opts2: {
+        store?: string;
+        domain?: string;
+        variantId?: string;
+        itemId?: string;
+        title?: string;
+        total?: number;
+        url?: string;
+      } = {},
+    ) => {
+      const store = opts2.store ?? 'Everlane';
+      const domain = opts2.domain ?? 'everlane.com';
+      const variantId = opts2.variantId ?? 'gid://shopify/ProductVariant/111';
+      const itemId = opts2.itemId ?? 'prod-shirt-1';
+      const title = opts2.title ?? 'Linen Shirt';
+      const total = opts2.total ?? 100;
+      cartMeta.set(cartId, { variantId, title, totalCents: Math.round(total * 100) });
+      return {
+        store,
+        domain,
+        cartId,
+        total,
+        variantId,
+        itemId,
+        title,
+        url: opts2.url ?? `https://${domain}/cart/${cartId}`,
+      };
+    };
+
+    return { purchase, auth, completeSignIn, calls, registerCart };
+  }
+
+  it('R1: after an UNKNOWN outcome on cart c1, a re-made cart c2 for the same store (same or different item) is NOT ready with NO link and refused with reason store_unclear before any store call', async () => {
+    const logs: Array<{ ev: string; data?: Record<string, unknown> }> = [];
+    setCallRoom(VALID_ROOM);
+    setCallLogSink((_room, ev, data) => logs.push({ ev, data }));
+    try {
+      const { purchase, completeSignIn, calls, registerCart } = makeRebagHarness({
+        completeFn: (_shop, _args, idx) => {
+          if (idx === 1) return new Error('timeout');
+          return jsonRpcOk(makeCheckoutDoc({ status: 'completed', totalCents: 10000, order: { order_number: '2' } }));
+        },
+        afterCompleteGetFn: (_shop, args) =>
+          makeCheckoutDoc({ id: args.id, status: 'complete_in_progress', totalCents: 10000, withAddress: true }),
+      });
+      await completeSignIn();
+
+      const c1 = registerCart('c1');
+      const rev1 = await purchase.prepareOrder(makeBag([c1]));
+      assert.equal(rev1.stores[0].ready, true);
+      const res1 = await purchase.placeOrder(rev1.order_id, { idempotencyKey: 'k1', confirmedByTap: true });
+      assert.equal(res1.stores[0].status, 'failed');
+      assert.equal(res1.stores[0].continue_url, undefined);
+      assert.equal(calls.filter((c) => c.name === 'complete_checkout').length, 1);
+
+      // Re-made cart c2 (same store, same item) -> NOT ready, NO link, ZERO store calls
+      const callsBeforeC2 = calls.length;
+      const c2 = registerCart('c2');
+      const rev2 = await purchase.prepareOrder(makeBag([c2]));
+      assert.equal(calls.length, callsBeforeC2, 'prepareOrder on unclear store must make ZERO MCP calls');
+      assert.equal(rev2.stores[0].ready, false);
+      assert.equal(rev2.stores[0].continue_url, undefined);
+      assert.equal(
+        rev2.stores[0].note,
+        'A payment for this store may still be processing. Check your Shop app or email before ordering from Everlane again.',
+      );
+
+      const res2 = await purchase.placeOrder(rev2.order_id, { idempotencyKey: 'k2', confirmedByTap: true });
+      assert.equal(calls.length, callsBeforeC2, 'placeOrder on unclear store must make ZERO MCP calls');
+      assert.equal(res2.stores[0].ready, false);
+      assert.equal(res2.stores[0].continue_url, undefined);
+      assert.equal(
+        res2.stores[0].note,
+        'A payment for this store may still be processing. Check your Shop app or email before ordering from Everlane again.',
+      );
+      assert.equal(calls.filter((c) => c.name === 'complete_checkout').length, 1);
+      assert.ok(
+        logs.some((l) => l.ev === 'order_refused' && l.data?.reason === 'store_unclear'),
+        'must log order_refused with reason store_unclear',
+      );
+
+      // R1 with a DIFFERENT item in re-made cart c3 for the same unclear store -> STILL refused, NO link
+      const c3 = registerCart('c3', {
+        variantId: 'gid://shopify/ProductVariant/999',
+        itemId: 'prod-jeans-999',
+        title: 'Selvedge Jeans',
+        total: 120,
+      });
+      const rev3 = await purchase.prepareOrder(makeBag([c3]));
+      assert.equal(calls.length, callsBeforeC2);
+      assert.equal(rev3.stores[0].ready, false);
+      assert.equal(rev3.stores[0].continue_url, undefined);
+      assert.equal(
+        rev3.stores[0].note,
+        'A payment for this store may still be processing. Check your Shop app or email before ordering from Everlane again.',
+      );
+      const res3 = await purchase.placeOrder(rev3.order_id, { idempotencyKey: 'k3', confirmedByTap: true });
+      assert.equal(calls.length, callsBeforeC2);
+      assert.equal(res3.stores[0].continue_url, undefined);
+      assert.equal(calls.filter((c) => c.name === 'complete_checkout').length, 1);
+      assert.equal(JSON.stringify(logs).includes('tok_rebag_secret_999'), false);
+    } finally {
+      setCallLogSink(null);
+      setCallRoom(null);
+    }
+  });
+
+  it('R2: after PLACED on cart c1, re-made cart c2 with same variant OR same product id is NOT ready with store checkout link and refused (already_ordered); different item from same store IS allowed', async () => {
+    const logs: Array<{ ev: string; data?: Record<string, unknown> }> = [];
+    setCallRoom(VALID_ROOM);
+    setCallLogSink((_room, ev, data) => logs.push({ ev, data }));
+    try {
+      const { purchase, completeSignIn, calls, registerCart } = makeRebagHarness({
+        completeFn: (_shop, args, idx) =>
+          jsonRpcOk(
+            makeCheckoutDoc({
+              id: args.id,
+              status: 'completed',
+              totalCents: 10000,
+              order: { order_number: `ORD-${idx}` },
+            }),
+          ),
+      });
+      await completeSignIn();
+
+      const c1 = registerCart('c1', {
+        variantId: 'gid://shopify/ProductVariant/v1',
+        itemId: 'gid://shopify/Product/p1',
+        title: 'Linen Shirt',
+      });
+      const rev1 = await purchase.prepareOrder(makeBag([c1]));
+      const res1 = await purchase.placeOrder(rev1.order_id, { idempotencyKey: 'k1', confirmedByTap: true });
+      assert.equal(res1.stores[0].status, 'placed');
+      assert.equal(calls.filter((c) => c.name === 'complete_checkout').length, 1);
+
+      // Re-made cart c2 with SAME variant -> NOT ready, hands off WITH store link, refused with already_ordered
+      const callsBeforeC2 = calls.length;
+      const c2 = registerCart('c2', {
+        variantId: 'gid://shopify/ProductVariant/v1',
+        itemId: 'gid://shopify/Product/p1',
+        title: 'Linen Shirt',
+        url: 'https://everlane.com/cart/c2',
+      });
+      const rev2 = await purchase.prepareOrder(makeBag([c2]));
+      assert.equal(calls.length, callsBeforeC2, 'prepareOrder on already-ordered item makes ZERO MCP calls');
+      assert.equal(rev2.stores[0].ready, false);
+      assert.equal(rev2.stores[0].continue_url, 'https://everlane.com/cart/c2');
+      assert.equal(rev2.stores[0].note, 'You already ordered Linen Shirt in this call.');
+
+      const res2 = await purchase.placeOrder(rev2.order_id, { idempotencyKey: 'k2', confirmedByTap: true });
+      assert.equal(calls.length, callsBeforeC2, 'placeOrder on already-ordered item makes ZERO MCP calls');
+      assert.equal(res2.stores[0].ready, false);
+      assert.equal(res2.stores[0].status, 'handoff');
+      assert.equal(res2.stores[0].continue_url, 'https://everlane.com/cart/c2');
+      assert.equal(res2.stores[0].note, 'You already ordered Linen Shirt in this call.');
+      assert.equal(calls.filter((c) => c.name === 'complete_checkout').length, 1);
+      assert.ok(
+        logs.some((l) => l.ev === 'order_refused' && l.data?.reason === 'already_ordered'),
+        'must log order_refused with reason already_ordered',
+      );
+
+      // Re-made cart c2b with DIFFERENT variant of the SAME product id -> also refused (already_ordered)
+      const c2b = registerCart('c2b', {
+        variantId: 'gid://shopify/ProductVariant/v1-large',
+        itemId: 'gid://shopify/Product/p1',
+        title: 'Linen Shirt',
+        url: 'https://everlane.com/cart/c2b',
+      });
+      const rev2b = await purchase.prepareOrder(makeBag([c2b]));
+      assert.equal(rev2b.stores[0].ready, false);
+      assert.equal(rev2b.stores[0].continue_url, 'https://everlane.com/cart/c2b');
+      assert.equal(rev2b.stores[0].note, 'You already ordered Linen Shirt in this call.');
+
+      // Re-made cart c3 with ENTIRELY DIFFERENT item from the SAME store -> ALLOWED and placed!
+      const c3 = registerCart('c3', {
+        variantId: 'gid://shopify/ProductVariant/v2',
+        itemId: 'gid://shopify/Product/p2',
+        title: 'Chino Pant',
+        total: 100,
+      });
+      const rev3 = await purchase.prepareOrder(makeBag([c3]));
+      assert.equal(rev3.stores[0].ready, true);
+      const res3 = await purchase.placeOrder(rev3.order_id, { idempotencyKey: 'k3', confirmedByTap: true });
+      assert.equal(res3.stores[0].status, 'placed');
+      assert.equal(calls.filter((c) => c.name === 'complete_checkout').length, 2);
+    } finally {
+      setCallLogSink(null);
+      setCallRoom(null);
+    }
+  });
+
+  it('two-store bag where store A is unclear and store B is fine: B can still be ordered while A is refused with no link', async () => {
+    const { purchase, completeSignIn, calls, registerCart } = makeRebagHarness({
+      completeFn: (shop, args, idx) => {
+        if (shop === 'everlane.com') {
+          return jsonRpcOk(makeCheckoutDoc({ id: args.id, status: 'processing', totalCents: 10000 }));
+        }
+        return jsonRpcOk(
+          makeCheckoutDoc({
+            id: args.id,
+            status: 'completed',
+            totalCents: 8000,
+            order: { order_number: `KITH-${idx}` },
+          }),
+        );
+      },
+      afterCompleteGetFn: (_shop, args) =>
+        makeCheckoutDoc({ id: args.id, status: 'processing', totalCents: 10000, withAddress: true }),
+    });
+    await completeSignIn();
+
+    // First attempt on Everlane -> UNKNOWN ("processing") -> Everlane marked unclear
+    const ev1 = registerCart('ev-1', { store: 'Everlane', domain: 'everlane.com', total: 100 });
+    const rev1 = await purchase.prepareOrder(makeBag([ev1]));
+    const res1 = await purchase.placeOrder(rev1.order_id, { idempotencyKey: 'k-ev1', confirmedByTap: true });
+    assert.equal(res1.stores[0].status, 'failed');
+    assert.equal(calls.filter((c) => c.name === 'complete_checkout').length, 1);
+
+    // Two-store bag: Everlane (new cart ev-2) + Kith (kith-1)
+    const ev2 = registerCart('ev-2', {
+      store: 'Everlane',
+      domain: 'everlane.com',
+      variantId: 'gid://shopify/ProductVariant/ev-diff',
+      itemId: 'prod-ev-diff',
+      title: 'Cashmere Crew',
+      total: 100,
+    });
+    const kith1 = registerCart('kith-1', {
+      store: 'Kith',
+      domain: 'kithnyc.myshopify.com',
+      variantId: 'gid://shopify/ProductVariant/kith-1',
+      itemId: 'prod-kith-1',
+      title: 'Kith Hoodie',
+      total: 80,
+    });
+
+    const rev2 = await purchase.prepareOrder(makeBag([ev2, kith1]));
+    assert.equal(rev2.stores[0].store, 'Everlane');
+    assert.equal(rev2.stores[0].ready, false);
+    assert.equal(rev2.stores[0].continue_url, undefined);
+    assert.equal(
+      rev2.stores[0].note,
+      'A payment for this store may still be processing. Check your Shop app or email before ordering from Everlane again.',
+    );
+    assert.equal(rev2.stores[1].store, 'Kith');
+    assert.equal(rev2.stores[1].ready, true);
+
+    const res2 = await purchase.placeOrder(rev2.order_id, { idempotencyKey: 'k-two', confirmedByTap: true });
+    assert.equal(res2.stores[0].store, 'Everlane');
+    assert.equal(res2.stores[0].ready, false);
+    assert.equal(res2.stores[0].continue_url, undefined);
+    assert.equal(res2.stores[1].store, 'Kith');
+    assert.equal(res2.stores[1].status, 'placed');
+
+    // Only 1 complete_checkout to Everlane (from attempt 1) and 1 to Kith
+    assert.equal(
+      calls.filter((c) => c.name === 'complete_checkout' && c.shop === 'everlane.com').length,
+      1,
+    );
+    assert.equal(
+      calls.filter((c) => c.name === 'complete_checkout' && c.shop === 'kithnyc.myshopify.com').length,
+      1,
+    );
+  });
+
+  it('unclearStores and placed items survive endCall() followed by a new sign-in in the same process', async () => {
+    const { purchase, completeSignIn, calls, registerCart } = makeRebagHarness({
+      completeFn: (shop, args) => {
+        if (shop === 'everlane.com') return new Error('network error');
+        return jsonRpcOk(
+          makeCheckoutDoc({
+            id: args.id,
+            status: 'completed',
+            totalCents: 9000,
+            order: { order_number: 'KITH-1' },
+          }),
+        );
+      },
+      afterCompleteGetFn: (_shop, args) =>
+        makeCheckoutDoc({ id: args.id, status: 'complete_in_progress', totalCents: 10000, withAddress: true }),
+    });
+    await completeSignIn();
+
+    const ev1 = registerCart('ev-1', { store: 'Everlane', domain: 'everlane.com', total: 100 });
+    const k1 = registerCart('k-1', {
+      store: 'Kith',
+      domain: 'kithnyc.myshopify.com',
+      variantId: 'gid://shopify/ProductVariant/k1',
+      itemId: 'prod-k1',
+      title: 'Kith Tee',
+      total: 90,
+    });
+    const rev1 = await purchase.prepareOrder(makeBag([ev1, k1]));
+    const res1 = await purchase.placeOrder(rev1.order_id, { idempotencyKey: 'k-before', confirmedByTap: true });
+    assert.equal(res1.stores[0].status, 'failed');
+    assert.equal(res1.stores[1].status, 'placed');
+    assert.equal(calls.filter((c) => c.name === 'complete_checkout').length, 2);
+
+    // End call (signs out) and sign in again in the same process
+    purchase.endCall();
+    await completeSignIn();
+
+    const callsAfterSignIn = calls.length;
+    const ev2 = registerCart('ev-2', {
+      store: 'Everlane',
+      domain: 'everlane.com',
+      variantId: 'gid://shopify/ProductVariant/ev2',
+      itemId: 'prod-ev2',
+      title: 'New Shirt',
+      total: 100,
+    });
+    const k2 = registerCart('k-2', {
+      store: 'Kith',
+      domain: 'kithnyc.myshopify.com',
+      variantId: 'gid://shopify/ProductVariant/k1',
+      itemId: 'prod-k1',
+      title: 'Kith Tee',
+      total: 90,
+      url: 'https://kithnyc.myshopify.com/cart/k-2',
+    });
+
+    const rev2 = await purchase.prepareOrder(makeBag([ev2, k2]));
+    assert.equal(calls.length, callsAfterSignIn, 'neither blocked store should make MCP calls after endCall+re-signin');
+    assert.equal(rev2.stores[0].ready, false);
+    assert.equal(rev2.stores[0].continue_url, undefined);
+    assert.equal(rev2.stores[1].ready, false);
+    assert.equal(rev2.stores[1].continue_url, 'https://kithnyc.myshopify.com/cart/k-2');
+    assert.equal(rev2.stores[1].note, 'You already ordered Kith Tee in this call.');
+
+    await purchase.placeOrder(rev2.order_id, { idempotencyKey: 'k-after', confirmedByTap: true });
+    assert.equal(calls.length, callsAfterSignIn);
+    assert.equal(calls.filter((c) => c.name === 'complete_checkout').length, 2);
+  });
+
+  it('six concurrent placeOrder calls on a re-made cart produce ZERO additional completions', async () => {
+    // Both R1 (unclear store) and R2 (already placed item)
+    for (const mode of ['unclear', 'placed'] as const) {
+      const { purchase, completeSignIn, calls, registerCart } = makeRebagHarness({
+        completeFn: (_shop, args, idx) => {
+          if (mode === 'unclear' && idx === 1) return new Error('timeout');
+          return jsonRpcOk(
+            makeCheckoutDoc({
+              id: args.id,
+              status: 'completed',
+              totalCents: 10000,
+              order: { order_number: `ORD-${idx}` },
+            }),
+          );
+        },
+        afterCompleteGetFn: (_shop, args) =>
+          makeCheckoutDoc({ id: args.id, status: 'complete_in_progress', totalCents: 10000, withAddress: true }),
+      });
+      await completeSignIn();
+
+      const c1 = registerCart('c1');
+      const rev1 = await purchase.prepareOrder(makeBag([c1]));
+      await purchase.placeOrder(rev1.order_id, { idempotencyKey: 'k1', confirmedByTap: true });
+      assert.equal(calls.filter((c) => c.name === 'complete_checkout').length, 1);
+
+      const c2 = registerCart('c2');
+      const rev2 = await purchase.prepareOrder(makeBag([c2]));
+      assert.equal(rev2.stores[0].ready, false, mode);
+
+      const results = await Promise.all(
+        Array.from({ length: 6 }, (_, i) =>
+          purchase.placeOrder(rev2.order_id, {
+            idempotencyKey: `k-conc-${i}`,
+            confirmedByTap: true,
+          }),
+        ),
+      );
+      for (const r of results) {
+        assert.equal(r.stores[0].ready, false, mode);
+        if (mode === 'unclear') {
+          assert.equal(r.stores[0].continue_url, undefined);
+        } else {
+          assert.ok(r.stores[0].continue_url);
+        }
+      }
+      assert.equal(
+        calls.filter((c) => c.name === 'complete_checkout').length,
+        1,
+        `expected 0 additional completions for 6 concurrent calls (${mode})`,
+      );
+    }
+  });
+
+  it('definite refusals from the store (declined, sold out, validation error with failed status and no order) stay retryable on a new cart', async () => {
+    const { purchase, completeSignIn, calls, registerCart } = makeRebagHarness({
+      completeFn: (_shop, args, idx) => {
+        if (idx === 1) {
+          return jsonRpcOk(
+            makeCheckoutDoc({
+              id: args.id,
+              status: 'failed',
+              totalCents: 10000,
+              order: undefined,
+            }),
+          );
+        }
+        return jsonRpcOk(
+          makeCheckoutDoc({
+            id: args.id,
+            status: 'completed',
+            totalCents: 10000,
+            order: { order_number: 'ORD-RETRY-OK' },
+          }),
+        );
+      },
+    });
+    await completeSignIn();
+
+    const c1 = registerCart('c1');
+    const rev1 = await purchase.prepareOrder(makeBag([c1]));
+    const res1 = await purchase.placeOrder(rev1.order_id, { idempotencyKey: 'k1', confirmedByTap: true });
+    assert.equal(res1.stores[0].status, 'failed');
+    assert.equal(calls.filter((c) => c.name === 'complete_checkout').length, 1);
+
+    // Same cart c1 is STILL locked by sentCartIds (layer 2)
+    const revSameCart = await purchase.prepareOrder(makeBag([c1]));
+    assert.equal(revSameCart.stores[0].ready, false);
+
+    // New cart c2 for the same store & item IS retryable after a definite refusal
+    const c2 = registerCart('c2');
+    const rev2 = await purchase.prepareOrder(makeBag([c2]));
+    assert.equal(rev2.stores[0].ready, true);
+    const res2 = await purchase.placeOrder(rev2.order_id, { idempotencyKey: 'k2', confirmedByTap: true });
+    assert.equal(res2.stores[0].status, 'placed');
+    assert.equal(res2.stores[0].order_number, 'ORD-RETRY-OK');
+    assert.equal(calls.filter((c) => c.name === 'complete_checkout').length, 2);
   });
 });
 
