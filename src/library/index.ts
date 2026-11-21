@@ -678,3 +678,5 @@ export async function libraryOccasions(
     return [];
   }
 }
+
+export { occasionMenu, matchOccasionWords, type MenuEntry, type WordMatch } from './menu.ts';
