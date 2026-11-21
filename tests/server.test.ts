@@ -2134,3 +2134,826 @@ describe('Storefront, product, search, and looks API', () => {
     );
   });
 });
+
+describe('Public URL / reverse proxy hardening', () => {
+  const lkEnv: Record<string, string | undefined> = {
+    LIVEKIT_API_KEY: 'devkey',
+    LIVEKIT_API_SECRET: 'x'.repeat(40),
+    LIVEKIT_URL: 'wss://example.livekit.cloud',
+  };
+
+  async function withTestServer(
+    opts: Parameters<typeof createAliceServer>[0],
+    fn: (port: number) => Promise<void>,
+  ): Promise<void> {
+    const srv = createAliceServer(opts);
+    await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => resolve()));
+    const srvPort = (srv.address() as AddressInfo).port;
+    try {
+      await fn(srvPort);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        srv.close((err) => (err ? reject(err) : resolve())),
+      );
+    }
+  }
+
+  it('fails closed for proxied or non-local-Host /api/token requests when ALICE_PASSCODE is unset, while direct loopback works', async () => {
+    const events: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+    let currentAddr: string | undefined = '127.0.0.1';
+    const env: Record<string, string | undefined> = { ...lkEnv };
+
+    await withTestServer(
+      {
+        env,
+        remoteAddress: () => currentAddr,
+        calllog: (room, ev, data) => events.push({ room, ev, data }),
+      },
+      async (srvPort) => {
+        // Every proxy header family must be refused with 403 passcode_not_configured and no token minted
+        const proxyHeaderCases: Array<Record<string, string>> = [
+          { 'CF-Connecting-IP': '203.0.113.9' },
+          { 'CF-Ray': '8a1b2c3d4e5f-EWR' },
+          { 'X-Forwarded-For': '198.51.100.7' },
+          { 'X-Forwarded-Host': 'alice.example.com' },
+          { 'X-Forwarded-Proto': 'https' },
+          { Forwarded: 'for=198.51.100.7;proto=https' },
+          { 'X-Real-IP': '198.51.100.7' },
+          { 'True-Client-IP': '198.51.100.7' },
+          { 'ngrok-skip-browser-warning': '1' },
+          { 'x-ngrok-edge': 'edghts_123' },
+        ];
+
+        for (const hdrs of proxyHeaderCases) {
+          const res = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/token',
+            method: 'POST',
+            headers: hdrs,
+          });
+          assert.equal(res.status, 403, `expected 403 for headers ${JSON.stringify(hdrs)}`);
+          const body = JSON.parse(res.body.toString('utf8')) as Record<string, unknown>;
+          assert.deepEqual(body, { error: 'passcode_not_configured' });
+          assert.equal(body.token, undefined);
+        }
+
+        // Non-local Host header with NO proxy headers (header-less tunnel / DNS rebinding) -> 403
+        for (const badHost of [
+          'example.trycloudflare.com',
+          'localhost.evil.com',
+          '127.0.0.1.evil.com',
+          '192.168.1.50:3000',
+        ]) {
+          const res = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/token',
+            method: 'POST',
+            headers: { Host: badHost },
+          });
+          assert.equal(res.status, 403, `expected 403 for Host: ${badHost}`);
+          assert.deepEqual(JSON.parse(res.body.toString('utf8')), {
+            error: 'passcode_not_configured',
+          });
+        }
+
+        // Direct loopback + local Host header (127.0.0.1, localhost, [::1]) + no proxy headers -> 200
+        for (const [sock, hostHdr] of [
+          ['127.0.0.1', `127.0.0.1:${srvPort}`],
+          ['::1', `[::1]:${srvPort}`],
+          ['::ffff:127.0.0.1', `localhost:${srvPort}`],
+        ] as const) {
+          currentAddr = sock;
+          const res = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/token',
+            method: 'POST',
+            headers: { Host: hostHdr },
+          });
+          assert.equal(res.status, 200, `expected 200 for direct ${sock} Host=${hostHdr}`);
+          const body = JSON.parse(res.body.toString('utf8')) as Record<string, unknown>;
+          assert.equal(typeof body.token, 'string');
+        }
+
+        // ALICE_TRUST_PROXY=1 with empty ALICE_PASSCODE refuses EVERY token mint (even plain localhost)
+        currentAddr = '127.0.0.1';
+        env.ALICE_TRUST_PROXY = '1';
+        const plainInProxyMode = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: { Host: `localhost:${srvPort}` },
+        });
+        assert.equal(plainInProxyMode.status, 403);
+        assert.deepEqual(JSON.parse(plainInProxyMode.body.toString('utf8')), {
+          error: 'passcode_not_configured',
+        });
+        const lastEv = events[events.length - 1];
+        assert.equal(lastEv.ev, 'token_refused');
+        assert.equal(lastEv.data?.reason, 'passcode_not_configured');
+        assert.equal(lastEv.data?.remote_addr, 'proxy-unknown');
+        assert.equal(lastEv.data?.socket_addr, '127.0.0.1');
+      },
+    );
+  });
+
+  it('buckets clients accurately with ALICE_TRUST_PROXY on/off, rightmost XFF, shared fallback bucket, and non-loopback ignore', async () => {
+    let nowMs = 1_000_000;
+    let currentAddr = '127.0.0.1';
+    const events: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+
+    // 1. Trust ON + loopback socket
+    await withTestServer(
+      {
+        env: { ...lkEnv, ALICE_PASSCODE: 'test-pass-1234', ALICE_TRUST_PROXY: '1' },
+        remoteAddress: () => currentAddr,
+        now: () => nowMs,
+        calllog: (room, ev, data) => events.push({ room, ev, data }),
+      },
+      async (srvPort) => {
+        // Two visitors with different CF-Connecting-IP get separate 20/min buckets
+        for (let i = 0; i < 20; i += 1) {
+          const res = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/token',
+            method: 'POST',
+            headers: { 'x-alice-passcode': 'test-pass-1234', 'CF-Connecting-IP': '203.0.113.10' },
+          });
+          assert.equal(res.status, 200);
+        }
+        const aBlocked = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: { 'x-alice-passcode': 'test-pass-1234', 'CF-Connecting-IP': '203.0.113.10' },
+        });
+        assert.equal(aBlocked.status, 429);
+
+        // Visitor B has its own fresh bucket and logs both remote_addr and socket_addr
+        const bAllowed = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: { 'x-alice-passcode': 'test-pass-1234', 'CF-Connecting-IP': '203.0.113.11' },
+        });
+        assert.equal(bAllowed.status, 200);
+        const lastTokenEv = events[events.length - 1];
+        assert.equal(lastTokenEv.ev, 'token');
+        assert.equal(lastTokenEv.data?.remote_addr, '203.0.113.11');
+        assert.equal(lastTokenEv.data?.socket_addr, '127.0.0.1');
+
+        // Forged left entry in X-Forwarded-For does NOT move the bucket (rightmost wins)
+        for (let i = 0; i < 20; i += 1) {
+          const forgedLeft = `198.51.100.${i + 1}, 203.0.113.50`;
+          const res = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/token',
+            method: 'POST',
+            headers: { 'x-alice-passcode': 'test-pass-1234', 'X-Forwarded-For': forgedLeft },
+          });
+          assert.equal(res.status, 200);
+        }
+        const xffBlocked = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'test-pass-1234',
+            'X-Forwarded-For': '198.51.100.250, 203.0.113.50',
+          },
+        });
+        assert.equal(xffBlocked.status, 429);
+        assert.equal(events[events.length - 1].data?.remote_addr, '203.0.113.50');
+
+        // Missing or unparsable forwarded headers share ONE shared bucket (never loopback)
+        for (let i = 0; i < 20; i += 1) {
+          currentAddr = i % 2 === 0 ? '127.0.0.1' : '::1';
+          const hdrs: Record<string, string> =
+            i % 3 === 0
+              ? { 'x-alice-passcode': 'test-pass-1234' }
+              : i % 3 === 1
+                ? { 'x-alice-passcode': 'test-pass-1234', 'CF-Connecting-IP': 'not-an-ip' }
+                : { 'x-alice-passcode': 'test-pass-1234', 'X-Forwarded-For': `198.51.100.${i}, garbage` };
+          const res = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/token',
+            method: 'POST',
+            headers: hdrs,
+          });
+          assert.equal(res.status, 200);
+        }
+        currentAddr = '127.0.0.1';
+        const sharedFallbackBlocked = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: { 'x-alice-passcode': 'test-pass-1234' },
+        });
+        assert.equal(sharedFallbackBlocked.status, 429);
+        assert.equal(events[events.length - 1].data?.remote_addr, 'proxy-unknown');
+
+        // Non-loopback socket + trust ON -> headers completely ignored
+        currentAddr = '192.168.1.77';
+        for (let i = 0; i < 20; i += 1) {
+          const res = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/token',
+            method: 'POST',
+            headers: {
+              'x-alice-passcode': 'test-pass-1234',
+              'CF-Connecting-IP': `203.0.113.${100 + i}`,
+            },
+          });
+          assert.equal(res.status, 200);
+        }
+        const lanBlocked = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: { 'x-alice-passcode': 'test-pass-1234', 'CF-Connecting-IP': '203.0.113.222' },
+        });
+        assert.equal(lanBlocked.status, 429);
+        assert.equal(events[events.length - 1].data?.remote_addr, '192.168.1.77');
+      },
+    );
+
+    // 2. Trust OFF -> proxy headers NEVER change the bucket
+    currentAddr = '127.0.0.1';
+    await withTestServer(
+      {
+        env: { ...lkEnv, ALICE_PASSCODE: 'test-pass' },
+        remoteAddress: () => currentAddr,
+        now: () => nowMs,
+      },
+      async (srvPort) => {
+        for (let i = 0; i < 20; i += 1) {
+          const res = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/token',
+            method: 'POST',
+            headers: {
+              'x-alice-passcode': 'test-pass',
+              'CF-Connecting-IP': `203.0.113.${i + 1}`,
+            },
+          });
+          assert.equal(res.status, 200);
+        }
+        const blocked = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: { 'x-alice-passcode': 'test-pass', 'CF-Connecting-IP': '203.0.113.99' },
+        });
+        assert.equal(blocked.status, 429);
+      },
+    );
+  });
+
+  it('enforces per-client (5/min) and global (600/min) bad passcode lockouts without oracle, and refuses passcodes < 12 chars in proxy mode', async () => {
+    let nowMs = 2_000_000;
+    const events: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+    const env: Record<string, string | undefined> = {
+      ...lkEnv,
+      ALICE_PASSCODE: 'short-11-ch',
+      ALICE_TRUST_PROXY: '1',
+    };
+
+    await withTestServer(
+      {
+        env,
+        remoteAddress: () => '127.0.0.1',
+        now: () => nowMs,
+        calllog: (room, ev, data) => events.push({ room, ev, data }),
+      },
+      async (srvPort) => {
+        // Short passcode (< 12 chars) in proxy mode -> 403 passcode_too_short even with matching passcode
+        const tooShort = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: { 'x-alice-passcode': 'short-11-ch', 'CF-Connecting-IP': '203.0.113.1' },
+        });
+        assert.equal(tooShort.status, 403);
+        assert.deepEqual(JSON.parse(tooShort.body.toString('utf8')), {
+          error: 'passcode_too_short',
+        });
+        assert.equal(events[events.length - 1].ev, 'token_refused');
+        assert.equal(events[events.length - 1].data?.reason, 'passcode_too_short');
+
+        // Outside proxy mode, short passcode is accepted as before
+        env.ALICE_TRUST_PROXY = '0';
+        const shortNonProxy = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: { 'x-alice-passcode': 'short-11-ch' },
+        });
+        assert.equal(shortNonProxy.status, 200);
+
+        // Restore proxy mode with a >= 12 char passcode
+        env.ALICE_TRUST_PROXY = '1';
+        env.ALICE_PASSCODE = 'correct-horse-battery-staple';
+
+        // 5 bad passcodes from client 1 -> 401
+        for (let i = 0; i < 5; i += 1) {
+          const res = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/token',
+            method: 'POST',
+            headers: { 'x-alice-passcode': `wrong-${i}`, 'CF-Connecting-IP': '10.0.0.1' },
+          });
+          assert.equal(res.status, 401);
+        }
+
+        // 6th bad passcode -> 429 passcode_locked with Retry-After
+        const sixthBad = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: { 'x-alice-passcode': 'wrong-6', 'CF-Connecting-IP': '10.0.0.1' },
+        });
+        assert.equal(sixthBad.status, 429);
+        assert.ok(Number(sixthBad.headers['retry-after']) >= 1);
+        assert.deepEqual(JSON.parse(sixthBad.body.toString('utf8')), { error: 'passcode_locked' });
+        assert.equal(events[events.length - 1].ev, 'token_refused');
+        assert.equal(events[events.length - 1].data?.reason, 'passcode_locked');
+
+        // Correct passcode during lockout is STILL refused (no oracle)
+        const rightDuringLock = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'correct-horse-battery-staple',
+            'CF-Connecting-IP': '10.0.0.1',
+          },
+        });
+        assert.equal(rightDuringLock.status, 429);
+        assert.deepEqual(JSON.parse(rightDuringLock.body.toString('utf8')), {
+          error: 'passcode_locked',
+        });
+
+        // 30 global failures across 6 distinct clients (client 1 already did 5; add clients 2..6)
+        for (let client = 2; client <= 6; client += 1) {
+          for (let attempt = 0; attempt < 5; attempt += 1) {
+            const res = await requestServer({
+              scheme: 'http',
+              port: srvPort,
+              path: '/api/token',
+              method: 'POST',
+              headers: {
+                'x-alice-passcode': 'nope',
+                'CF-Connecting-IP': `10.0.0.${client}`,
+              },
+            });
+            assert.equal(res.status, 401);
+          }
+        }
+
+        // After 30 failures elsewhere, a new visitor with the CORRECT passcode STILL works (200)
+        const afterThirty = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'correct-horse-battery-staple',
+            'CF-Connecting-IP': '10.0.9.1',
+          },
+        });
+        assert.equal(afterThirty.status, 200);
+
+        // Fill the remaining 570 failures to reach the global 600/min ceiling (clients 7..120 x 5 = 570)
+        for (let batchStart = 7; batchStart <= 120; batchStart += 15) {
+          const batchEnd = Math.min(120, batchStart + 14);
+          await Promise.all(
+            Array.from({ length: batchEnd - batchStart + 1 }, async (_, idx) => {
+              const client = batchStart + idx;
+              for (let attempt = 0; attempt < 5; attempt += 1) {
+                const res = await requestServer({
+                  scheme: 'http',
+                  port: srvPort,
+                  path: '/api/token',
+                  method: 'POST',
+                  headers: {
+                    'x-alice-passcode': 'nope',
+                    'CF-Connecting-IP': `10.0.0.${client}`,
+                  },
+                });
+                assert.equal(res.status, 401);
+              }
+            }),
+          );
+        }
+
+        // At 600 global failures, a brand-new visitor with the CORRECT passcode gets 429 passcode_locked
+        const globalLocked = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'correct-horse-battery-staple',
+            'CF-Connecting-IP': '10.0.9.2',
+          },
+        });
+        assert.equal(globalLocked.status, 429);
+        assert.ok(Number(globalLocked.headers['retry-after']) >= 1);
+        assert.deepEqual(JSON.parse(globalLocked.body.toString('utf8')), {
+          error: 'passcode_locked',
+        });
+
+        // After the 60 s window drains, both new and previously locked visitors succeed
+        nowMs += 60_001;
+        const unlocked = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            'x-alice-passcode': 'correct-horse-battery-staple',
+            'CF-Connecting-IP': '10.0.0.1',
+          },
+        });
+        assert.equal(unlocked.status, 200);
+      },
+    );
+  });
+
+  it('enforces ALICE_MAX_CALLS_PER_HOUR on successful mints only, frees after 1 hour, and does not expose cap on /healthz', async () => {
+    let nowMs = 3_000_000;
+    const events: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+    const env: Record<string, string | undefined> = {
+      ...lkEnv,
+      ALICE_PASSCODE: 'secret-pass-1234',
+      ALICE_TRUST_PROXY: '1',
+      ALICE_MAX_CALLS_PER_HOUR: '2',
+    };
+
+    await withTestServer(
+      {
+        env,
+        remoteAddress: () => '127.0.0.1',
+        now: () => nowMs,
+        calllog: (room, ev, data) => events.push({ room, ev, data }),
+      },
+      async (srvPort) => {
+        // /healthz exposes nothing sensitive (no cap, no client address, no trust_proxy)
+        const healthRes = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/healthz',
+          headers: { 'CF-Connecting-IP': '203.0.113.42' },
+        });
+        assert.equal(healthRes.status, 200);
+        const healthBody = JSON.parse(healthRes.body.toString('utf8')) as Record<string, unknown>;
+        assert.deepEqual(Object.keys(healthBody).sort(), [
+          'agent',
+          'livekit_configured',
+          'ok',
+          'passcode_required',
+          'uptime_s',
+        ]);
+
+        // Failed attempts (wrong passcode, missing LiveKit) must NOT count toward hourly cap
+        const badPass = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: { 'x-alice-passcode': 'wrong', 'CF-Connecting-IP': '203.0.113.1' },
+        });
+        assert.equal(badPass.status, 401);
+
+        const savedUrl = env.LIVEKIT_URL;
+        delete env.LIVEKIT_URL;
+        const noLk = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: { 'x-alice-passcode': 'secret-pass-1234', 'CF-Connecting-IP': '203.0.113.1' },
+        });
+        assert.equal(noLk.status, 503);
+        env.LIVEKIT_URL = savedUrl;
+
+        // 2 successful mints across different visitors fill the global cap
+        const mint1 = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: { 'x-alice-passcode': 'secret-pass-1234', 'CF-Connecting-IP': '203.0.113.1' },
+        });
+        assert.equal(mint1.status, 200);
+
+        nowMs += 10_000;
+        const mint2 = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: { 'x-alice-passcode': 'secret-pass-1234', 'CF-Connecting-IP': '203.0.113.2' },
+        });
+        assert.equal(mint2.status, 200);
+
+        // 3rd attempt hits 429 busy with retry_after_s and Retry-After
+        const capped = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: { 'x-alice-passcode': 'secret-pass-1234', 'CF-Connecting-IP': '203.0.113.3' },
+        });
+        assert.equal(capped.status, 429);
+        const retryHdr = Number(capped.headers['retry-after']);
+        assert.ok(retryHdr >= 3580 && retryHdr <= 3600, `unexpected Retry-After: ${retryHdr}`);
+        const cappedBody = JSON.parse(capped.body.toString('utf8')) as {
+          error: string;
+          retry_after_s: number;
+        };
+        assert.equal(cappedBody.error, 'busy');
+        assert.equal(cappedBody.retry_after_s, retryHdr);
+        assert.equal(events[events.length - 1].ev, 'token_refused');
+        assert.equal(events[events.length - 1].data?.reason, 'hourly_cap');
+
+        // Invalid / non-positive values disable the cap
+        for (const invalidCap of ['0', '-3', 'abc', '']) {
+          env.ALICE_MAX_CALLS_PER_HOUR = invalidCap;
+          const okRes = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/token',
+            method: 'POST',
+            headers: { 'x-alice-passcode': 'secret-pass-1234', 'CF-Connecting-IP': '203.0.113.4' },
+          });
+          assert.equal(okRes.status, 200, `invalid cap ${JSON.stringify(invalidCap)} should not cap`);
+        }
+
+        // Restore cap=2; advance clock past 1 hour so the earlier mints expire
+        env.ALICE_MAX_CALLS_PER_HOUR = '2';
+        nowMs += 60 * 60 * 1000 + 1;
+        const freed = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: { 'x-alice-passcode': 'secret-pass-1234', 'CF-Connecting-IP': '203.0.113.5' },
+        });
+        assert.equal(freed.status, 200);
+      },
+    );
+  });
+
+  it('enforces Origin check when ALICE_TRUST_PROXY is off and allows (logging at most once/min) when ALICE_TRUST_PROXY=1', async () => {
+    let nowMs = 3_500_000;
+    const events: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+    const env: Record<string, string | undefined> = {
+      ...lkEnv,
+      ALICE_PASSCODE: 'origin-pass-1234',
+    };
+
+    await withTestServer(
+      {
+        env,
+        now: () => nowMs,
+        calllog: (room, ev, data) => events.push({ room, ev, data }),
+      },
+      async (srvPort) => {
+        // Trust OFF: matching Origin -> 200
+        const sameOrigin = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            Host: `127.0.0.1:${srvPort}`,
+            Origin: `http://127.0.0.1:${srvPort}`,
+            'x-alice-passcode': 'origin-pass-1234',
+          },
+        });
+        assert.equal(sameOrigin.status, 200);
+
+        // Trust OFF: mismatched Origins -> 403 bad_origin
+        for (const badOrigin of [
+          'https://evil.example',
+          `http://localhost:${srvPort}`,
+          `http://127.0.0.1:${srvPort + 1}`,
+          'null',
+        ]) {
+          const refused = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/token',
+            method: 'POST',
+            headers: {
+              Host: `127.0.0.1:${srvPort}`,
+              Origin: badOrigin,
+              'x-alice-passcode': 'origin-pass-1234',
+            },
+          });
+          assert.equal(refused.status, 403, `expected 403 for Origin: ${badOrigin}`);
+          assert.deepEqual(JSON.parse(refused.body.toString('utf8')), { error: 'bad_origin' });
+          assert.equal(events[events.length - 1].ev, 'token_refused');
+          assert.equal(events[events.length - 1].data?.reason, 'bad_origin');
+        }
+
+        // Trust ON: mismatched Origin (e.g. host-header rewrite sending Host localhost) -> ALLOWED (200),
+        // logs at most one origin_mismatch event per minute, does NOT refuse
+        env.ALICE_TRUST_PROXY = '1';
+        const beforeMismatchLogs = events.filter((e) => e.ev === 'origin_mismatch').length;
+
+        const firstProxyMismatch = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            Host: `localhost:${srvPort}`,
+            Origin: 'https://alice-demo.trycloudflare.com',
+            'CF-Connecting-IP': '203.0.113.21',
+            'x-alice-passcode': 'origin-pass-1234',
+          },
+        });
+        assert.equal(firstProxyMismatch.status, 200);
+        assert.equal(
+          events.filter((e) => e.ev === 'origin_mismatch').length,
+          beforeMismatchLogs + 1,
+        );
+
+        // Second mismatch within the same minute -> still allowed, no duplicate origin_mismatch log
+        nowMs += 10_000;
+        const secondProxyMismatch = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            Host: `localhost:${srvPort}`,
+            Origin: 'https://alice-demo.trycloudflare.com',
+            'CF-Connecting-IP': '203.0.113.22',
+            'x-alice-passcode': 'origin-pass-1234',
+          },
+        });
+        assert.equal(secondProxyMismatch.status, 200);
+        assert.equal(
+          events.filter((e) => e.ev === 'origin_mismatch').length,
+          beforeMismatchLogs + 1,
+        );
+
+        // After 60 s, another mismatch logs one more origin_mismatch event
+        nowMs += 60_001;
+        const thirdProxyMismatch = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/token',
+          method: 'POST',
+          headers: {
+            Host: `localhost:${srvPort}`,
+            Origin: 'https://alice-demo.trycloudflare.com',
+            'CF-Connecting-IP': '203.0.113.23',
+            'x-alice-passcode': 'origin-pass-1234',
+          },
+        });
+        assert.equal(thirdProxyMismatch.status, 200);
+        assert.equal(
+          events.filter((e) => e.ev === 'origin_mismatch').length,
+          beforeMismatchLogs + 2,
+        );
+      },
+    );
+  });
+
+  it('enforces a global 30/min proxy cap on /api/storefront and occasion-less /api/looks without capping other browse routes', async () => {
+    let nowMs = 4_000_000;
+    await withTestServer(
+      {
+        env: { ALICE_TRUST_PROXY: '1' },
+        now: () => nowMs,
+        store: {
+          storefront: async (department) => ({
+            department,
+            sections: [],
+            ms: 1,
+            storefront: { searches: 0, shared: false },
+          }),
+          searchMixed: async () => ({ items: [], source: 'empty', ms: 1 }),
+          getProduct: async () => null,
+        },
+        loadLibrary: async () => null,
+      },
+      async (srvPort) => {
+        // 30 requests across 30 distinct visitors mixing /api/storefront and occasion-less /api/looks succeed
+        for (let i = 0; i < 30; i += 1) {
+          const reqPath = i % 2 === 0 ? '/api/storefront' : '/api/looks';
+          const res = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: reqPath,
+            headers: { 'CF-Connecting-IP': `203.0.113.${i + 1}` },
+          });
+          assert.equal(res.status, 200, `expected 200 on global request #${i + 1}`);
+        }
+
+        // 31st request from a brand-new visitor hits 429 with Retry-After
+        const blockedSf = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/storefront',
+          headers: { 'CF-Connecting-IP': '203.0.113.99' },
+        });
+        assert.equal(blockedSf.status, 429);
+        assert.ok(Number(blockedSf.headers['retry-after']) >= 1);
+        assert.deepEqual(JSON.parse(blockedSf.body.toString('utf8')), { error: 'slow_down' });
+
+        const blockedLooks = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/looks',
+          headers: { 'CF-Connecting-IP': '203.0.113.100' },
+        });
+        assert.equal(blockedLooks.status, 429);
+
+        // Other browse routes (/api/search, /api/occasions, /api/looks?occasion=...) are NOT blocked by the 30/min global cap
+        const searchOk = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/search?q=loafer',
+          headers: { 'CF-Connecting-IP': '203.0.113.101' },
+        });
+        assert.equal(searchOk.status, 200);
+
+        const looksWithOcc = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/looks?occasion=brunch',
+          headers: { 'CF-Connecting-IP': '203.0.113.101' },
+        });
+        assert.equal(looksWithOcc.status, 200);
+
+        const matchOk = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/occasions/match?department=women&q=rooftop+birthday',
+          headers: { 'CF-Connecting-IP': '203.0.113.101' },
+        });
+        assert.equal(matchOk.status, 200);
+
+        // /api/occasions and /api/occasions/match use clientAddress(req) for separate 90/min visitor buckets
+        for (let i = 0; i < 90; i += 1) {
+          const res = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: i % 2 === 0 ? '/api/occasions' : '/api/occasions/match?department=women&q=brunch',
+            headers: { 'CF-Connecting-IP': '203.0.113.201' },
+          });
+          assert.equal(res.status, 200);
+        }
+        const visitorABlocked = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/occasions/match?department=women&q=brunch',
+          headers: { 'CF-Connecting-IP': '203.0.113.201' },
+        });
+        assert.equal(visitorABlocked.status, 429);
+
+        const visitorBAllowed = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/occasions/match?department=women&q=brunch',
+          headers: { 'CF-Connecting-IP': '203.0.113.202' },
+        });
+        assert.equal(visitorBAllowed.status, 200);
+
+        // After 60 s window drains, /api/storefront succeeds again
+        nowMs += 60_001;
+        const sfAfter = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/storefront',
+          headers: { 'CF-Connecting-IP': '203.0.113.102' },
+        });
+        assert.equal(sfAfter.status, 200);
+      },
+    );
+  });
+});
