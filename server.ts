@@ -1190,8 +1190,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
           method,
           filePath,
           {
-            'Cache-Control': 'public, max-age=3600',
-            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'private, max-age=3600',
           },
           { enableRange: true, rangeHeader },
         );
