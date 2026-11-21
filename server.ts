@@ -29,7 +29,10 @@ export interface AliceStoreDeps {
   getProduct?: (id: string) => Promise<ProductDetail | null>;
 }
 
-export type LibraryLoaderFn = () => Promise<{ libraryLooks?: unknown } | null>;
+export type LibraryLoaderFn = () => Promise<{
+  libraryLooks?: unknown;
+  libraryOccasions?: unknown;
+} | null>;
 
 export interface AliceBudgetOptions {
   storefrontMs?: number;
@@ -64,6 +67,7 @@ const PRODUCT_BUDGET_MS = 1300;
 const SEARCH_BUDGET_MS = 1300;
 const LOOKS_BUDGET_MS = 1400;
 const SEARCH_QUERY_MAX_LEN = 80;
+const OCCASION_MAX_LEN = 120;
 const TRYON_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.(jpg|jpeg|png|webp|mp4)$/;
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -328,7 +332,59 @@ function loadFixtureOutfits(
   return [];
 }
 
-function defaultLoadLibrary(): Promise<{ libraryLooks?: unknown } | null> {
+async function readLibraryOccasionsFromFile(
+  department: Gender,
+  env: Record<string, string | undefined>,
+): Promise<string[]> {
+  const override = env.ALICE_LIBRARY_FILE;
+  const filePath =
+    override && override.trim().length > 0
+      ? path.resolve(override)
+      : path.join(import.meta.dirname, 'src', 'library', 'sets.json');
+
+  try {
+    const raw = await fs.promises.readFile(filePath, 'utf8');
+    const parsed = JSON.parse(raw) as {
+      sets?: Array<{ key?: unknown; gender?: unknown; occasion?: unknown; outfits?: unknown }>;
+    };
+    if (!Array.isArray(parsed?.sets)) return [];
+
+    const matching = parsed.sets.filter(
+      (s) =>
+        s &&
+        s.gender === department &&
+        typeof s.occasion === 'string' &&
+        s.occasion.trim().length > 0 &&
+        Array.isArray(s.outfits) &&
+        s.outfits.length > 0,
+    );
+
+    matching.sort((a, b) => {
+      const aDemo = a.key === 'rooftop-birthday' ? 0 : 1;
+      const bDemo = b.key === 'rooftop-birthday' ? 0 : 1;
+      return aDemo - bDemo;
+    });
+
+    const seen = new Set<string>();
+    const occasions: string[] = [];
+    for (const s of matching) {
+      const label = (s.occasion as string).trim();
+      const norm = label.toLowerCase();
+      if (!seen.has(norm)) {
+        seen.add(norm);
+        occasions.push(label);
+      }
+    }
+    return occasions;
+  } catch {
+    return [];
+  }
+}
+
+function defaultLoadLibrary(): Promise<{
+  libraryLooks?: unknown;
+  libraryOccasions?: unknown;
+} | null> {
   return import('./src/library/index.ts').catch(() => null);
 }
 
@@ -594,12 +650,13 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         return;
       }
 
-      // 3b. Storefront, product, search, and looks browse routes (GET only, shared 90/min limit)
+      // 3b. Storefront, product, search, looks, and occasions browse routes (GET only, shared 90/min limit)
       if (
         rawPathname === '/api/storefront' ||
         rawPathname === '/api/product' ||
         rawPathname === '/api/search' ||
-        rawPathname === '/api/looks'
+        rawPathname === '/api/looks' ||
+        rawPathname === '/api/occasions'
       ) {
         if (method !== 'GET') {
           sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'GET' });
@@ -712,22 +769,31 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
           return;
         }
 
-        // GET /api/looks?department=men|women&limit=<1-12, default 6>
+        // GET /api/looks?department=men|women&limit=<1-12, default 6>&occasion=<text>
         if (rawPathname === '/api/looks') {
           const department = parseDepartment(parsedUrl.searchParams.get('department'));
           const limit = parseLooksLimit(parsedUrl.searchParams.get('limit'));
+          const rawOccasion = parsedUrl.searchParams.get('occasion');
+          const trimmedOccasion = rawOccasion !== null ? rawOccasion.trim() : '';
+          if (trimmedOccasion.length > OCCASION_MAX_LEN) {
+            sendJson(res, 400, { error: 'bad_occasion' }, { 'Cache-Control': 'no-store' });
+            return;
+          }
+          const occasion: string | null = trimmedOccasion.length > 0 ? trimmedOccasion : null;
 
           let libraryOutfits: Outfit[] | null = null;
+          let libraryAnsweredEmpty = false;
           try {
             const runLibrary = async (): Promise<Outfit[] | null> => {
               const mod = await loadLibraryFn();
               if (mod && typeof mod.libraryLooks === 'function') {
                 const fn = mod.libraryLooks as (
                   g: Gender,
-                  o?: { limit?: number },
+                  o?: { limit?: number; occasion?: string },
                 ) => Promise<Outfit[]>;
-                const resOutfits = await fn(department, { limit });
-                if (Array.isArray(resOutfits) && resOutfits.length > 0) {
+                const callOpts = occasion !== null ? { limit, occasion } : { limit };
+                const resOutfits = await fn(department, callOpts);
+                if (Array.isArray(resOutfits)) {
                   return resOutfits.slice(0, limit);
                 }
               }
@@ -735,8 +801,12 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
             };
 
             const raced = await raceWithBudget(runLibrary(), looksBudgetMs);
-            if (!raced.timedOut && raced.value && raced.value.length > 0) {
-              libraryOutfits = raced.value;
+            if (!raced.timedOut && raced.value !== null) {
+              if (raced.value.length > 0) {
+                libraryOutfits = raced.value;
+              } else {
+                libraryAnsweredEmpty = true;
+              }
             }
           } catch {
             libraryOutfits = null;
@@ -747,7 +817,19 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
             sendJson(
               res,
               200,
-              { department, looks: libraryOutfits, source: 'library' },
+              { department, occasion, looks: libraryOutfits, source: 'library' },
+              { 'Cache-Control': 'no-store' },
+            );
+            return;
+          }
+
+          // For an occasion query, never fall back to wrong-occasion fixture looks.
+          if (occasion !== null) {
+            logExtra = `dept=${department} source=library n=0${libraryAnsweredEmpty ? '' : ' timeout_or_err=true'}`;
+            sendJson(
+              res,
+              200,
+              { department, occasion, looks: [], source: 'library' },
               { 'Cache-Control': 'no-store' },
             );
             return;
@@ -759,9 +841,44 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
           sendJson(
             res,
             200,
-            { department, looks: fixtureLooks, source: 'fixture' },
+            { department, occasion: null, looks: fixtureLooks, source: 'fixture' },
             { 'Cache-Control': 'no-store' },
           );
+          return;
+        }
+
+        // GET /api/occasions?department=men|women
+        if (rawPathname === '/api/occasions') {
+          const department = parseDepartment(parsedUrl.searchParams.get('department'));
+          let occasions: string[] | null = null;
+          try {
+            const runOccasions = async (): Promise<string[] | null> => {
+              const mod = await loadLibraryFn();
+              if (mod && typeof mod.libraryOccasions === 'function') {
+                const fn = mod.libraryOccasions as (g: Gender) => Promise<unknown> | unknown;
+                const list = await fn(department);
+                if (Array.isArray(list)) {
+                  return list
+                    .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+                    .map((x) => x.trim());
+                }
+              }
+              return null;
+            };
+            const raced = await raceWithBudget(runOccasions(), looksBudgetMs);
+            if (!raced.timedOut && raced.value !== null) {
+              occasions = raced.value;
+            }
+          } catch {
+            occasions = null;
+          }
+
+          if (occasions === null) {
+            occasions = await readLibraryOccasionsFromFile(department, env);
+          }
+
+          logExtra = `dept=${department} n=${occasions.length}`;
+          sendJson(res, 200, { department, occasions }, { 'Cache-Control': 'no-store' });
           return;
         }
       }
