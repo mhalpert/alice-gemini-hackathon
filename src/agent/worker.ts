@@ -33,6 +33,7 @@ import {
   sendRealtimeContext,
 } from './context.ts';
 import { applyRealtimeSessionPatches, sendInterimToolNote } from './patches.ts';
+import { createToolResultNudger } from './nudge.ts';
 import { createPageSender } from './page.ts';
 import { ALICE_SYSTEM_PROMPT, GREETING_INSTRUCTIONS } from './prompt.ts';
 import { createCallStateStore } from './state.ts';
@@ -422,12 +423,20 @@ export default defineAgent({
         })
       : null;
 
+    let sessionRef: voice.AgentSession | null = null;
+    const resultNudger = createToolResultNudger({
+      room: roomName,
+      generateReply: (opts) => sessionRef?.generateReply(opts),
+      log: calllog,
+    });
+
     const tools = createAgentTools({
       room: roomName,
       page,
       state: callState,
       signal: toolAbort.signal,
       sendWorkingNote: (params) => sendInterimToolNote(activeRealtimeSession, params),
+      onToolResult: (ev) => resultNudger.onToolResult(ev),
       getSnapshot: () => vision?.latest() ?? null,
     });
 
@@ -443,18 +452,27 @@ export default defineAgent({
         turnDetection: 'realtime_llm',
       },
     });
+    sessionRef = session;
+
+    const loggedUserItemIds = new Set<string>();
 
     session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev) => {
       appContext.setAgentState(ev.newState);
+      resultNudger.onAgentStateChanged(ev.newState);
       calllog(roomName, 'agent_state', { old: ev.oldState, state: ev.newState });
     });
 
     session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
+      resultNudger.onUserStateChanged(ev.newState);
       calllog(roomName, 'user_state', { old: ev.oldState, state: ev.newState });
     });
 
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
       if (ev.isFinal && ev.transcript) {
+        callState.recordShopperTurn(ev.transcript, ev.itemId);
+        if (ev.itemId) {
+          loggedUserItemIds.add(ev.itemId);
+        }
         calllog(roomName, 'user_said', { text: ev.transcript, item_id: ev.itemId });
       }
     });
@@ -462,7 +480,19 @@ export default defineAgent({
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev) => {
       if (ev.item.type === 'message' && ev.item.role === 'assistant') {
         const text = ev.item.textContent ?? '';
+        resultNudger.onAssistantMessage();
         calllog(roomName, 'alice_said', { text, interrupted: ev.item.interrupted });
+      } else if (ev.item.type === 'message' && ev.item.role === 'user') {
+        const text = ev.item.textContent ?? '';
+        if (text.trim().length > 0) {
+          callState.recordShopperTurn(text, ev.item.id);
+          if (!ev.item.id || !loggedUserItemIds.has(ev.item.id)) {
+            if (ev.item.id) {
+              loggedUserItemIds.add(ev.item.id);
+            }
+            calllog(roomName, 'user_said', { text, item_id: ev.item.id, source: 'text' });
+          }
+        }
       }
     });
 
@@ -502,6 +532,7 @@ export default defineAgent({
         ...(ev.error ? { error: ev.error } : {}),
       });
       toolAbort.abort();
+      resultNudger.dispose();
       void vision?.close().catch(() => {});
       appContext.dispose();
     });
@@ -509,6 +540,7 @@ export default defineAgent({
     let cleanupCameraWatcher: (() => void) | undefined;
     ctx.addShutdownCallback(async () => {
       toolAbort.abort();
+      resultNudger.dispose();
       cleanupCameraWatcher?.();
       await vision?.close();
       appContext.dispose();

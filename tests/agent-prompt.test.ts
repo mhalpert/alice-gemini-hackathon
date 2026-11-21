@@ -114,3 +114,21 @@ test('ALICE_SYSTEM_PROMPT encodes polish2 rules: bag accuracy, size confirmation
   assert.match(ALICE_SYSTEM_PROMPT, /Was that for me\?/i);
   assert.match(ALICE_SYSTEM_PROMPT, /at most once/i);
 });
+
+test('ALICE_SYSTEM_PROMPT encodes polish3 rules: interruption recovery, surprise reveal, and top/bottom/shoe sizes only', () => {
+  // 1. Interruption handling.
+  assert.match(ALICE_SYSTEM_PROMPT, /stop talking the moment the shopper speaks/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /without restarting the sentence or apologising/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /answer that first, then return to your earlier thought only if it still matters/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never repeat a line you already finished/i);
+
+  // 2. Surprise reveal build-up and no pre-reveal description.
+  assert.match(ALICE_SYSTEM_PROMPT, /reveal as a surprise/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /one short line of build-up/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never describe the try-on image before the result says it is revealed/i);
+
+  // 3. Only ask for top, bottom, and shoe sizes (never jacket, belt, or accessory sizes).
+  assert.match(ALICE_SYSTEM_PROMPT, /ask only for top, bottom, and shoe sizes/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never for jacket, belt, or accessory sizes/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /matched the jacket to their top size or the belt to their waist/i);
+});

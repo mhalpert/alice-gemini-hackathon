@@ -32,6 +32,18 @@ import {
   normalizeSlotKey,
   outfitToStateLook,
 } from './state.ts';
+import {
+  CORE_SIZE_SLOTS,
+  type CoreSizeSlot,
+  areSizesEquivalent,
+  extractLatestSizesFromTurns,
+  inferAccessoryDefaultSize,
+  inferBeltSize,
+  isBeltPiece,
+  isCoreSlot,
+  parseSizesFromStoreReason,
+  resolveOutfitSizes,
+} from './sizing.ts';
 
 export const DUPLICATE_WINDOW_MS = 15_000;
 export const MAX_BUDGET_USD = 10_000;
@@ -139,6 +151,8 @@ export interface ToolRuntimeOptions {
   walkIntervalMs?: number;
   weatherTimeoutMs?: number;
   sendWorkingNote?: (params: WorkingNoteParams) => boolean | void;
+  onToolResult?: (params: { name: string; callId: string; text: string }) => void;
+  getShopperTurns?: () => readonly string[];
   getSnapshot?: () => CameraSnapshot | null;
   page?: PageSender;
   state?: CallStateStore;
@@ -514,6 +528,7 @@ export function createToolWrapper(options: ToolRuntimeOptions): ToolWrapperConte
               text,
               duration_ms: durationMs,
             });
+            options.onToolResult?.({ name, callId, text });
             return text;
           } catch (err) {
             const errorObj = err instanceof Error ? err : new Error(String(err));
@@ -576,37 +591,58 @@ function formatMissingSizesPhrase(slots: string[]): string {
 }
 
 function buildShowOnMeSizeNextStep(outfit: Outfit, rememberedSizes: Record<string, string>): string {
-  const outfitNormSlots = new Set(outfit.pieces.map((p) => normalizeSlotKey(p.slot)));
   const knownByKey = new Map<string, string>();
-  const missing: string[] = [];
+  const missingSet = new Set<CoreSizeSlot>();
+  const hasBottomPiece = outfit.pieces.some((p) => normalizeSlotKey(p.slot) === 'bottom');
 
   for (const piece of outfit.pieces) {
-    if (!pieceNeedsSizeForPrompt(piece)) continue;
     const slotLower = piece.slot.toLowerCase();
     const slotNorm = normalizeSlotKey(piece.slot);
-    const direct = rememberedSizes[slotLower] ?? rememberedSizes[slotNorm];
-    const fallback =
-      direct === undefined && (slotNorm === 'dress' || slotNorm === 'layer')
-        ? rememberedSizes.top
-        : undefined;
-    const heard = direct ?? fallback;
 
-    if (heard) {
-      const displayKey = direct !== undefined ? slotNorm : 'top';
-      if (!knownByKey.has(displayKey)) {
-        knownByKey.set(displayKey, heard);
+    // Core slots: top, bottom, shoes
+    if (slotNorm === 'top' || slotNorm === 'bottom' || slotNorm === 'shoes') {
+      if (!pieceNeedsSizeForPrompt(piece)) continue;
+      const heard = rememberedSizes[slotLower] ?? rememberedSizes[slotNorm];
+      if (heard) {
+        if (!knownByKey.has(slotNorm)) {
+          knownByKey.set(slotNorm, heard);
+        }
+      } else {
+        missingSet.add(slotNorm);
       }
       continue;
     }
 
-    if (slotNorm === 'layer' && outfitNormSlots.has('top')) {
+    // Layer / outerwear and dress use top size; never ask for layer/jacket/dress slot
+    if (slotNorm === 'layer' || slotNorm === 'dress') {
+      if (!pieceNeedsSizeForPrompt(piece)) continue;
+      const direct = rememberedSizes[slotLower] ?? rememberedSizes[slotNorm];
+      const heard = direct ?? rememberedSizes.top;
+      if (heard) {
+        const displayKey = direct !== undefined ? slotNorm : 'top';
+        if (!knownByKey.has(displayKey)) {
+          knownByKey.set(displayKey, heard);
+        }
+      } else {
+        missingSet.add('top');
+      }
       continue;
     }
-    if (!missing.includes(slotNorm)) {
-      missing.push(slotNorm);
+
+    // Belts derive from bottom (waist) size; never ask for belt or accessory size
+    if (isBeltPiece(piece)) {
+      if (rememberedSizes.bottom && !knownByKey.has('bottom')) {
+        knownByKey.set('bottom', rememberedSizes.bottom);
+      } else if (!rememberedSizes.bottom && !rememberedSizes.belt && hasBottomPiece && pieceNeedsSizeForPrompt(piece)) {
+        missingSet.add('bottom');
+      }
+      continue;
     }
+
+    // Any other accessory auto-defaults; never ask the shopper for its size.
   }
 
+  const missing = CORE_SIZE_SLOTS.filter((slot) => missingSet.has(slot));
   const knownSummary = Array.from(knownByKey.entries())
     .map(([slot, size]) => `${slot} ${size}`)
     .join(', ');
@@ -1484,35 +1520,59 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         }
 
         const { lookNum, outfit } = resolved;
-        if (sizes && Object.keys(sizes).length > 0) {
-          const changed = stateStore.dispatch({ type: 'merge_sizes', sizes });
+        const gender: Gender = stateStore.get().department ?? 'women';
+
+        // Safety net (Requirement 2): extract core sizes from recent shopper turns (voice & typed).
+        const shopperTurns = options.getShopperTurns
+          ? options.getShopperTurns()
+          : stateStore.getRecentShopperTurns();
+        const speechSizes = extractLatestSizesFromTurns(shopperTurns);
+
+        const modelPassedCore: Partial<Record<CoreSizeSlot, string>> = {};
+        if (sizes && typeof sizes === 'object') {
+          for (const [rawSlot, rawVal] of Object.entries(sizes)) {
+            const norm = normalizeSlotKey(rawSlot);
+            const val = typeof rawVal === 'string' ? rawVal.trim() : '';
+            if (val && (norm === 'top' || norm === 'bottom' || norm === 'shoes')) {
+              modelPassedCore[norm] = val;
+            }
+          }
+        }
+
+        const prevRememberedSizes = stateStore.get().sizes;
+        const recoveredFromSpeech: Record<string, string> = {};
+        for (const slot of CORE_SIZE_SLOTS) {
+          const modelVal = modelPassedCore[slot];
+          const speechVal = speechSizes[slot];
+          if (modelVal !== undefined && speechVal !== undefined) {
+            if (!areSizesEquivalent(slot, modelVal, speechVal)) {
+              logFn(options.room, 'size_mismatch', {
+                slot,
+                model: modelVal,
+                shopper: speechVal,
+              });
+            }
+          } else if (modelVal === undefined && !prevRememberedSizes[slot] && speechVal !== undefined) {
+            recoveredFromSpeech[slot] = speechVal;
+          }
+        }
+
+        const mergedIncoming: Record<string, string> = {
+          ...recoveredFromSpeech,
+          ...(sizes ?? {}),
+        };
+        if (Object.keys(mergedIncoming).length > 0) {
+          const changed = stateStore.dispatch({ type: 'merge_sizes', sizes: mergedIncoming });
           if (changed.length > 0) {
             wrapper.invalidate('add_to_bag');
           }
         }
 
         const rememberedSizes = stateStore.get().sizes;
-        const missingSlots: string[] = [];
-        const resolvedSizes: Record<string, string> = { ...rememberedSizes };
-
-        for (const piece of outfit.pieces) {
-          const slotLower = piece.slot.toLowerCase();
-          const slotNorm = normalizeSlotKey(piece.slot);
-          const heard =
-            rememberedSizes[slotLower] ??
-            rememberedSizes[slotNorm] ??
-            (slotNorm === 'dress' || slotNorm === 'layer' ? rememberedSizes.top : undefined);
-
-          if (heard) {
-            resolvedSizes[slotLower] = heard;
-          }
-
-          if (Array.isArray(piece.item.sizes) && piece.item.sizes.length > 1 && !heard) {
-            if (!missingSlots.includes(piece.slot)) {
-              missingSlots.push(piece.slot);
-            }
-          }
-        }
+        const resolution = resolveOutfitSizes(outfit, rememberedSizes, gender);
+        const { resolvedSizes, missingSlots, inferred } = resolution;
+        let inferredJacket = resolution.inferredJacket;
+        let inferredBelt = resolution.inferredBelt;
 
         if (missingSlots.length > 0) {
           return `NOT DONE: Still need sizes for: ${missingSlots.join(', ')}. Ask for just those in one question, then call add_to_bag again.`;
@@ -1548,7 +1608,6 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           }
         }
 
-        const gender: Gender = stateStore.get().department ?? 'women';
         let bagOut: BagOut;
         if (addToBagFn) {
           bagOut = await addToBagFn(outfit, resolvedSizes, gender);
@@ -1559,7 +1618,58 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           return 'NOT DONE: Store shopping bag is not available right now. Do not claim the bag is ready.';
         }
 
-        const bagPayload = bagOutToPagePayload(bagOut, outfit, resolvedSizes);
+        let bagPayload = bagOutToPagePayload(bagOut, outfit, resolvedSizes);
+        let rawSummary = typeof bagOut.summary === 'string' ? bagOut.summary.trim() : '';
+        let isNotDoneSummary = /^NOT DONE:/i.test(rawSummary);
+
+        // If store returned NOT DONE solely for non-core items whose Item.sizes was empty
+        // (e.g. multi-size belt/accessory discovered at Shopify lookup), infer from the store's
+        // size preview and retry once so we never ask the shopper for jacket/belt/accessory sizes.
+        if (!usedMock && addToBagFn && isNotDoneSummary) {
+          const storeMissingLines = bagPayload.stores.flatMap((store) =>
+            store.not_added.filter((line) => /no .+ size given/i.test(line.reason ?? '')),
+          );
+          const hasCoreMissing = storeMissingLines.some((line) => isCoreSlot(line.slot));
+          if (storeMissingLines.length > 0 && !hasCoreMissing) {
+            let inferredAny = false;
+            for (const line of storeMissingLines) {
+              const slotLower = line.slot.trim().toLowerCase();
+              const slotNorm = normalizeSlotKey(line.slot);
+              const piece = outfit.pieces.find(
+                (p) => p.slot.trim().toLowerCase() === slotLower && p.item.title === line.title,
+              ) ?? outfit.pieces.find((p) => p.slot.trim().toLowerCase() === slotLower);
+              const previewSizes = parseSizesFromStoreReason(line.reason ?? '');
+
+              let chosen: string | null = null;
+              if (slotNorm === 'layer' && rememberedSizes.top) {
+                chosen = rememberedSizes.top;
+                inferredJacket = true;
+              } else if (piece && isBeltPiece(piece)) {
+                const ref = rememberedSizes.bottom ?? rememberedSizes.dress ?? rememberedSizes.top;
+                chosen = ref
+                  ? inferBeltSize(ref, previewSizes, gender)
+                  : inferAccessoryDefaultSize(previewSizes);
+                if (chosen) inferredBelt = true;
+              } else {
+                chosen = inferAccessoryDefaultSize(previewSizes);
+              }
+
+              if (chosen) {
+                resolvedSizes[slotLower] = chosen;
+                const key = piece && isBeltPiece(piece) && slotLower === 'accessory' ? 'belt' : slotLower;
+                inferred[key] = chosen;
+                inferredAny = true;
+              }
+            }
+
+            if (inferredAny) {
+              bagOut = await addToBagFn(outfit, resolvedSizes, gender);
+              bagPayload = bagOutToPagePayload(bagOut, outfit, resolvedSizes);
+              rawSummary = typeof bagOut.summary === 'string' ? bagOut.summary.trim() : '';
+              isNotDoneSummary = /^NOT DONE:/i.test(rawSummary);
+            }
+          }
+        }
 
         const notAdded: BagNotAdded[] = [];
         for (const store of bagPayload.stores) {
@@ -1572,9 +1682,6 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           }
         }
 
-        const rawSummary = typeof bagOut.summary === 'string' ? bagOut.summary.trim() : '';
-        const isNotDoneSummary = /^NOT DONE:/i.test(rawSummary);
-
         if (!usedMock && isNotDoneSummary) {
           const afterPrefix = rawSummary.replace(/^NOT DONE:\s*/i, '').trim();
           const notAddedLines = bagPayload.stores.flatMap((store) =>
@@ -1585,7 +1692,13 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             })),
           );
           const missingSizeLines = notAddedLines.filter((l) => /size/i.test(l.reason));
-          const targetLines = missingSizeLines.length > 0 ? missingSizeLines : notAddedLines;
+          const coreMissingLines = missingSizeLines.filter((l) => isCoreSlot(l.slot));
+          const targetLines =
+            coreMissingLines.length > 0
+              ? coreMissingLines
+              : missingSizeLines.length > 0
+                ? missingSizeLines
+                : notAddedLines;
           const summaryMentionsAll =
             afterPrefix.length > 0 &&
             (targetLines.length === 0 ||
@@ -1640,6 +1753,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           total: bagPayload.total,
           not_added: notAdded,
           mocked: usedMock,
+          inferred,
         });
 
         const addedCount = bagPayload.stores.reduce((sum, s) => sum + s.added.length, 0);
@@ -1681,6 +1795,16 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           lines.push(
             'Checkout links were prepared, though the page did not confirm displaying the bag yet.',
           );
+        }
+
+        if (inferredJacket && inferredBelt) {
+          lines.push(
+            'You may mention briefly that you matched the jacket to their top size and the belt to their waist.',
+          );
+        } else if (inferredJacket) {
+          lines.push('You may mention briefly that you matched the jacket to their top size.');
+        } else if (inferredBelt) {
+          lines.push('You may mention briefly that you matched the belt to their waist.');
         }
 
         if (usedMock || /mock/i.test(bagOut.summary)) {
