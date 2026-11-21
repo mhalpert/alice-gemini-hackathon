@@ -201,15 +201,48 @@ function closeSvg() {
   ]);
 }
 
+const BOUTIQUE_FETCH_TIMEOUT_MS = 4000;
+
+// Fetch JSON from same-origin store routes with a hard timeout; returns null on any failure
+async function fetchJson(url, { timeoutMs = BOUTIQUE_FETCH_TIMEOUT_MS, signal } = {}) {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) return null;
+    signal.addEventListener('abort', onAbort, { once: true });
+  }
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data && typeof data === 'object' ? data : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', onAbort);
+  }
+}
+
 // Renders the shop into `root` (the #store element) and returns the page-action handlers.
-export function mountStore(root) {
+export function mountStore(root, { onTalk } = {}) {
   if (!root || !(root instanceof HTMLElement)) {
     throw new Error('mountStore requires a valid DOM container');
   }
 
+  function triggerTalk() {
+    if (typeof onTalk === 'function') onTalk();
+  }
+
   // Single state object for the entire shop view
   const state = {
-    view: 'empty', // 'empty' | 'looks' | 'picked' | 'search'
+    view: 'boutique', // 'empty' | 'boutique' | 'looks' | 'picked' | 'search'
     outfits: new Map(), // look number -> Outfit
     media: new Map(), // look number -> { tryOnStatus, tryOnUrl, collageUrl, revealed, preloads }
     subtitleMeta: { raw: '', cleanSubtitle: '', occasion: '', budget: null },
@@ -220,7 +253,29 @@ export function mountStore(root) {
     bagOpen: false,
     productOpen: false,
     lastSearch: null,
+    searchFromBoutique: false,
   };
+
+  // Boutique storefront state (kept separate from live-call outfits)
+  const boutique = {
+    department: 'women', // 'women' | 'men'
+    looks: [],
+    sections: [],
+    looksPending: false,
+    storefrontPending: false,
+    reqId: 0,
+    abortController: null,
+  };
+
+  // Header search and product detail request guards
+  let searchBarOpen = false;
+  let searchReqId = 0;
+  let searchAbortController = null;
+  let productReqId = 0;
+  let productAbortController = null;
+
+  // Live DOM slot refs while the boutique view is mounted
+  let boutiqueRefs = null;
 
   // Optional hint set during local product-card clicks so multi-look items keep their look number
   let pendingProductOutfit = null;
@@ -264,9 +319,85 @@ export function mountStore(root) {
     return Array.from(state.outfits.values()).sort((a, b) => a.number - b.number);
   }
 
+  function hasBoutiqueContent() {
+    return boutique.looks.length > 0 || boutique.sections.length > 0;
+  }
+
+  function hasBoutiqueAvailable() {
+    return hasBoutiqueContent() || boutique.looksPending || boutique.storefrontPending;
+  }
+
+  function syncBoutiqueBodyClass() {
+    if (hasBoutiqueContent()) {
+      document.body.classList.add('has-boutique');
+    } else if (!boutique.looksPending && !boutique.storefrontPending) {
+      document.body.classList.remove('has-boutique');
+    }
+  }
+
   // Build persistent store chrome
   const bagBadge = el('span', { className: 'bag-badge', hidden: true, 'aria-live': 'polite' }, '0');
   const navLinks = new Map();
+
+  // Collapsible header search bar
+  const searchInputEl = el('input', {
+    type: 'search',
+    className: 'header-search-input',
+    placeholder: 'Search Fashion Nova, Everlane, Steve Madden, Kith…',
+    'aria-label': 'Search store',
+    autocomplete: 'off',
+    onKeydown: (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        closeHeaderSearch({ restoreFocus: true });
+      }
+    },
+  });
+  const searchStatusEl = el('span', { className: 'header-search-status', 'aria-live': 'polite', hidden: true }, 'Searching…');
+  const searchFormEl = el(
+    'form',
+    {
+      className: 'header-search-form',
+      role: 'search',
+      onSubmit: (e) => {
+        e.preventDefault();
+        runHeaderSearch();
+      },
+    },
+    searchSvg(),
+    searchInputEl,
+    searchStatusEl,
+    el(
+      'button',
+      {
+        type: 'button',
+        className: 'header-search-close',
+        'aria-label': 'Close search',
+        onClick: () => closeHeaderSearch({ restoreFocus: true }),
+      },
+      closeSvg()
+    )
+  );
+  const headerSearchBarEl = el('div', { className: 'header-search-bar', hidden: true }, searchFormEl);
+
+  const searchToggleBtn = el(
+    'button',
+    {
+      type: 'button',
+      className: 'icon-btn',
+      'aria-label': 'Search',
+      'aria-expanded': 'false',
+      onClick: () => {
+        if (searchBarOpen) {
+          closeHeaderSearch();
+        } else {
+          openHeaderSearch();
+        }
+      },
+    },
+    searchSvg()
+  );
 
   const headerEl = el(
     'header',
@@ -283,7 +414,11 @@ export function mountStore(root) {
           className: 'wordmark',
           'aria-label': 'Alice home',
           onClick: () => {
-            if (state.outfits.size > 0) handlers.showAll({});
+            if (hasBoutiqueAvailable()) {
+              showBoutique();
+            } else if (state.outfits.size > 0) {
+              handlers.showAll({});
+            }
           },
         },
         'ALICE'
@@ -291,20 +426,7 @@ export function mountStore(root) {
       el(
         'div',
         { className: 'masthead-actions' },
-        el(
-          'button',
-          {
-            type: 'button',
-            className: 'icon-btn',
-            'aria-label': 'Search',
-            onClick: () => {
-              if (state.lastSearch) {
-                handlers.showSearch(state.lastSearch);
-              }
-            },
-          },
-          searchSvg()
-        ),
+        searchToggleBtn,
         el(
           'button',
           {
@@ -324,6 +446,7 @@ export function mountStore(root) {
         )
       )
     ),
+    headerSearchBarEl,
     el(
       'nav',
       { className: 'store-nav', 'aria-label': 'Store navigation' },
@@ -331,6 +454,21 @@ export function mountStore(root) {
         'ul',
         { className: 'store-nav-list' },
         NAV_ITEMS.map((label) => {
+          if (label === 'Women' || label === 'Men') {
+            const dept = label.toLowerCase();
+            const btn = el(
+              'button',
+              {
+                type: 'button',
+                className: 'nav-link nav-link--btn',
+                'aria-pressed': 'false',
+                onClick: () => selectDepartment(dept),
+              },
+              label
+            );
+            navLinks.set(label, btn);
+            return el('li', null, btn);
+          }
           const link = el(
             'a',
             {
@@ -464,8 +602,65 @@ export function mountStore(root) {
       handlers.hideProduct({});
     } else if (state.bagOpen) {
       closeBagDrawer();
+    } else if (searchBarOpen) {
+      closeHeaderSearch({ restoreFocus: true });
     }
   });
+
+  function setSearchBusy(busy) {
+    searchFormEl.classList.toggle('is-busy', busy);
+    searchFormEl.setAttribute('aria-busy', busy ? 'true' : 'false');
+    searchStatusEl.hidden = !busy;
+  }
+
+  function openHeaderSearch() {
+    searchBarOpen = true;
+    headerSearchBarEl.hidden = false;
+    searchToggleBtn.setAttribute('aria-expanded', 'true');
+    syncHeaderHeight();
+    searchInputEl.focus();
+    searchInputEl.select();
+  }
+
+  function closeHeaderSearch({ restoreFocus = false } = {}) {
+    searchBarOpen = false;
+    headerSearchBarEl.hidden = true;
+    searchToggleBtn.setAttribute('aria-expanded', 'false');
+    if (searchAbortController) {
+      searchAbortController.abort();
+      searchAbortController = null;
+    }
+    searchReqId += 1;
+    setSearchBusy(false);
+    syncHeaderHeight();
+    if (restoreFocus) searchToggleBtn.focus();
+  }
+
+  async function runHeaderSearch() {
+    const q = searchInputEl.value.trim();
+    if (!q) return;
+
+    if (searchAbortController) searchAbortController.abort();
+    const controller = new AbortController();
+    searchAbortController = controller;
+    const reqId = ++searchReqId;
+    setSearchBusy(true);
+
+    const url = `/api/search?q=${encodeURIComponent(q)}&department=${encodeURIComponent(boutique.department)}`;
+    const data = await fetchJson(url, { signal: controller.signal });
+
+    if (reqId !== searchReqId) return;
+    searchAbortController = null;
+    setSearchBusy(false);
+
+    if (!data || typeof data.query !== 'string' || !Array.isArray(data.items)) {
+      return;
+    }
+
+    const isCallLive = document.body.classList.contains('call-live');
+    openSearchFromPayload(data, { markProducts: isCallLive, fromBoutique: !isCallLive });
+    closeHeaderSearch();
+  }
 
   function syncHeaderHeight() {
     const h = headerEl.offsetHeight;
@@ -478,11 +673,31 @@ export function mountStore(root) {
 
   function updateNavActive() {
     const looksLink = navLinks.get('Looks by Alice');
-    if (!looksLink) return;
-    const active = state.view === 'looks' || state.view === 'picked';
-    looksLink.classList.toggle('is-active', active);
-    if (active) looksLink.setAttribute('aria-current', 'page');
-    else looksLink.removeAttribute('aria-current');
+    if (looksLink) {
+      const active = state.view === 'looks' || state.view === 'picked';
+      looksLink.classList.toggle('is-active', active);
+      if (active) looksLink.setAttribute('aria-current', 'page');
+      else looksLink.removeAttribute('aria-current');
+    }
+
+    const boutiqueShown =
+      state.view === 'boutique' &&
+      (hasBoutiqueContent() || document.body.classList.contains('has-boutique'));
+    for (const label of ['Women', 'Men']) {
+      const btn = navLinks.get(label);
+      if (!btn) continue;
+      const active = boutiqueShown && boutique.department === label.toLowerCase();
+      btn.classList.toggle('is-active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
+
+    if (boutiqueRefs && boutiqueRefs.deptButtons) {
+      for (const [dept, btn] of boutiqueRefs.deptButtons.entries()) {
+        const active = boutique.department === dept;
+        btn.classList.toggle('is-active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+      }
+    }
   }
 
   function updateBagBadge() {
@@ -511,7 +726,7 @@ export function mountStore(root) {
     }
   }
 
-  function buildProductCard(piece, outfitNumber, { compact = false, pointed = false } = {}) {
+  function buildProductCard(piece, outfitNumber, { compact = false, pointed = false, onSelect = null } = {}) {
     const item = piece?.item || {};
     const imgWidth = compact ? 420 : 600;
     const imgUrl = sized(item.image, imgWidth);
@@ -551,6 +766,10 @@ export function mountStore(root) {
             return;
           }
           e.preventDefault();
+          if (typeof onSelect === 'function') {
+            onSelect(item, piece);
+            return;
+          }
           pendingProductOutfit =
             typeof outfitNumber === 'number' && Number.isFinite(outfitNumber) ? outfitNumber : null;
           handlers.showProduct({
@@ -576,6 +795,9 @@ export function mountStore(root) {
               alt: item.title || 'Garment',
               loading: 'lazy',
               decoding: 'async',
+              onError: (e) => {
+                e.currentTarget.hidden = true;
+              },
             })
           : null
       ),
@@ -596,7 +818,56 @@ export function mountStore(root) {
     return card;
   }
 
+  // Open the product sheet immediately from card data, then upgrade with /api/product
+  async function openBoutiqueProduct(item, { slot = '', why = '' } = {}) {
+    if (!item || typeof item !== 'object') return;
+
+    if (productAbortController) {
+      productAbortController.abort();
+      productAbortController = null;
+    }
+    const reqId = ++productReqId;
+    const markProducts = document.body.classList.contains('call-live');
+
+    openProductFromPayload(
+      {
+        item,
+        images: item.image ? [item.image] : [],
+        slot,
+        why,
+        sizes: Array.isArray(item.sizes) ? item.sizes : [],
+        details: [],
+        description: typeof item.description === 'string' ? item.description : '',
+      },
+      { markProducts }
+    );
+
+    const rawVariantId =
+      item.variant_id !== null && item.variant_id !== undefined ? String(item.variant_id).trim() : '';
+    if (!rawVariantId) return;
+
+    const controller = new AbortController();
+    productAbortController = controller;
+    const data = await fetchJson(`/api/product?variant_id=${encodeURIComponent(rawVariantId)}`, {
+      signal: controller.signal,
+    });
+
+    if (reqId !== productReqId || !state.productOpen) return;
+    productAbortController = null;
+    if (!data || !data.item || typeof data.item !== 'object') return;
+
+    openProductFromPayload(
+      {
+        ...data,
+        slot: typeof data.slot === 'string' && data.slot.trim() ? data.slot : slot,
+        why: typeof data.why === 'string' && data.why.trim() ? data.why : why,
+      },
+      { markProducts }
+    );
+  }
+
   function renderEmptyView() {
+    boutiqueRefs = null;
     mainEl.replaceChildren(
       el(
         'section',
@@ -607,10 +878,461 @@ export function mountStore(root) {
     updateNavActive();
   }
 
+  function buildLookSkeletonCard() {
+    return el(
+      'article',
+      { className: 'boutique-look-card is-skeleton', 'aria-hidden': 'true' },
+      el(
+        'div',
+        { className: 'boutique-look-collage' },
+        Array.from({ length: 4 }, () => el('div', { className: 'boutique-collage-cell skeleton-block' }))
+      ),
+      el('div', { className: 'skeleton-line skeleton-line--title skeleton-block' }),
+      el('div', { className: 'skeleton-line skeleton-line--meta skeleton-block' }),
+      el('div', { className: 'skeleton-line skeleton-line--body skeleton-block' })
+    );
+  }
+
+  function buildBoutiqueLookCard(look) {
+    const pieces = Array.isArray(look.pieces)
+      ? look.pieces.filter((p) => p && typeof p === 'object' && p.item && typeof p.item === 'object')
+      : [];
+    const collagePieces = pieces.slice(0, 4);
+    const lookName =
+      typeof look.name === 'string' && look.name.trim() ? look.name.trim() : 'Curated look';
+    const diffText = typeof look.difference === 'string' ? look.difference.trim() : '';
+
+    let totalValue =
+      typeof look.total === 'number' && Number.isFinite(look.total) ? look.total : null;
+    if (totalValue === null && pieces.length > 0) {
+      let sum = 0;
+      let counted = 0;
+      for (const p of pieces) {
+        const price = Number(p.item.price);
+        if (Number.isFinite(price)) {
+          sum += price;
+          counted += 1;
+        }
+      }
+      if (counted > 0) totalValue = sum;
+    }
+
+    const metaParts = [];
+    if (pieces.length > 0) {
+      metaParts.push(`${pieces.length} ${pieces.length === 1 ? 'piece' : 'pieces'}`);
+    }
+    if (totalValue !== null) {
+      metaParts.push(formatPrice(totalValue));
+    }
+
+    const collageCells = Array.from({ length: 4 }, (_, idx) => {
+      const piece = collagePieces[idx];
+      if (!piece) {
+        return el('div', { className: 'boutique-collage-cell boutique-collage-cell--empty', 'aria-hidden': 'true' });
+      }
+      const item = piece.item;
+      const imgUrl = sized(item.image, 420);
+      return el(
+        'button',
+        {
+          type: 'button',
+          className: 'boutique-collage-cell',
+          'aria-label': item.title ? `View ${item.title}` : 'View garment',
+          onClick: (e) => {
+            if (e.metaKey || e.ctrlKey) {
+              const href = safeExternalUrl(item.url);
+              if (href) {
+                e.preventDefault();
+                window.open(href, '_blank', 'noopener,noreferrer');
+              }
+              return;
+            }
+            e.preventDefault();
+            openBoutiqueProduct(item, { slot: piece.slot || '', why: piece.why || '' });
+          },
+        },
+        imgUrl
+          ? el('img', {
+              className: 'boutique-collage-img',
+              src: imgUrl,
+              alt: item.title || 'Garment',
+              loading: 'lazy',
+              decoding: 'async',
+              onError: (e) => {
+                e.currentTarget.hidden = true;
+              },
+            })
+          : null
+      );
+    });
+
+    return el(
+      'article',
+      { className: 'boutique-look-card' },
+      el('div', { className: 'boutique-look-collage' }, collageCells),
+      el(
+        'div',
+        { className: 'boutique-look-body' },
+        el('h3', { className: 'boutique-look-name' }, lookName),
+        metaParts.length > 0 ? el('p', { className: 'boutique-look-meta' }, metaParts.join(' · ')) : null,
+        diffText ? el('p', { className: 'boutique-look-diff' }, diffText) : null,
+        el(
+          'button',
+          {
+            type: 'button',
+            className: 'boutique-look-cta',
+            onClick: () => triggerTalk(),
+          },
+          'Ask Alice to style this'
+        )
+      )
+    );
+  }
+
+  function renderBoutiqueLooksSlot() {
+    if (!boutiqueRefs) return;
+    const { looksSlot } = boutiqueRefs;
+
+    if (boutique.looksPending) {
+      looksSlot.hidden = false;
+      looksSlot.replaceChildren(
+        el(
+          'section',
+          { className: 'boutique-looks-section', 'aria-label': 'Looks by Alice', 'aria-busy': 'true' },
+          el(
+            'div',
+            { className: 'boutique-section-head' },
+            el('h2', { className: 'boutique-section-title' }, 'Looks by Alice')
+          ),
+          el(
+            'div',
+            { className: 'boutique-looks-grid' },
+            Array.from({ length: 3 }, () => buildLookSkeletonCard())
+          )
+        )
+      );
+      return;
+    }
+
+    if (boutique.looks.length === 0) {
+      looksSlot.replaceChildren();
+      looksSlot.hidden = true;
+      return;
+    }
+
+    looksSlot.hidden = false;
+    looksSlot.replaceChildren(
+      el(
+        'section',
+        { className: 'boutique-looks-section', 'aria-label': 'Looks by Alice' },
+        el(
+          'div',
+          { className: 'boutique-section-head' },
+          el('h2', { className: 'boutique-section-title' }, 'Looks by Alice')
+        ),
+        el(
+          'div',
+          { className: 'boutique-looks-grid' },
+          boutique.looks.map((look) => buildBoutiqueLookCard(look))
+        )
+      )
+    );
+  }
+
+  function buildRailSkeletonSection() {
+    return el(
+      'section',
+      { className: 'boutique-rail-section is-skeleton', 'aria-hidden': 'true' },
+      el('div', { className: 'skeleton-line skeleton-line--heading skeleton-block' }),
+      el(
+        'div',
+        { className: 'boutique-rail' },
+        Array.from({ length: 6 }, () =>
+          el(
+            'div',
+            { className: 'boutique-skeleton-card' },
+            el('div', { className: 'skeleton-tile skeleton-block' }),
+            el('div', { className: 'skeleton-line skeleton-line--store skeleton-block' }),
+            el('div', { className: 'skeleton-line skeleton-line--name skeleton-block' }),
+            el('div', { className: 'skeleton-line skeleton-line--price skeleton-block' })
+          )
+        )
+      )
+    );
+  }
+
+  function renderBoutiqueRailsSlot() {
+    if (!boutiqueRefs) return;
+    const { railsSlot } = boutiqueRefs;
+
+    if (boutique.storefrontPending) {
+      railsSlot.hidden = false;
+      railsSlot.replaceChildren(
+        el(
+          'div',
+          { className: 'boutique-rails', 'aria-busy': 'true' },
+          buildRailSkeletonSection(),
+          buildRailSkeletonSection()
+        )
+      );
+      return;
+    }
+
+    if (boutique.sections.length === 0) {
+      railsSlot.replaceChildren();
+      railsSlot.hidden = true;
+      return;
+    }
+
+    railsSlot.hidden = false;
+    railsSlot.replaceChildren(
+      el(
+        'div',
+        { className: 'boutique-rails' },
+        boutique.sections.map((section) =>
+          el(
+            'section',
+            {
+              className: 'boutique-rail-section',
+              'aria-label': section.title || 'Featured pieces',
+            },
+            section.title
+              ? el(
+                  'div',
+                  { className: 'boutique-section-head' },
+                  el('h2', { className: 'boutique-section-title' }, section.title)
+                )
+              : null,
+            el(
+              'div',
+              { className: 'boutique-rail' },
+              section.items.map((item) =>
+                buildProductCard({ slot: '', why: '', item }, null, {
+                  compact: false,
+                  pointed: false,
+                  onSelect: (selectedItem) => openBoutiqueProduct(selectedItem),
+                })
+              )
+            )
+          )
+        )
+      )
+    );
+  }
+
+  function updateBoutiqueFooterNote() {
+    if (!boutiqueRefs) return;
+    boutiqueRefs.footerNote.hidden = !hasBoutiqueContent();
+  }
+
+  function renderBoutiqueView() {
+    const deptButtons = new Map();
+    const deptSwitch = el(
+      'div',
+      { className: 'boutique-dept-switch', role: 'group', 'aria-label': 'Department' },
+      ['women', 'men'].map((dept) => {
+        const label = dept === 'women' ? 'Women' : 'Men';
+        const active = boutique.department === dept;
+        const btn = el(
+          'button',
+          {
+            type: 'button',
+            className: `boutique-dept-btn${active ? ' is-active' : ''}`,
+            'aria-pressed': active ? 'true' : 'false',
+            onClick: () => selectDepartment(dept),
+          },
+          label
+        );
+        deptButtons.set(dept, btn);
+        return btn;
+      })
+    );
+
+    const hero = el(
+      'section',
+      { className: 'boutique-hero', 'aria-label': "Alice's boutique" },
+      el(
+        'div',
+        { className: 'boutique-hero-copy' },
+        el('p', { className: 'boutique-eyebrow' }, "Alice's boutique"),
+        el('h1', { className: 'boutique-headline' }, 'Styled live, from real stores'),
+        el(
+          'p',
+          { className: 'boutique-copy' },
+          'Tell Alice the occasion. She shops Fashion Nova, Everlane, Steve Madden and Kith while you talk, and shows the look on you.'
+        ),
+        el(
+          'div',
+          { className: 'boutique-hero-actions' },
+          el(
+            'button',
+            {
+              type: 'button',
+              className: 'btn-primary boutique-talk-btn',
+              onClick: () => triggerTalk(),
+            },
+            'Talk to Alice'
+          )
+        )
+      ),
+      deptSwitch
+    );
+
+    const looksSlot = el('div', { className: 'boutique-slot' });
+    const railsSlot = el('div', { className: 'boutique-slot' });
+    const footerNote = el(
+      'p',
+      { className: 'boutique-footer-note', hidden: !hasBoutiqueContent() },
+      "Prices and stock come live from each store. Checkout happens on the store's own site."
+    );
+
+    boutiqueRefs = { deptButtons, looksSlot, railsSlot, footerNote };
+
+    renderBoutiqueLooksSlot();
+    renderBoutiqueRailsSlot();
+
+    mainEl.replaceChildren(
+      el('div', { className: 'boutique-view' }, hero, looksSlot, railsSlot, footerNote)
+    );
+    updateNavActive();
+  }
+
+  function renderHomeView() {
+    if (hasBoutiqueAvailable()) {
+      state.view = 'boutique';
+      renderBoutiqueView();
+    } else {
+      state.view = 'empty';
+      renderEmptyView();
+    }
+  }
+
+  function showBoutique() {
+    closeProductPanel();
+    leaveSearchView();
+    state.pickedOutfit = null;
+    state.highlightedSlot = null;
+    activePickedRefs = null;
+    renderHomeView();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function finishBoutiqueCheck() {
+    syncBoutiqueBodyClass();
+    if (!boutique.looksPending && !boutique.storefrontPending && !hasBoutiqueContent()) {
+      if (state.view === 'boutique') {
+        state.view = 'empty';
+        renderEmptyView();
+      }
+      return;
+    }
+    if (state.view === 'empty' && hasBoutiqueContent()) {
+      state.view = 'boutique';
+      renderBoutiqueView();
+      return;
+    }
+    if (state.view === 'boutique') {
+      updateBoutiqueFooterNote();
+      updateNavActive();
+    }
+  }
+
+  function loadBoutique(department) {
+    const dept = department === 'men' ? 'men' : 'women';
+    if (boutique.abortController) {
+      boutique.abortController.abort();
+    }
+    const controller = new AbortController();
+    boutique.abortController = controller;
+    const reqId = ++boutique.reqId;
+
+    boutique.department = dept;
+    boutique.looks = [];
+    boutique.sections = [];
+    boutique.looksPending = true;
+    boutique.storefrontPending = true;
+
+    if (state.view === 'boutique') {
+      if (boutiqueRefs) {
+        renderBoutiqueLooksSlot();
+        renderBoutiqueRailsSlot();
+        updateBoutiqueFooterNote();
+        updateNavActive();
+      } else {
+        renderBoutiqueView();
+      }
+    }
+
+    const encodedDept = encodeURIComponent(dept);
+
+    // Fetch looks and storefront rails in parallel; ignore stale replies on department switch
+    fetchJson(`/api/looks?department=${encodedDept}&limit=6`, { signal: controller.signal }).then(
+      (data) => {
+        if (reqId !== boutique.reqId) return;
+        boutique.looksPending = false;
+        boutique.looks =
+          data && Array.isArray(data.looks)
+            ? data.looks.filter((lk) => lk && typeof lk === 'object').slice(0, 6)
+            : [];
+        syncBoutiqueBodyClass();
+        if (state.view === 'boutique' && boutiqueRefs) {
+          renderBoutiqueLooksSlot();
+        }
+        finishBoutiqueCheck();
+      }
+    );
+
+    fetchJson(`/api/storefront?department=${encodedDept}`, { signal: controller.signal }).then(
+      (data) => {
+        if (reqId !== boutique.reqId) return;
+        boutique.storefrontPending = false;
+        boutique.sections =
+          data && Array.isArray(data.sections)
+            ? data.sections
+                .filter((sec) => sec && typeof sec === 'object' && Array.isArray(sec.items))
+                .map((sec) => ({
+                  id: typeof sec.id === 'string' ? sec.id : '',
+                  title: typeof sec.title === 'string' ? sec.title.trim() : '',
+                  items: sec.items.filter((it) => it && typeof it === 'object'),
+                }))
+                .filter((sec) => sec.items.length > 0)
+            : [];
+        syncBoutiqueBodyClass();
+        if (state.view === 'boutique' && boutiqueRefs) {
+          renderBoutiqueRailsSlot();
+        }
+        finishBoutiqueCheck();
+      }
+    );
+  }
+
+  function selectDepartment(department) {
+    const dept = department === 'men' ? 'men' : 'women';
+    const switchingDept = dept !== boutique.department;
+    const alreadyLoadingSame =
+      !switchingDept && (boutique.looksPending || boutique.storefrontPending);
+
+    closeProductPanel();
+    leaveSearchView();
+    state.pickedOutfit = null;
+    state.highlightedSlot = null;
+    activePickedRefs = null;
+    state.view = 'boutique';
+
+    if (switchingDept || (!hasBoutiqueContent() && !alreadyLoadingSame)) {
+      loadBoutique(dept);
+    } else if (!boutiqueRefs) {
+      renderBoutiqueView();
+    } else {
+      updateNavActive();
+    }
+  }
+
   function renderLooksView() {
+    boutiqueRefs = null;
     const looks = sortedOutfits();
     if (looks.length === 0) {
-      renderEmptyView();
+      renderHomeView();
       return;
     }
 
@@ -771,11 +1493,16 @@ export function mountStore(root) {
   let activePickedRefs = null;
 
   function renderPickedView({ deferReveal = false } = {}) {
+    boutiqueRefs = null;
     const look = state.outfits.get(state.pickedOutfit);
     if (!look) {
-      state.view = state.outfits.size > 0 ? 'looks' : 'empty';
       state.pickedOutfit = null;
-      renderLooksView();
+      if (state.outfits.size > 0) {
+        state.view = 'looks';
+        renderLooksView();
+      } else {
+        renderHomeView();
+      }
       return;
     }
 
@@ -1060,6 +1787,11 @@ export function mountStore(root) {
   }
 
   function closeProductPanel({ sync = true } = {}) {
+    if (productAbortController) {
+      productAbortController.abort();
+      productAbortController = null;
+    }
+    productReqId += 1;
     state.productOpen = false;
     productLayerEl.classList.remove('is-open');
     productLayerEl.setAttribute('aria-hidden', 'true');
@@ -1087,8 +1819,8 @@ export function mountStore(root) {
     const item = payload.item || {};
     const slotText = typeof payload.slot === 'string' ? payload.slot.trim() : '';
 
-    // Breadcrumb: Looks by Alice [/ Look N] [/ Slot]
-    const crumbParts = ['Looks by Alice'];
+    // Breadcrumb: Alice's boutique or Looks by Alice [/ Look N] [/ Slot]
+    const crumbParts = [state.view === 'boutique' ? "Alice's boutique" : 'Looks by Alice'];
     if (lookNum !== null) crumbParts.push(`Look ${lookNum}`);
     if (slotText) crumbParts.push(formatSlot(slotText));
 
@@ -1125,6 +1857,9 @@ export function mountStore(root) {
         src: sized(galleryImages[0], 900),
         alt: item.title || 'Garment',
         decoding: 'async',
+        onError: (e) => {
+          e.currentTarget.hidden = true;
+        },
       });
 
       const thumbButtons = [];
@@ -1140,6 +1875,7 @@ export function mountStore(root) {
               'aria-label': `View image ${idx + 1}`,
               'aria-pressed': idx === 0 ? 'true' : 'false',
               onClick: () => {
+                mainImg.hidden = false;
                 mainImg.src = sized(url, 900);
                 thumbButtons.forEach((other, i) => {
                   const active = i === idx;
@@ -1154,6 +1890,12 @@ export function mountStore(root) {
               alt: '',
               loading: 'lazy',
               decoding: 'async',
+              onError: (e) => {
+                e.currentTarget.hidden = true;
+                if (e.currentTarget.parentElement) {
+                  e.currentTarget.parentElement.hidden = true;
+                }
+              },
             })
           );
           thumbButtons.push(btn);
@@ -1209,7 +1951,16 @@ export function mountStore(root) {
       )
     );
 
-    // Display-only size chips, falling back to item.sizes
+    // Display-only size chips: prefer sizes_detail (with sold-out state), falling back to sizes / item.sizes
+    const rawSizesDetail = Array.isArray(payload.sizes_detail)
+      ? payload.sizes_detail
+          .filter((entry) => entry && typeof entry === 'object' && typeof entry.label === 'string' && entry.label.trim())
+          .map((entry) => ({
+            label: entry.label.trim(),
+            available: entry.available !== false,
+          }))
+      : [];
+
     const rawSizes =
       Array.isArray(payload.sizes) && payload.sizes.length > 0
         ? payload.sizes
@@ -1220,17 +1971,31 @@ export function mountStore(root) {
       .map((s) => (typeof s === 'string' ? s.trim() : ''))
       .filter(Boolean);
 
+    const sizeChipNodes =
+      rawSizesDetail.length > 0
+        ? rawSizesDetail.map((entry) =>
+            entry.available
+              ? el('span', { className: 'size-chip' }, entry.label)
+              : el(
+                  'span',
+                  {
+                    className: 'size-chip size-chip--sold-out',
+                    'aria-disabled': 'true',
+                    'aria-label': `${entry.label}, sold out`,
+                    title: 'Sold out',
+                  },
+                  entry.label
+                )
+          )
+        : sizes.map((size) => el('span', { className: 'size-chip' }, size));
+
     const sizesSection =
-      sizes.length > 0
+      sizeChipNodes.length > 0
         ? el(
             'section',
             { className: 'product-panel-block', 'aria-label': 'Available sizes' },
             el('h3', { className: 'section-label' }, 'Sizes'),
-            el(
-              'div',
-              { className: 'size-chips' },
-              sizes.map((size) => el('span', { className: 'size-chip' }, size))
-            )
+            el('div', { className: 'size-chips' }, sizeChipNodes)
           )
         : null;
 
@@ -1451,24 +2216,38 @@ export function mountStore(root) {
     const cleanQuery = query.trim();
     const visibleItems = items.filter((it) => it && typeof it === 'object').slice(0, 8);
 
+    const backButton =
+      state.outfits.size > 0
+        ? el(
+            'button',
+            {
+              type: 'button',
+              className: 'back-link',
+              onClick: () => handlers.showAll({}),
+            },
+            arrowLeftSvg(),
+            'Back to your looks'
+          )
+        : hasBoutiqueContent()
+          ? el(
+              'button',
+              {
+                type: 'button',
+                className: 'back-link',
+                onClick: () => showBoutique(),
+              },
+              arrowLeftSvg(),
+              'Back to boutique'
+            )
+          : null;
+
     const headerBand = el(
       'section',
       { className: 'collection-band search-band' },
       el(
         'div',
         { className: 'search-top-bar' },
-        state.outfits.size > 0
-          ? el(
-              'button',
-              {
-                type: 'button',
-                className: 'back-link',
-                onClick: () => handlers.showAll({}),
-              },
-              arrowLeftSvg(),
-              'Back to your looks'
-            )
-          : null,
+        backButton,
         el(
           'div',
           { className: 'breadcrumb' },
@@ -1501,6 +2280,9 @@ export function mountStore(root) {
               buildProductCard({ slot: '', why: '', item }, null, {
                 compact: false,
                 pointed: false,
+                onSelect: state.searchFromBoutique
+                  ? (selectedItem) => openBoutiqueProduct(selectedItem)
+                  : null,
               })
             )
           );
@@ -1509,6 +2291,36 @@ export function mountStore(root) {
     mainEl.hidden = true;
     searchSlotEl.hidden = false;
     updateNavActive();
+  }
+
+  function openSearchFromPayload(payload, { markProducts = true, fromBoutique = false } = {}) {
+    if (!payload || typeof payload.query !== 'string' || !Array.isArray(payload.items)) {
+      return { ok: false, error: 'showSearch requires a query string and items array' };
+    }
+
+    closeProductPanel();
+    state.lastSearch = { query: payload.query, items: payload.items };
+    state.searchFromBoutique = fromBoutique;
+    state.view = 'search';
+    if (markProducts) setHasProducts();
+    renderSearchView(payload.query, payload.items);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    return { ok: true };
+  }
+
+  function openProductFromPayload(payload, { markProducts = true } = {}) {
+    if (!payload || !payload.item || typeof payload.item !== 'object') {
+      return { ok: false, error: 'showProduct requires an item object' };
+    }
+
+    const lookNum = findLookNumberForItem(payload.item, pendingProductOutfit);
+    if (markProducts) setHasProducts();
+    renderProductPanel(payload, lookNum);
+    state.productOpen = true;
+    productLayerEl.classList.add('is-open');
+    productLayerEl.setAttribute('aria-hidden', 'false');
+    syncPanelOpen();
+    return { ok: true };
   }
 
   // Wrap every page-action handler so it stays synchronous and never throws
@@ -1560,8 +2372,7 @@ export function mountStore(root) {
         setHasProducts();
         renderLooksView();
       } else {
-        state.view = 'empty';
-        renderEmptyView();
+        renderHomeView();
       }
 
       return { ok: true };
@@ -1710,8 +2521,7 @@ export function mountStore(root) {
         state.view = 'looks';
         renderLooksView();
       } else {
-        state.view = 'empty';
-        renderEmptyView();
+        renderHomeView();
       }
       window.scrollTo({ top: 0, behavior: 'smooth' });
       return { ok: true };
@@ -1782,33 +2592,17 @@ export function mountStore(root) {
       return { ok: true };
     }),
 
-    showSearch: safeHandler((payload) => {
-      if (!payload || typeof payload.query !== 'string' || !Array.isArray(payload.items)) {
-        return { ok: false, error: 'showSearch requires a query string and items array' };
-      }
-
-      closeProductPanel();
-      state.lastSearch = { query: payload.query, items: payload.items };
-      state.view = 'search';
-      setHasProducts();
-      renderSearchView(payload.query, payload.items);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-      return { ok: true };
-    }),
+    showSearch: safeHandler((payload) =>
+      openSearchFromPayload(payload, { markProducts: true, fromBoutique: false })
+    ),
 
     showProduct: safeHandler((payload) => {
-      if (!payload || !payload.item || typeof payload.item !== 'object') {
-        return { ok: false, error: 'showProduct requires an item object' };
+      if (productAbortController) {
+        productAbortController.abort();
+        productAbortController = null;
       }
-
-      const lookNum = findLookNumberForItem(payload.item, pendingProductOutfit);
-      setHasProducts();
-      renderProductPanel(payload, lookNum);
-      state.productOpen = true;
-      productLayerEl.classList.add('is-open');
-      productLayerEl.setAttribute('aria-hidden', 'false');
-      syncPanelOpen();
-      return { ok: true };
+      productReqId += 1;
+      return openProductFromPayload(payload, { markProducts: true });
     }),
 
     hideProduct: safeHandler(() => {
@@ -1817,8 +2611,8 @@ export function mountStore(root) {
     }),
   };
 
-  // Initial empty state
-  renderEmptyView();
+  // Render boutique skeleton immediately and load default department in parallel
+  loadBoutique('women');
 
   return { handlers };
 }
