@@ -1124,50 +1124,98 @@ describe('Storefront, product, search, and looks API', () => {
       },
     );
 
-    // 4. GET /api/occasions lists built occasions from sets.json (and supports libraryOccasions export)
-    const tmpSetsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alice-sets-'));
-    const tmpSetsFile = path.join(tmpSetsDir, 'sets.json');
-    fs.writeFileSync(
-      tmpSetsFile,
-      JSON.stringify({
-        version: 1,
-        sets: [
-          { key: 'first-date', gender: 'men', occasion: 'first date at a cocktail bar', outfits: [sampleOutfit('men')] },
-          { key: 'rooftop-birthday', gender: 'men', occasion: "a friend's rooftop birthday party", outfits: [sampleOutfit('men')] },
-          { key: 'empty-set', gender: 'men', occasion: 'empty occasion', outfits: [] },
-          { key: 'brunch', gender: 'women', occasion: 'Sunday brunch with friends', outfits: [sampleOutfit('women')] },
-        ],
-      }),
-    );
-    try {
-      await withServer(
-        {
-          env: { ALICE_LIBRARY_FILE: tmpSetsFile },
-          loadLibrary: async () => ({}),
-        },
-        async (url) => {
-          const menOcc = await fetch(`${url}/api/occasions?department=men`);
-          assert.equal(menOcc.status, 200);
-          assert.equal(menOcc.headers.get('cache-control'), 'no-store');
-          assert.deepEqual(await menOcc.json(), {
-            department: 'men',
-            occasions: ["a friend's rooftop birthday party", 'first date at a cocktail bar'],
-          });
+    // 4. GET /api/occasions across libraryOccasions present, missing, and throwing
+    await withServer(
+      {
+        loadLibrary: async () => ({
+          libraryOccasions: async (gender: Gender) =>
+            gender === 'men'
+              ? [
+                  {
+                    key: 'rooftop-birthday',
+                    occasion: "a friend's rooftop birthday party",
+                    label: 'Rooftop birthday',
+                  },
+                ]
+              : [
+                  {
+                    key: 'brunch',
+                    occasion: 'Sunday brunch with friends',
+                    label: 'Sunday brunch',
+                  },
+                ],
+        }),
+      },
+      async (url) => {
+        const menOcc = await fetch(`${url}/api/occasions?department=men`);
+        assert.equal(menOcc.status, 200);
+        assert.equal(menOcc.headers.get('cache-control'), 'no-store');
+        assert.deepEqual(await menOcc.json(), {
+          department: 'men',
+          occasions: [
+            {
+              key: 'rooftop-birthday',
+              occasion: "a friend's rooftop birthday party",
+              label: 'Rooftop birthday',
+            },
+          ],
+          source: 'library',
+        });
 
-          const womenOcc = await fetch(`${url}/api/occasions?department=women`);
-          assert.equal(womenOcc.status, 200);
-          assert.deepEqual(await womenOcc.json(), {
-            department: 'women',
-            occasions: ['Sunday brunch with friends'],
-          });
-        },
-      );
-    } finally {
-      fs.rmSync(tmpSetsDir, { recursive: true, force: true });
-    }
+        const womenOcc = await fetch(`${url}/api/occasions?department=women`);
+        assert.equal(womenOcc.status, 200);
+        assert.deepEqual(await womenOcc.json(), {
+          department: 'women',
+          occasions: [
+            {
+              key: 'brunch',
+              occasion: 'Sunday brunch with friends',
+              label: 'Sunday brunch',
+            },
+          ],
+          source: 'library',
+        });
+      },
+    );
+
+    // Missing export -> source: 'none', occasions: []
+    await withServer(
+      {
+        loadLibrary: async () => ({}),
+      },
+      async (url) => {
+        const res = await fetch(`${url}/api/occasions?department=men`);
+        assert.equal(res.status, 200);
+        assert.deepEqual(await res.json(), {
+          department: 'men',
+          occasions: [],
+          source: 'none',
+        });
+      },
+    );
+
+    // Export throws -> source: 'none', occasions: []
+    await withServer(
+      {
+        loadLibrary: async () => ({
+          libraryOccasions: async () => {
+            throw new Error('occasions crashed');
+          },
+        }),
+      },
+      async (url) => {
+        const res = await fetch(`${url}/api/occasions?department=women`);
+        assert.equal(res.status, 200);
+        assert.deepEqual(await res.json(), {
+          department: 'women',
+          occasions: [],
+          source: 'none',
+        });
+      },
+    );
   });
 
-  it('enforces the 1.3s/1.4s timing budgets on all four routes with slow fakes (answers under 1.5s)', async () => {
+  it('enforces the 1.3s/1.4s timing budgets on all browse routes with slow fakes (answers under 1.5s)', async () => {
     const never = <T>(): Promise<T> => new Promise<T>(() => {});
 
     await withServer(
@@ -1184,6 +1232,7 @@ describe('Storefront, product, search, and looks API', () => {
         },
         loadLibrary: async () => ({
           libraryLooks: () => never(),
+          libraryOccasions: () => never(),
         }),
       },
       async (url) => {
@@ -1195,12 +1244,13 @@ describe('Storefront, product, search, and looks API', () => {
           return { status: res.status, ms, body };
         };
 
-        // Run all four slow-fake budget checks in parallel (~1.4s total)
-        const [sf, prod, srch, lks] = await Promise.all([
+        // Run all five slow-fake budget checks in parallel (~1.4s total)
+        const [sf, prod, srch, lks, occ] = await Promise.all([
           timedFetch('/api/storefront?department=women'),
           timedFetch('/api/product?variant_id=gid%3A%2F%2Fshopify%2FProductVariant%2F41356358090885'),
           timedFetch('/api/search?q=linen+blazer&department=women'),
           timedFetch('/api/looks?department=men'),
+          timedFetch('/api/occasions?department=men'),
         ]);
 
         assert.equal(sf.status, 200);
@@ -1220,6 +1270,10 @@ describe('Storefront, product, search, and looks API', () => {
         assert.equal(lks.body.source, 'fixture');
         assert.ok((lks.body.looks as unknown[]).length > 0);
         assert.ok(lks.ms < 1550, `/api/looks exceeded budget: ${lks.ms}ms`);
+
+        assert.equal(occ.status, 200);
+        assert.deepEqual(occ.body, { department: 'men', occasions: [], source: 'none' });
+        assert.ok(occ.ms < 1550, `/api/occasions exceeded budget: ${occ.ms}ms`);
       },
     );
   });

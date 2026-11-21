@@ -332,53 +332,26 @@ function loadFixtureOutfits(
   return [];
 }
 
-async function readLibraryOccasionsFromFile(
-  department: Gender,
-  env: Record<string, string | undefined>,
-): Promise<string[]> {
-  const override = env.ALICE_LIBRARY_FILE;
-  const filePath =
-    override && override.trim().length > 0
-      ? path.resolve(override)
-      : path.join(import.meta.dirname, 'src', 'library', 'sets.json');
+interface OccasionChoice {
+  key: string;
+  occasion: string;
+  label: string;
+}
 
-  try {
-    const raw = await fs.promises.readFile(filePath, 'utf8');
-    const parsed = JSON.parse(raw) as {
-      sets?: Array<{ key?: unknown; gender?: unknown; occasion?: unknown; outfits?: unknown }>;
-    };
-    if (!Array.isArray(parsed?.sets)) return [];
-
-    const matching = parsed.sets.filter(
-      (s) =>
-        s &&
-        s.gender === department &&
-        typeof s.occasion === 'string' &&
-        s.occasion.trim().length > 0 &&
-        Array.isArray(s.outfits) &&
-        s.outfits.length > 0,
-    );
-
-    matching.sort((a, b) => {
-      const aDemo = a.key === 'rooftop-birthday' ? 0 : 1;
-      const bDemo = b.key === 'rooftop-birthday' ? 0 : 1;
-      return aDemo - bDemo;
-    });
-
-    const seen = new Set<string>();
-    const occasions: string[] = [];
-    for (const s of matching) {
-      const label = (s.occasion as string).trim();
-      const norm = label.toLowerCase();
-      if (!seen.has(norm)) {
-        seen.add(norm);
-        occasions.push(label);
-      }
+function normalizeOccasionChoices(raw: unknown): OccasionChoice[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: OccasionChoice[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const obj = entry as { key?: unknown; occasion?: unknown; label?: unknown };
+    const key = typeof obj.key === 'string' ? obj.key.trim() : '';
+    const occasion = typeof obj.occasion === 'string' ? obj.occasion.trim() : '';
+    const label = typeof obj.label === 'string' ? obj.label.trim() : '';
+    if (key && occasion && label) {
+      out.push({ key, occasion, label });
     }
-    return occasions;
-  } catch {
-    return [];
   }
+  return out;
 }
 
 function defaultLoadLibrary(): Promise<{
@@ -850,18 +823,14 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         // GET /api/occasions?department=men|women
         if (rawPathname === '/api/occasions') {
           const department = parseDepartment(parsedUrl.searchParams.get('department'));
-          let occasions: string[] | null = null;
+          let occasions: OccasionChoice[] | null = null;
           try {
-            const runOccasions = async (): Promise<string[] | null> => {
+            const runOccasions = async (): Promise<OccasionChoice[] | null> => {
               const mod = await loadLibraryFn();
               if (mod && typeof mod.libraryOccasions === 'function') {
                 const fn = mod.libraryOccasions as (g: Gender) => Promise<unknown> | unknown;
                 const list = await fn(department);
-                if (Array.isArray(list)) {
-                  return list
-                    .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
-                    .map((x) => x.trim());
-                }
+                return normalizeOccasionChoices(list);
               }
               return null;
             };
@@ -873,12 +842,24 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
             occasions = null;
           }
 
-          if (occasions === null) {
-            occasions = await readLibraryOccasionsFromFile(department, env);
+          if (occasions !== null) {
+            logExtra = `dept=${department} source=library n=${occasions.length}`;
+            sendJson(
+              res,
+              200,
+              { department, occasions, source: 'library' },
+              { 'Cache-Control': 'no-store' },
+            );
+            return;
           }
 
-          logExtra = `dept=${department} n=${occasions.length}`;
-          sendJson(res, 200, { department, occasions }, { 'Cache-Control': 'no-store' });
+          logExtra = `dept=${department} source=none n=0`;
+          sendJson(
+            res,
+            200,
+            { department, occasions: [], source: 'none' },
+            { 'Cache-Control': 'no-store' },
+          );
           return;
         }
       }
