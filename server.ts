@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
 import https from 'node:https';
+import net from 'node:net';
 import path from 'node:path';
 import { AccessToken, RoomAgentDispatch, RoomConfiguration } from 'livekit-server-sdk';
 import { calllog as defaultCalllog } from './src/calllog.ts';
@@ -52,6 +53,7 @@ export interface AliceServerOptions {
   loadLibrary?: LibraryLoaderFn;
   budgets?: AliceBudgetOptions;
   remoteAddress?: (req: IncomingMessage) => string | undefined;
+  now?: () => number;
 }
 
 export interface AliceHttpsServerOptions extends AliceServerOptions {
@@ -63,8 +65,17 @@ const TOKEN_TTL_SECONDS = 1800;
 const MAX_TOKEN_BODY_BYTES = 4096;
 const RATE_LIMIT_MAX = 20;
 const RATE_LIMIT_WINDOW_MS = 60_000;
+const BAD_PASSCODE_LIMIT_MAX = 5;
+const BAD_PASSCODE_GLOBAL_MAX = 600;
+const BAD_PASSCODE_WINDOW_MS = 60_000;
+const MIN_PROXY_PASSCODE_LEN = 12;
+const ORIGIN_MISMATCH_LOG_WINDOW_MS = 60_000;
+const HOURLY_CAP_WINDOW_MS = 60 * 60 * 1000;
 const BROWSE_RATE_LIMIT_MAX = 90;
 const BROWSE_RATE_LIMIT_WINDOW_MS = 60_000;
+const PROXY_GLOBAL_BROWSE_LIMIT_MAX = 30;
+const PROXY_GLOBAL_BROWSE_WINDOW_MS = 60_000;
+const PROXY_UNKNOWN_BUCKET = 'proxy-unknown';
 const STOREFRONT_BUDGET_MS = 4000;
 const STOREFRONT_WAIT_MIN_MS = 500;
 const STOREFRONT_WAIT_MAX_MS = 6000;
@@ -382,6 +393,167 @@ function isLoopbackHost(host: string): boolean {
   );
 }
 
+const PROXY_HEADER_NAMES = new Set([
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-proto',
+  'forwarded',
+  'x-real-ip',
+  'cf-connecting-ip',
+  'cf-ray',
+  'true-client-ip',
+]);
+
+let warnedProxiedNoPasscode = false;
+let warnedProxiedTrustOff = false;
+
+export function isProxied(req: IncomingMessage): boolean {
+  for (const key of Object.keys(req.headers)) {
+    if (req.headers[key] === undefined) continue;
+    const lower = key.toLowerCase();
+    if (
+      PROXY_HEADER_NAMES.has(lower) ||
+      lower.startsWith('ngrok-') ||
+      lower.startsWith('x-ngrok-')
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isTrustProxyEnabled(env: Record<string, string | undefined>): boolean {
+  return env.ALICE_TRUST_PROXY?.trim() === '1';
+}
+
+function parseMaxCallsPerHour(env: Record<string, string | undefined>): number | null {
+  const raw = env.ALICE_MAX_CALLS_PER_HOUR;
+  if (!raw || !raw.trim()) return null;
+  const parsed = Number(raw.trim());
+  if (!Number.isInteger(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function parseValidIp(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const unbracketed =
+    trimmed.startsWith('[') && trimmed.endsWith(']') ? trimmed.slice(1, -1) : trimmed;
+  return net.isIP(unbracketed) !== 0 ? unbracketed.toLowerCase() : null;
+}
+
+function parseHostHeader(
+  raw: string | string[] | undefined,
+): { host: string; port: string | null; bracketed: boolean } | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed || /\s/.test(trimmed)) return null;
+
+  const ipv6Match = /^\[([0-9a-fA-F:]+)\](?::(\d{1,5}))?$/.exec(trimmed);
+  if (ipv6Match) {
+    const port = ipv6Match[2] ?? null;
+    if (port !== null) {
+      const n = Number(port);
+      if (!Number.isInteger(n) || n < 1 || n > 65535) return null;
+    }
+    return { host: ipv6Match[1].toLowerCase(), port, bracketed: true };
+  }
+
+  const hostMatch = /^([A-Za-z0-9.-]+)(?::(\d{1,5}))?$/.exec(trimmed);
+  if (!hostMatch) return null;
+  const port = hostMatch[2] ?? null;
+  if (port !== null) {
+    const n = Number(port);
+    if (!Number.isInteger(n) || n < 1 || n > 65535) return null;
+  }
+  return { host: hostMatch[1].toLowerCase(), port, bracketed: false };
+}
+
+function isLocalHostHeader(raw: string | string[] | undefined): boolean {
+  const parsed = parseHostHeader(raw);
+  if (!parsed) return false;
+  if (parsed.bracketed) {
+    return parsed.host === '::1';
+  }
+  return parsed.host === 'localhost' || parsed.host === '127.0.0.1';
+}
+
+function originMatchesHost(
+  originHeader: string | string[] | undefined,
+  hostHeader: string | string[] | undefined,
+): boolean {
+  if (originHeader === undefined) return true;
+  if (typeof originHeader !== 'string') return false;
+  const trimmedOrigin = originHeader.trim();
+  if (!trimmedOrigin) return false;
+
+  let originUrl: URL;
+  try {
+    originUrl = new URL(trimmedOrigin);
+  } catch {
+    return false;
+  }
+  if (originUrl.protocol !== 'http:' && originUrl.protocol !== 'https:') {
+    return false;
+  }
+
+  const parsedHost = parseHostHeader(hostHeader);
+  if (!parsedHost) return false;
+
+  const defaultPort = originUrl.protocol === 'https:' ? '443' : '80';
+  const normalizedHostPort =
+    parsedHost.port && parsedHost.port !== defaultPort ? `:${parsedHost.port}` : '';
+  const normalizedHostName = parsedHost.bracketed ? `[${parsedHost.host}]` : parsedHost.host;
+  const normalizedHost = `${normalizedHostName}${normalizedHostPort}`;
+
+  return originUrl.host.toLowerCase() === normalizedHost;
+}
+
+export function clientAddress(
+  req: IncomingMessage,
+  opts?: {
+    env?: Record<string, string | undefined>;
+    remoteAddress?: (req: IncomingMessage) => string | undefined;
+  },
+): string {
+  const socketAddr =
+    (opts?.remoteAddress ? opts.remoteAddress(req) : req.socket?.remoteAddress) ?? 'unknown';
+  const env = opts?.env ?? process.env;
+  if (!isTrustProxyEnabled(env) || !isLoopbackHost(socketAddr)) {
+    return socketAddr;
+  }
+
+  const rawCf = req.headers['cf-connecting-ip'];
+  const cfCandidate =
+    typeof rawCf === 'string'
+      ? rawCf
+      : Array.isArray(rawCf) && rawCf.length > 0
+        ? rawCf[rawCf.length - 1]
+        : '';
+  const cfIp = parseValidIp(cfCandidate);
+  if (cfIp) {
+    return cfIp;
+  }
+
+  const rawXff = req.headers['x-forwarded-for'];
+  const xffStr =
+    typeof rawXff === 'string' ? rawXff : Array.isArray(rawXff) ? rawXff.join(',') : '';
+  if (xffStr) {
+    const parts = xffStr
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (parts.length > 0) {
+      const rightmostIp = parseValidIp(parts[parts.length - 1]);
+      if (rightmostIp) {
+        return rightmostIp;
+      }
+    }
+  }
+
+  return PROXY_UNKNOWN_BUCKET;
+}
+
 const TIMEOUT_SENTINEL = Symbol('timeout');
 
 async function raceWithBudget<T>(
@@ -630,9 +802,15 @@ function defaultLoadLibrary(): Promise<{
 }
 
 export function createAliceHandler(opts: AliceServerOptions = {}): RequestListener {
-  const startedAt = Date.now();
+  const nowFn = opts.now ?? (() => Date.now());
+  const startedAt = nowFn();
   const rateBuckets = new Map<string, number[]>();
   const browseRateBuckets = new Map<string, number[]>();
+  const badPasscodeBuckets = new Map<string, number[]>();
+  let globalBadPasscodeTimestamps: number[] = [];
+  let hourlyTokenTimestamps: number[] = [];
+  let proxyGlobalBrowseTimestamps: number[] = [];
+  let lastOriginMismatchLogMs = -Infinity;
   const inFlightLooks = new Map<string, Promise<Outfit[] | null>>();
   const logSink = opts.calllog ?? defaultCalllog;
   const loadLibraryFn = opts.loadLibrary ?? defaultLoadLibrary;
@@ -660,15 +838,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
     }
   }
 
-  function checkBucketRateLimit(
-    buckets: Map<string, number[]>,
-    remoteAddr: string,
-    maxRequests: number,
-    windowMs: number,
-  ): { allowed: boolean; retryAfterS: number } {
-    const now = Date.now();
-    const cutoff = now - windowMs;
-
+  function sweepBucketMap(buckets: Map<string, number[]>, cutoff: number): void {
     if (buckets.size > 1000) {
       for (const [key, timestamps] of buckets) {
         const recent = timestamps.filter((t) => t > cutoff);
@@ -679,6 +849,17 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         }
       }
     }
+  }
+
+  function checkBucketRateLimit(
+    buckets: Map<string, number[]>,
+    remoteAddr: string,
+    maxRequests: number,
+    windowMs: number,
+  ): { allowed: boolean; retryAfterS: number } {
+    const now = nowFn();
+    const cutoff = now - windowMs;
+    sweepBucketMap(buckets, cutoff);
 
     const existing = buckets.get(remoteAddr) ?? [];
     const recent = existing.filter((t) => t > cutoff);
@@ -705,6 +886,87 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
       BROWSE_RATE_LIMIT_MAX,
       BROWSE_RATE_LIMIT_WINDOW_MS,
     );
+  }
+
+  function checkProxyGlobalBrowseLimit(): { allowed: boolean; retryAfterS: number } {
+    const now = nowFn();
+    const cutoff = now - PROXY_GLOBAL_BROWSE_WINDOW_MS;
+    proxyGlobalBrowseTimestamps = proxyGlobalBrowseTimestamps.filter((t) => t > cutoff);
+    if (proxyGlobalBrowseTimestamps.length >= PROXY_GLOBAL_BROWSE_LIMIT_MAX) {
+      const retryAfterS = Math.max(
+        1,
+        Math.ceil((proxyGlobalBrowseTimestamps[0] + PROXY_GLOBAL_BROWSE_WINDOW_MS - now) / 1000),
+      );
+      return { allowed: false, retryAfterS };
+    }
+    proxyGlobalBrowseTimestamps.push(now);
+    return { allowed: true, retryAfterS: 0 };
+  }
+
+  function checkPasscodeLockout(remoteAddr: string): { locked: boolean; retryAfterS: number } {
+    const now = nowFn();
+    const cutoff = now - BAD_PASSCODE_WINDOW_MS;
+    sweepBucketMap(badPasscodeBuckets, cutoff);
+
+    const clientRecent = (badPasscodeBuckets.get(remoteAddr) ?? []).filter((t) => t > cutoff);
+    if (clientRecent.length === 0) {
+      badPasscodeBuckets.delete(remoteAddr);
+    } else {
+      badPasscodeBuckets.set(remoteAddr, clientRecent);
+    }
+
+    globalBadPasscodeTimestamps = globalBadPasscodeTimestamps.filter((t) => t > cutoff);
+
+    let retryAfterS = 0;
+    if (clientRecent.length >= BAD_PASSCODE_LIMIT_MAX) {
+      retryAfterS = Math.max(
+        retryAfterS,
+        Math.max(1, Math.ceil((clientRecent[0] + BAD_PASSCODE_WINDOW_MS - now) / 1000)),
+      );
+    }
+    if (globalBadPasscodeTimestamps.length >= BAD_PASSCODE_GLOBAL_MAX) {
+      retryAfterS = Math.max(
+        retryAfterS,
+        Math.max(
+          1,
+          Math.ceil((globalBadPasscodeTimestamps[0] + BAD_PASSCODE_WINDOW_MS - now) / 1000),
+        ),
+      );
+    }
+
+    return retryAfterS > 0 ? { locked: true, retryAfterS } : { locked: false, retryAfterS: 0 };
+  }
+
+  function recordBadPasscodeAttempt(remoteAddr: string): void {
+    const now = nowFn();
+    const cutoff = now - BAD_PASSCODE_WINDOW_MS;
+    sweepBucketMap(badPasscodeBuckets, cutoff);
+    const clientRecent = (badPasscodeBuckets.get(remoteAddr) ?? []).filter((t) => t > cutoff);
+    clientRecent.push(now);
+    badPasscodeBuckets.set(remoteAddr, clientRecent);
+    globalBadPasscodeTimestamps = globalBadPasscodeTimestamps.filter((t) => t > cutoff);
+    globalBadPasscodeTimestamps.push(now);
+  }
+
+  function checkHourlyCap(maxPerHour: number | null): { allowed: boolean; retryAfterS: number } {
+    const now = nowFn();
+    const cutoff = now - HOURLY_CAP_WINDOW_MS;
+    hourlyTokenTimestamps = hourlyTokenTimestamps.filter((t) => t > cutoff);
+    if (maxPerHour !== null && hourlyTokenTimestamps.length >= maxPerHour) {
+      const retryAfterS = Math.max(
+        1,
+        Math.ceil((hourlyTokenTimestamps[0] + HOURLY_CAP_WINDOW_MS - now) / 1000),
+      );
+      return { allowed: false, retryAfterS };
+    }
+    return { allowed: true, retryAfterS: 0 };
+  }
+
+  function recordSuccessfulMint(): void {
+    const now = nowFn();
+    const cutoff = now - HOURLY_CAP_WINDOW_MS;
+    hourlyTokenTimestamps = hourlyTokenTimestamps.filter((t) => t > cutoff);
+    hourlyTokenTimestamps.push(now);
   }
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -751,7 +1013,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         }
         sendJson(res, 200, {
           ok: true,
-          uptime_s: Math.floor((Date.now() - startedAt) / 1000),
+          uptime_s: Math.max(0, Math.floor((nowFn() - startedAt) / 1000)),
           agent,
           livekit_configured: livekitConfigured,
           passcode_required: passcodeRequired,
@@ -781,11 +1043,25 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
           return;
         }
 
-        const remoteAddr =
+        const socketAddr =
           (opts.remoteAddress ? opts.remoteAddress(req) : req.socket.remoteAddress) ?? 'unknown';
+        const trustProxy = isTrustProxyEnabled(env);
+        const proxied = isProxied(req);
+        if (proxied && !trustProxy && !warnedProxiedTrustOff) {
+          warnedProxiedTrustOff = true;
+          console.warn(
+            '[server] WARNING: proxied request received with ALICE_TRUST_PROXY off — visitors share one rate-limit bucket; set ALICE_TRUST_PROXY=1 if behind a local proxy/tunnel.',
+          );
+        }
+
+        const remoteAddr = clientAddress(req, { env, remoteAddress: opts.remoteAddress });
+        const addrLog: Record<string, unknown> = trustProxy
+          ? { remote_addr: remoteAddr, socket_addr: socketAddr }
+          : { remote_addr: remoteAddr };
+
         const limit = checkRateLimit(remoteAddr);
         if (!limit.allowed) {
-          logServerEvent('token_refused', { reason: 'slow_down', remote_addr: remoteAddr });
+          logServerEvent('token_refused', { reason: 'slow_down', ...addrLog });
           sendJson(
             res,
             429,
@@ -795,11 +1071,35 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
           return;
         }
 
+        if (!originMatchesHost(req.headers.origin, req.headers.host)) {
+          if (!trustProxy) {
+            logServerEvent('token_refused', { reason: 'bad_origin', ...addrLog });
+            sendJson(res, 403, { error: 'bad_origin' }, { 'Cache-Control': 'no-store' });
+            return;
+          }
+          const now = nowFn();
+          if (now - lastOriginMismatchLogMs >= ORIGIN_MISMATCH_LOG_WINDOW_MS) {
+            lastOriginMismatchLogMs = now;
+            logServerEvent('origin_mismatch', { ...addrLog });
+          }
+        }
+
         const expectedPasscode = env.ALICE_PASSCODE;
-        if (!expectedPasscode && !isLoopbackHost(remoteAddr)) {
+        const isLocalCaller =
+          !trustProxy &&
+          isLoopbackHost(socketAddr) &&
+          !proxied &&
+          isLocalHostHeader(req.headers.host);
+        if (!expectedPasscode && !isLocalCaller) {
+          if (proxied && !warnedProxiedNoPasscode) {
+            warnedProxiedNoPasscode = true;
+            console.warn(
+              '[server] WARNING: proxy detected in front of Alice with ALICE_PASSCODE unset — refusing /api/token; set ALICE_PASSCODE in .env.local.',
+            );
+          }
           logServerEvent('token_refused', {
             reason: 'passcode_not_configured',
-            remote_addr: remoteAddr,
+            ...addrLog,
           });
           sendJson(
             res,
@@ -810,9 +1110,37 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
           return;
         }
 
+        if (trustProxy && expectedPasscode && expectedPasscode.length < MIN_PROXY_PASSCODE_LEN) {
+          logServerEvent('token_refused', {
+            reason: 'passcode_too_short',
+            ...addrLog,
+          });
+          sendJson(
+            res,
+            403,
+            { error: 'passcode_too_short' },
+            { 'Cache-Control': 'no-store' },
+          );
+          return;
+        }
+
+        if (expectedPasscode) {
+          const lockout = checkPasscodeLockout(remoteAddr);
+          if (lockout.locked) {
+            logServerEvent('token_refused', { reason: 'passcode_locked', ...addrLog });
+            sendJson(
+              res,
+              429,
+              { error: 'passcode_locked' },
+              { 'Retry-After': String(lockout.retryAfterS), 'Cache-Control': 'no-store' },
+            );
+            return;
+          }
+        }
+
         const bodyResult = await readOptionalJsonBody(req);
         if (!bodyResult.ok) {
-          logServerEvent('token_refused', { reason: 'body_too_large', remote_addr: remoteAddr });
+          logServerEvent('token_refused', { reason: 'body_too_large', ...addrLog });
           res.once('finish', () => req.destroy());
           sendJson(
             res,
@@ -836,10 +1164,21 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
           headerPasscode !== undefined && headerPasscode !== '' ? headerPasscode : bodyPasscode;
 
         if (expectedPasscode) {
+          const lockoutAfterBody = checkPasscodeLockout(remoteAddr);
+          if (lockoutAfterBody.locked) {
+            logServerEvent('token_refused', { reason: 'passcode_locked', ...addrLog });
+            sendJson(
+              res,
+              429,
+              { error: 'passcode_locked' },
+              { 'Retry-After': String(lockoutAfterBody.retryAfterS), 'Cache-Control': 'no-store' },
+            );
+            return;
+          }
           if (!suppliedPasscode) {
             logServerEvent('token_refused', {
               reason: 'passcode_required',
-              remote_addr: remoteAddr,
+              ...addrLog,
             });
             sendJson(
               res,
@@ -850,7 +1189,8 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
             return;
           }
           if (!timingSafeMatches(suppliedPasscode, expectedPasscode)) {
-            logServerEvent('token_refused', { reason: 'bad_passcode', remote_addr: remoteAddr });
+            recordBadPasscodeAttempt(remoteAddr);
+            logServerEvent('token_refused', { reason: 'bad_passcode', ...addrLog });
             sendJson(
               res,
               401,
@@ -867,13 +1207,26 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         if (!url || !apiKey || !apiSecret) {
           logServerEvent('token_refused', {
             reason: 'livekit_not_configured',
-            remote_addr: remoteAddr,
+            ...addrLog,
           });
           sendJson(
             res,
             503,
             { error: 'livekit_not_configured' },
             { 'Cache-Control': 'no-store' },
+          );
+          return;
+        }
+
+        const maxCallsPerHour = parseMaxCallsPerHour(env);
+        const hourlyBefore = checkHourlyCap(maxCallsPerHour);
+        if (!hourlyBefore.allowed) {
+          logServerEvent('token_refused', { reason: 'hourly_cap', ...addrLog });
+          sendJson(
+            res,
+            429,
+            { error: 'busy', retry_after_s: hourlyBefore.retryAfterS },
+            { 'Retry-After': String(hourlyBefore.retryAfterS), 'Cache-Control': 'no-store' },
           );
           return;
         }
@@ -901,8 +1254,22 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         });
 
         const token = await at.toJwt();
+
+        const hourlyAfter = checkHourlyCap(maxCallsPerHour);
+        if (!hourlyAfter.allowed) {
+          logServerEvent('token_refused', { reason: 'hourly_cap', ...addrLog });
+          sendJson(
+            res,
+            429,
+            { error: 'busy', retry_after_s: hourlyAfter.retryAfterS },
+            { 'Retry-After': String(hourlyAfter.retryAfterS), 'Cache-Control': 'no-store' },
+          );
+          return;
+        }
+        recordSuccessfulMint();
+
         logExtra = `room=${room}`;
-        logServerEvent('token', { room, identity, agent, remote_addr: remoteAddr });
+        logServerEvent('token', { room, identity, agent, ...addrLog });
 
         sendJson(
           res,
@@ -938,7 +1305,15 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
           return;
         }
 
-        const remoteAddr = req.socket.remoteAddress ?? 'unknown';
+        const trustProxy = isTrustProxyEnabled(env);
+        if (isProxied(req) && !trustProxy && !warnedProxiedTrustOff) {
+          warnedProxiedTrustOff = true;
+          console.warn(
+            '[server] WARNING: proxied request received with ALICE_TRUST_PROXY off — visitors share one rate-limit bucket; set ALICE_TRUST_PROXY=1 if behind a local proxy/tunnel.',
+          );
+        }
+
+        const remoteAddr = clientAddress(req, { env, remoteAddress: opts.remoteAddress });
         const browseLimit = checkBrowseRateLimit(remoteAddr);
         if (!browseLimit.allowed) {
           sendJson(
@@ -951,6 +1326,24 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         }
 
         const parsedUrl = new URL(rawUrl, 'http://localhost');
+
+        if (
+          trustProxy &&
+          (rawPathname === '/api/storefront' ||
+            (rawPathname === '/api/looks' &&
+              (parsedUrl.searchParams.get('occasion') ?? '').trim().length === 0))
+        ) {
+          const globalLimit = checkProxyGlobalBrowseLimit();
+          if (!globalLimit.allowed) {
+            sendJson(
+              res,
+              429,
+              { error: 'slow_down' },
+              { 'Retry-After': String(globalLimit.retryAfterS), 'Cache-Control': 'no-store' },
+            );
+            return;
+          }
+        }
 
         // GET /api/storefront?department=men|women&wait=<500..6000, default 4000>
         if (rawPathname === '/api/storefront') {
@@ -1443,12 +1836,24 @@ if (import.meta.main) {
     const livekitConfigured = Boolean(
       process.env.LIVEKIT_URL && process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET,
     );
-    const passcodeRequired = Boolean(process.env.ALICE_PASSCODE);
+    const passcode = process.env.ALICE_PASSCODE ?? '';
+    const passcodeRequired = Boolean(passcode);
+    const trustProxy = isTrustProxyEnabled(process.env);
+    const maxCallsPerHour = parseMaxCallsPerHour(process.env);
+    const callsPerHourLabel = maxCallsPerHour !== null ? String(maxCallsPerHour) : 'none';
     const displayHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
     console.log(
-      `[server] listening on ${scheme}://${displayHost}:${port} livekit=${livekitConfigured} passcode=${passcodeRequired}`,
+      `[server] listening on ${scheme}://${displayHost}:${port} livekit=${livekitConfigured} passcode=${passcodeRequired} trust_proxy=${trustProxy} calls_per_hour=${callsPerHourLabel}`,
     );
-    if (!isLoopbackHost(host) && !passcodeRequired) {
+    if (trustProxy && !passcodeRequired) {
+      console.error(
+        `[server] ERROR: ALICE_TRUST_PROXY=1 with empty ALICE_PASSCODE — every /api/token request will be refused (403 passcode_not_configured); set ALICE_PASSCODE (at least ${MIN_PROXY_PASSCODE_LEN} characters) in .env.local.`,
+      );
+    } else if (trustProxy && passcode.length < MIN_PROXY_PASSCODE_LEN) {
+      console.error(
+        `[server] ERROR: ALICE_TRUST_PROXY=1 with ALICE_PASSCODE shorter than ${MIN_PROXY_PASSCODE_LEN} characters — every /api/token request will be refused (403 passcode_too_short); the passcode must be at least ${MIN_PROXY_PASSCODE_LEN} characters behind a public link.`,
+      );
+    } else if (!isLoopbackHost(host) && !passcodeRequired) {
       console.warn(
         `[server] WARNING: bound to non-loopback host ${host} with empty ALICE_PASSCODE — /api/token is OPEN to the network! Set ALICE_PASSCODE in .env.local.`,
       );
