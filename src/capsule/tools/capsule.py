@@ -120,6 +120,7 @@ def run_pipeline(mode: str, spec_path: str, state_dir: str) -> dict[str, Any]:
                 "store_domain": p["store_domain"],
                 "price_usd": p["price_usd"],
                 "url": p["url"],
+                "image": p.get("image", ""),
                 "id": p["id"],
                 "variant_id": p["variant_id"],
                 "size_label": p["size_label"],

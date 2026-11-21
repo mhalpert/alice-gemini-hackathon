@@ -55,6 +55,12 @@ export interface CapsuleCriticEntry {
   issues: string[];
 }
 
+export interface CapsuleDressCodeNote {
+  day: string;
+  title: string;
+  reason: string;
+}
+
 export type CritiqueAllFn = (
   outfits: Outfit[],
   brief: Brief,
@@ -72,13 +78,12 @@ export interface CapsuleOptions {
   skipCritic?: boolean;
   /** Allow callers/scripts to run even when ALICE_CAPSULE env switch is off. */
   force?: boolean;
-  /** Internal recursion guard so dress-code repack runs at most once. */
-  _skipDressCodeRepack?: boolean;
 }
 
 export interface CapsuleCertificateCheck {
   name: string;
   ok: boolean;
+  advisory?: boolean;
 }
 
 export interface CapsuleCertificate {
@@ -100,6 +105,7 @@ export interface CapsuleResult {
   explanation: string;
   problems: string[];
   critic?: CapsuleCriticEntry[];
+  dress_code_notes?: CapsuleDressCodeNote[];
   model?: string;
   environment_id?: string;
   interaction_id?: string;
@@ -595,7 +601,6 @@ DO THIS IN ONE SHELL COMMAND:
 1. Update /workspace/spec.json for the change:
    - Keep unchanged days fixed via "fixed_days" (0-based indices).
    - For any black-tie-optional / formal day set "dress_code": "black_tie_optional" and "needs": ["top","bottom","shoes","layer","tie"] (men) or ["dress","shoes"] (women), and mark casual owned items (linen suit, brown loafers) "formal": false while white dress shirt is "formal": true.
-   - If asked to replace a specific piece that breaks dress code, add distinctive words from its title to "excludes" (and if no solid tie exists in stock for black-tie-optional after excluding a printed/novelty tie, you may drop "tie" from needs).
 2. Immediately run: python3 ${CAPSULE_REMOTE_TOOLS_DIR}/capsule.py resolve /workspace/spec.json
 3. If SUMMARY shows ok=false infeasible=true, relax in order in ONE shell loop and re-run \`capsule.py resolve /workspace/spec.json\`: (1) max_new_pieces +2, (2) max_stores +1. Note what you relaxed.
 4. Do NOT print JSON. Reply with ONLY the word DONE on line 1, followed by a two-sentence explanation.`;
@@ -781,11 +786,11 @@ async function downloadPipelineOutput(
   return null;
 }
 
-function findDressCodeBreaks(
+function findDressCodeNotes(
   outfits: Outfit[],
   brief: CapsuleBrief,
-): Array<{ title: string; day: string }> {
-  const broken: Array<{ title: string; day: string }> = [];
+): CapsuleDressCodeNote[] {
+  const notes: CapsuleDressCodeNote[] = [];
   const seen = new Set<string>();
   for (const outfit of outfits) {
     const dayOccasion = `${outfit.name} (${outfit.difference})`;
@@ -800,21 +805,100 @@ function findDressCodeBreaks(
         const key = `${piece.item.title}|${outfit.name}`;
         if (!seen.has(key)) {
           seen.add(key);
-          broken.push({ title: piece.item.title, day: outfit.name });
+          notes.push({
+            day: outfit.name,
+            title: piece.item.title,
+            reason: `breaks the dress code for ${outfit.name}`,
+          });
         }
       }
     }
   }
-  return broken;
+  return notes;
 }
 
-async function runCriticPass(
-  result: CapsuleResult,
+function buildQuickOutfitsForCritic(pipeline: RawPipelineOutput, brief: CapsuleBrief): Outfit[] | null {
+  const rawPieces = Array.isArray(pipeline.pieces) ? pipeline.pieces : [];
+  const rawOwned = Array.isArray(pipeline.owned_pieces_used) ? pipeline.owned_pieces_used : [];
+  const rawOutfits = Array.isArray(pipeline.outfits) ? pipeline.outfits : [];
+  if (rawOutfits.length === 0 || rawPieces.length === 0) return null;
+  if (!rawPieces.every((p) => typeof p.image === 'string' && p.image.length > 0)) return null;
+
+  const byId = new Map<string, Piece>();
+  for (const rp of rawPieces) {
+    const id = String(rp.id ?? rp.variant_id ?? '');
+    if (!id) continue;
+    const slot = normalizeSlotForContract(String(rp.slot ?? 'accessory'));
+    const piece: Piece = {
+      slot,
+      why: slot,
+      item: {
+        id,
+        variant_id: String(rp.variant_id ?? id),
+        title: String(rp.title ?? ''),
+        price: Number(rp.price_usd ?? 0),
+        url: String(rp.url ?? ''),
+        image: cleanImageUrl(String(rp.image ?? '')),
+        store: String(rp.store ?? ''),
+        store_domain: String(rp.store_domain ?? ''),
+        rating: null,
+        rating_count: null,
+        sizes: rp.size_label ? [String(rp.size_label)] : [],
+        variants_by_size: {},
+        description: '',
+        department: brief.gender,
+      },
+    };
+    byId.set(id, piece);
+    if (rp.variant_id) byId.set(String(rp.variant_id), piece);
+  }
+  for (const ow of rawOwned) {
+    const id = String(ow.id ?? '');
+    if (!id) continue;
+    const slot = normalizeSlotForContract(String(ow.slot ?? 'accessory'));
+    byId.set(id, {
+      slot,
+      why: 'Owned piece',
+      item: {
+        id,
+        variant_id: id,
+        title: String(ow.title ?? id),
+        price: 0,
+        url: '',
+        image: '',
+        store: 'Owned',
+        store_domain: 'owned',
+        rating: null,
+        rating_count: null,
+        sizes: [],
+        variants_by_size: {},
+        description: '',
+        department: brief.gender,
+      },
+    });
+  }
+
+  return rawOutfits.map((ro, idx) => {
+    const pieces = (Array.isArray(ro.piece_ids) ? ro.piece_ids : [])
+      .map((pid) => byId.get(String(pid)))
+      .filter((p): p is Piece => Boolean(p));
+    return {
+      number: idx + 1,
+      name: String(ro.day ?? `Day ${idx + 1}`),
+      difference: String(ro.dress_code ?? 'casual').replace(/_/g, ' '),
+      story: '',
+      pieces,
+      total: Number(ro.total_new_usd ?? 0),
+    };
+  });
+}
+
+async function evaluateCritic(
+  outfits: Outfit[],
   brief: CapsuleBrief,
   opts: CapsuleOptions,
-  emitStep: (kind: string, text: string) => void,
-): Promise<void> {
-  if (opts.skipCritic || !result.ok || result.outfits.length === 0) return;
+): Promise<CapsuleCriticEntry[] | null> {
+  if (opts.skipCritic || outfits.length === 0) return null;
 
   const critiqueAllFn = opts.critiqueAll ?? defaultCritiqueAll;
   const criticBrief: Brief = {
@@ -826,7 +910,7 @@ async function runCriticPass(
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const critiques = await Promise.race<Critique[] | null>([
-      critiqueAllFn(result.outfits, criticBrief, {
+      critiqueAllFn(outfits, criticBrief, {
         timeoutMs: CRITIC_TIMEOUT_MS,
         room: getCallRoom() ?? undefined,
       }),
@@ -836,31 +920,53 @@ async function runCriticPass(
       }),
     ]);
 
-    if (!Array.isArray(critiques) || critiques.length !== result.outfits.length) {
-      return;
+    if (!Array.isArray(critiques) || critiques.length !== outfits.length) {
+      return null;
     }
-    // If every critique errored/timed out, leave critic field absent cleanly
     if (critiques.some((c) => c.error || !Number.isFinite(c.score) || c.score <= 0)) {
-      return;
+      return null;
     }
 
-    const entries: CapsuleCriticEntry[] = result.outfits.map((outfit, idx) => ({
+    return outfits.map((outfit, idx) => ({
       day: outfit.name,
       score: critiques[idx]!.score,
       presentable: Boolean(critiques[idx]!.presentable),
       issues: Array.isArray(critiques[idx]!.issues) ? critiques[idx]!.issues : [],
     }));
-    const allSixPlus = entries.every((e) => e.score >= 6);
-    result.critic = entries;
-    result.certificate.checks.push({ name: 'critic_all_6_plus', ok: allSixPlus });
-    emitStep(
-      'critic',
-      `critic scored ${entries.map((e) => `${e.score}/10`).join(', ')} (${allSixPlus ? 'all >= 6' : 'below 6'})`,
-    );
   } catch {
-    // Critic failure or timeout never fails the pack: leave field absent
+    return null;
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function attachAdvisoryReports(
+  result: CapsuleResult,
+  brief: CapsuleBrief,
+  criticEntries: CapsuleCriticEntry[] | null,
+  emitStep: (kind: string, text: string) => void,
+): void {
+  const dressCodeNotes = findDressCodeNotes(result.outfits, brief);
+  result.dress_code_notes = dressCodeNotes;
+  if (dressCodeNotes.length > 0) {
+    emitStep(
+      'dress_code',
+      `dress-code note: ${dressCodeNotes.map((n) => `${n.title} (${n.day})`).join('; ')}`,
+    );
+  }
+
+  if (criticEntries && criticEntries.length > 0) {
+    const allSixPlus = criticEntries.every((e) => e.score >= 6);
+    result.critic = criticEntries;
+    result.certificate.checks.push({
+      name: 'critic_all_6_plus',
+      ok: allSixPlus,
+      advisory: true,
+    });
+    emitStep(
+      'critic',
+      `critic scored ${criticEntries.map((e) => `${e.score}/10`).join(', ')} (${allSixPlus ? 'all >= 6' : 'below 6'})`,
+    );
   }
 }
 
@@ -944,7 +1050,13 @@ export async function packCapsule(
       });
     }
 
-    let result = await mapPipelineToCapsuleResult(
+    // Start critic in parallel with store enrichment/verification when images are already in final_output.json
+    const quickOutfits = pipeline.ok ? buildQuickOutfitsForCritic(pipeline, brief) : null;
+    const parallelCriticPromise = quickOutfits
+      ? evaluateCritic(quickOutfits, brief, opts)
+      : null;
+
+    const result = await mapPipelineToCapsuleResult(
       pipeline,
       brief,
       {
@@ -960,27 +1072,11 @@ export async function packCapsule(
       opts.store,
     );
 
-    // Hard dress-code filter (breaksDressCode) -> single automatic repack if any piece breaks
-    if (result.ok && !opts._skipDressCodeRepack) {
-      const breaks = findDressCodeBreaks(result.outfits, brief);
-      if (breaks.length > 0) {
-        const changeMsg = breaks
-          .map((b) => `replace ${b.title}: it breaks the dress code for ${b.day}`)
-          .join('; ');
-        emitStep('dress_code', `re-solving dress-code break: ${changeMsg}`);
-        const repacked = await repackCapsule(result, changeMsg, {
-          ...opts,
-          _skipDressCodeRepack: true,
-        });
-        if (repacked.ok) {
-          repacked.timings.total_ms = Math.max(0, Date.now() - t0);
-          return repacked;
-        }
-      }
-    }
-
-    // Background stylist critic (8 s cap; never fails the pack)
-    await runCriticPass(result, brief, opts, emitStep);
+    // Report-only dress-code notes and critic (never triggers a re-solve; capped at 8 s)
+    const criticEntries = result.ok
+      ? await (parallelCriticPromise ?? evaluateCritic(result.outfits, brief, opts))
+      : null;
+    attachAdvisoryReports(result, brief, criticEntries, emitStep);
     result.timings.total_ms = Math.max(0, Date.now() - t0);
 
     logEvent(result.ok ? 'capsule_done' : 'capsule_fail', {
@@ -1093,6 +1189,11 @@ export async function repackCapsule(
       });
     }
 
+    const quickOutfits = pipeline.ok ? buildQuickOutfitsForCritic(pipeline, brief) : null;
+    const parallelCriticPromise = quickOutfits
+      ? evaluateCritic(quickOutfits, brief, opts)
+      : null;
+
     const result = await mapPipelineToCapsuleResult(
       pipeline,
       brief,
@@ -1109,25 +1210,11 @@ export async function repackCapsule(
       opts.store,
     );
 
-    if (result.ok && !opts._skipDressCodeRepack) {
-      const breaks = findDressCodeBreaks(result.outfits, brief);
-      if (breaks.length > 0) {
-        const changeMsg = breaks
-          .map((b) => `replace ${b.title}: it breaks the dress code for ${b.day}`)
-          .join('; ');
-        emitStep('dress_code', `re-solving dress-code break: ${changeMsg}`);
-        const repacked = await repackCapsule(result, changeMsg, {
-          ...opts,
-          _skipDressCodeRepack: true,
-        });
-        if (repacked.ok) {
-          repacked.timings.total_ms = Math.max(0, Date.now() - t0);
-          return repacked;
-        }
-      }
-    }
-
-    await runCriticPass(result, brief, opts, emitStep);
+    // Strictly ONE sandbox run per repack; dress-code notes and critic are report-only
+    const criticEntries = result.ok
+      ? await (parallelCriticPromise ?? evaluateCritic(result.outfits, brief, opts))
+      : null;
+    attachAdvisoryReports(result, brief, criticEntries, emitStep);
     result.timings.total_ms = Math.max(0, Date.now() - t0);
 
     logEvent(result.ok ? 'capsule_done' : 'capsule_fail', {

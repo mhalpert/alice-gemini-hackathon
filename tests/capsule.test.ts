@@ -553,13 +553,17 @@ describe('capsule packing, download-first, critic, dress-code repack, and switch
         assert.equal(packed.critic?.length, 2);
         assert.equal(packed.critic?.[0]?.score, 8);
         assert.ok(
-          packed.certificate.checks.some((c) => c.name === 'critic_all_6_plus' && c.ok === true),
+          packed.certificate.checks.some(
+            (c) => c.name === 'critic_all_6_plus' && c.ok === true && c.advisory === true,
+          ),
         );
+        assert.deepEqual(packed.dress_code_notes, []);
         assert.ok(steps.some((s) => s.text.includes('searched 245 products')));
         assert.ok(loggedEvents.some((e) => e.ev === 'capsule_start'));
         assert.ok(loggedEvents.some((e) => e.ev === 'capsule_step'));
         assert.ok(loggedEvents.some((e) => e.ev === 'capsule_done'));
 
+        const streamCallsBeforeRepack = capturedInputs.filter((p) => p.stream).length;
         const repacked = await repackCapsule(packed, 'the dinner is now black tie optional', {
           client: fakeClient,
           toolsDir,
@@ -568,6 +572,12 @@ describe('capsule packing, download-first, critic, dress-code repack, and switch
           critiqueAll: okCritiqueAll,
         });
         assert.equal(repacked.ok, true);
+        const streamCallsAfterRepack = capturedInputs.filter((p) => p.stream).length;
+        assert.equal(
+          streamCallsAfterRepack - streamCallsBeforeRepack,
+          1,
+          'repackCapsule must make exactly ONE agent interaction',
+        );
         const lastReq = capturedInputs[capturedInputs.length - 1]!;
         assert.equal(lastReq.environment, 'env-stream-1');
         assert.equal(lastReq.previous_interaction_id, 'int-run-1');
@@ -580,12 +590,12 @@ describe('capsule packing, download-first, critic, dress-code repack, and switch
     });
   });
 
-  test('breaksDressCode triggers one automatic repackCapsule and critic failure never fails the pack', async () => {
+  test('dress-code notes and low critic scores are report-only and never trigger a second sandbox run', async () => {
     await withTempDir(async (dir) => {
       const toolsDir = makeFakeToolsDir(dir);
       const statePath = path.join(dir, 'environment.json');
 
-      const badTiePipeline: RawPipelineOutput = {
+      const printedTiePipeline: RawPipelineOutput = {
         ...SAMPLE_PIPELINE,
         pieces: [
           ...SAMPLE_PIPELINE.pieces!,
@@ -619,7 +629,6 @@ describe('capsule packing, download-first, critic, dress-code repack, and switch
       };
 
       let streamCalls = 0;
-      const prompts: string[] = [];
 
       const fakeClient: CapsuleApiClient = {
         environments: {
@@ -634,9 +643,7 @@ describe('capsule packing, download-first, critic, dress-code repack, and switch
               return { ok: true };
             },
             async download() {
-              // First call returns printed tie on black-tie-optional day; second returns clean capsule
-              const payload = streamCalls === 1 ? badTiePipeline : SAMPLE_PIPELINE;
-              return Buffer.from(JSON.stringify(payload), 'utf8');
+              return Buffer.from(JSON.stringify(printedTiePipeline), 'utf8');
             },
           },
         },
@@ -646,7 +653,6 @@ describe('capsule packing, download-first, critic, dress-code repack, and switch
               return { id: 'setup-1', environment_id: params.environment, output_text: 'READY' };
             }
             streamCalls += 1;
-            prompts.push(String(params.input ?? ''));
             return {
               id: `int-${streamCalls}`,
               environment_id: params.environment,
@@ -656,11 +662,47 @@ describe('capsule packing, download-first, critic, dress-code repack, and switch
         },
       };
 
-      const failingCritic: CritiqueAllFn = async () => {
-        throw new Error('critic api down');
-      };
+      const lowCritic: CritiqueAllFn = async (outfits) =>
+        outfits.map(() => ({
+          score: 4,
+          presentable: false,
+          occasion_fit: 4,
+          cohesion: 4,
+          completeness: 5,
+          issues: ['missing belt'],
+          weak_piece: null,
+          model: 'gemini-4-argon',
+          ms: 90,
+        }));
 
       const res = await packCapsule(SAMPLE_BRIEF, {
+        client: fakeClient,
+        toolsDir,
+        statePath,
+        store: makeFakeStore(),
+        critiqueAll: lowCritic,
+        force: true,
+      });
+
+      assert.equal(streamCalls, 1, 'dress-code note must NEVER trigger a second sandbox run');
+      assert.equal(res.ok, true, 'advisory critic_all_6_plus fail must NOT make ok false');
+      assert.deepEqual(res.dress_code_notes, [
+        {
+          day: 'Day 2 - Dinner',
+          title: 'Kith Printed Silk Neck Tie - Sage',
+          reason: 'breaks the dress code for Day 2 - Dinner',
+        },
+      ]);
+      assert.equal(res.critic?.length, 2);
+      assert.equal(res.critic?.[0]?.score, 4);
+      const criticCheck = res.certificate.checks.find((c) => c.name === 'critic_all_6_plus');
+      assert.deepEqual(criticCheck, { name: 'critic_all_6_plus', ok: false, advisory: true });
+
+      // Repack with dress-code note also makes strictly ONE interaction and survives critic failure
+      const failingCritic: CritiqueAllFn = async () => {
+        throw new Error('critic timeout');
+      };
+      const repacked = await repackCapsule(res, 'dinner is now black tie optional', {
         client: fakeClient,
         toolsDir,
         statePath,
@@ -668,14 +710,10 @@ describe('capsule packing, download-first, critic, dress-code repack, and switch
         critiqueAll: failingCritic,
         force: true,
       });
-
-      assert.equal(streamCalls, 2, 'should have triggered exactly one automatic repack');
-      assert.match(
-        prompts[1]!,
-        /replace Kith Printed Silk Neck Tie - Sage: it breaks the dress code for Day 2 - Dinner/,
-      );
-      assert.equal(res.ok, true, 'critic error must never fail the pack');
-      assert.equal(res.critic, undefined, 'critic field should be absent when critic fails');
+      assert.equal(streamCalls, 2, 'repack must make strictly ONE agent interaction');
+      assert.equal(repacked.ok, true);
+      assert.equal(repacked.critic, undefined, 'critic field must be absent when critic fails');
+      assert.equal(repacked.dress_code_notes?.length, 1);
     });
   });
 

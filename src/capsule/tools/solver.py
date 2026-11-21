@@ -528,9 +528,14 @@ def solve_capsule(
                     if "dress shirt" in (all_pieces[i].get("title") or "").lower():
                         model.Add(used[d][i] == 0)
 
+        # Keep a tie on men's black-tie / black-tie-optional dinners whenever a real formal tie is in the pool
+        gender_low = (spec.get("gender") or "men").strip().lower()
+        formal_ties = [i for i in acc_by_slot["tie"] if all_pieces[i].get("formal")]
+        require_tie_for_formal = is_formal_day and gender_low == "men" and len(formal_ties) > 0
+
         for acc_slot in ACCESSORY_SLOTS:
             idxs = acc_by_slot[acc_slot]
-            if acc_slot in needs:
+            if acc_slot in needs or (acc_slot == "tie" and require_tie_for_formal):
                 if not idxs:
                     return {"ok": False, "infeasible": True, "reason": f"no {acc_slot} available for day {d+1}", "solve_s": round(time.time() - t0, 3), "pool_stores": pool_stores}
                 model.Add(sum(used[d][i] for i in idxs) == 1)
@@ -756,6 +761,7 @@ def run_self_test() -> dict[str, Any]:
         {"id": "p13", "variant_id": "v13", "slot": "layer", "formal": True, "title": "Black Tuxedo Blazer - Black", "store": "Everlane", "store_domain": "m34kzg-ke.myshopify.com", "price_usd": 120.0, "url": "https://everlane.com/13", "size_label": "M", "color_words": ["black"], "is_leather": False, "rating": 4.8, "rating_count": 120},
         {"id": "p14", "variant_id": "v14", "slot": "bottom", "formal": True, "title": "Black Dress Trousers - Black", "store": "Everlane", "store_domain": "m34kzg-ke.myshopify.com", "price_usd": 75.0, "url": "https://everlane.com/14", "size_label": "32", "color_words": ["black"], "is_leather": False, "rating": 4.7, "rating_count": 80},
         {"id": "p15", "variant_id": "v15", "slot": "shoes", "formal": True, "title": "Black Leather Oxford - Black", "store": "Steve Madden", "store_domain": "stevemadden.myshopify.com", "price_usd": 85.0, "url": "https://stevemadden.com/15", "size_label": "10", "color_words": ["black"], "is_leather": True, "rating": 4.8, "rating_count": 95},
+        {"id": "p16", "variant_id": "v16", "slot": "tie", "formal": True, "title": "Silk Neck Tie - Black", "store": "Everlane", "store_domain": "m34kzg-ke.myshopify.com", "price_usd": 45.0, "url": "https://everlane.com/16", "size_label": "OS", "color_words": ["black"], "is_leather": False, "rating": 4.7, "rating_count": 60},
     ]
     res = solve_capsule(spec, pool)
     assert res["ok"], f"self-test solve failed: {res}"
@@ -774,8 +780,8 @@ def run_self_test() -> dict[str, Any]:
     assert "p4" in chosen_ids, f"expected quality linen shirt p4 in {chosen_ids}"
     assert not ({"p1", "p2", "p3"}.issubset(chosen_ids)), "stem cap failed: picked all 3 identical tees"
 
-    # Rule (b) formal check: when dinner becomes black_tie_optional, owned casual jacket (formal=False) does NOT
-    # satisfy formal, so solver MUST buy formal blazer p13 while STILL using owned formal white dress shirt!
+    # Rule (b) formal check + tie check: when dinner becomes black_tie_optional, owned casual jacket (formal=False) does NOT
+    # satisfy formal, so solver MUST buy formal blazer p13 + formal tie p16 while STILL using owned formal white dress shirt!
     formal_spec = dict(spec)
     formal_spec["budget_usd"] = 500
     formal_spec["max_new_pieces"] = 9
@@ -788,6 +794,7 @@ def run_self_test() -> dict[str, Any]:
     assert formal_res["ok"], f"formal self-test failed: {formal_res}"
     formal_dinner_pids = set(formal_res["outfits"][2]["piece_ids"])
     assert "p13" in formal_dinner_pids, f"formal dinner must buy formal blazer p13: {formal_dinner_pids}"
+    assert "p16" in formal_dinner_pids, f"formal dinner must keep real tie p16 when in pool: {formal_dinner_pids}"
     assert "owned:white_dress_shirt" in formal_dinner_pids, f"formal dinner must keep owned formal white dress shirt: {formal_dinner_pids}"
 
     return {"self_test": "ok", "total_usd": res["total_usd"], "pieces": len(res["pieces"]), "solve_s": res["solve_s"]}

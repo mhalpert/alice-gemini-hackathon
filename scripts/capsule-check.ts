@@ -41,7 +41,14 @@ function printResult(label: string, res: CapsuleResult): void {
     `certificate: stock=${res.certificate.all_sizes_in_stock} budget=${res.certificate.within_budget} checks=${res.certificate.checks.filter((c) => c.ok).length}/${res.certificate.checks.length}`,
   );
   for (const c of res.certificate.checks) {
-    console.log(`  [${c.ok ? 'PASS' : 'FAIL'}] ${c.name}`);
+    const tag = c.advisory ? ' (advisory)' : '';
+    console.log(`  [${c.ok ? 'PASS' : 'FAIL'}] ${c.name}${tag}`);
+  }
+  if (res.dress_code_notes && res.dress_code_notes.length > 0) {
+    console.log('Dress-code notes:');
+    for (const n of res.dress_code_notes) {
+      console.log(`  ${n.day}: ${n.title} — ${n.reason}`);
+    }
   }
   if (res.critic && res.critic.length > 0) {
     console.log('Critic:');
