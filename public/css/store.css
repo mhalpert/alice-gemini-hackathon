@@ -9,6 +9,7 @@
   --serif: 'Cormorant Garamond', 'Bodoni Moda', Georgia, serif;
   --sans: 'Inter', system-ui, -apple-system, sans-serif;
   --header-h: 132px;
+  --rail-w: 320px;
 
   /* Supporting editorial scale */
   --surface: #ffffff;
@@ -139,6 +140,7 @@ img {
 .look-board-layer:focus-visible,
 .stage-thumb-btn:focus-visible,
 .stage-video-play-btn:focus-visible,
+.stage-download-link:focus-visible,
 .render-tile:focus-visible,
 .header-search-input:focus-visible,
 .header-search-close:focus-visible,
@@ -1140,6 +1142,7 @@ img {
 
 .stage-panel.is-showing-tryon .stage-tryon-layer {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .stage-tryon-img,
@@ -1351,6 +1354,38 @@ img {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
+  min-height: 1.5em;
+}
+
+.stage-caption-text {
+  min-width: 0;
+}
+
+.stage-download-link {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  font-variant-caps: all-small-caps;
+  line-height: inherit;
+  color: var(--ink-muted);
+  text-decoration: underline;
+  text-decoration-color: var(--line-strong);
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+  white-space: nowrap;
+  transition: color 180ms ease, text-decoration-color 180ms ease;
+}
+
+.stage-download-link:hover {
+  color: var(--accent);
+  text-decoration-color: currentColor;
+}
+
+.stage-download-link[hidden] {
+  display: none;
 }
 
 /* Render strip under the stage once revealed with multiple renders */
@@ -3484,7 +3519,103 @@ body.has-boutique #call .call-start__status:empty {
   }
 }
 
+/* Right rail layout on wide screens during a live call with products */
+
+@media (min-width: 1100px) {
+  body.call-live.has-products .store-shell {
+    padding-right: var(--rail-w);
+    transition: padding-right 0.45s cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+
+  body.call-live.has-products .masthead,
+  body.call-live.has-products .header-search-form,
+  body.call-live.has-products .store-nav-list,
+  body.call-live.has-products .store-footer-inner,
+  body.call-live.has-products .store-main,
+  body.call-live.has-products #store-search-slot {
+    padding-left: 32px;
+    padding-right: 32px;
+  }
+
+  body.call-live.has-products .store-footer-inner {
+    padding-bottom: 36px;
+  }
+
+  body.call-live.has-products .product-card {
+    scroll-margin-bottom: 24px;
+  }
+
+  body.call-live.has-products .picked-stage {
+    grid-template-columns: minmax(0, min(420px, 44%, calc(var(--stage-h) * 0.75))) minmax(0, 1fr);
+    gap: 32px;
+  }
+
+  body.call-live.has-products .looks-grid,
+  body.call-live.has-products .boutique-looks-grid {
+    gap: 20px;
+  }
+
+  body.call-live.has-products .look-card {
+    padding: 16px;
+  }
+
+  body.call-live.has-products .shop-look-grid,
+  body.call-live.has-products .search-results-grid {
+    gap: 20px;
+  }
+
+  body.call-live.has-products .boutique-hero {
+    flex-wrap: wrap;
+    gap: var(--space-5);
+  }
+
+  /* Panels and backdrops stop at the rail's left edge */
+  body.call-live.has-products .panel-layer {
+    right: var(--rail-w);
+  }
+
+  body.call-live.has-products .panel-sheet {
+    max-width: 100%;
+  }
+
+  body.call-live.has-products .panel-sheet--product {
+    width: min(560px, 100%);
+  }
+
+  body.call-live.has-products .panel-sheet--bag {
+    width: min(420px, 100%);
+  }
+}
+
+@media (min-width: 1100px) and (max-width: 1359px) {
+  body.call-live.has-products .masthead,
+  body.call-live.has-products .header-search-form,
+  body.call-live.has-products .store-nav-list,
+  body.call-live.has-products .store-footer-inner,
+  body.call-live.has-products .store-main,
+  body.call-live.has-products #store-search-slot {
+    padding-left: 24px;
+    padding-right: 24px;
+  }
+
+  body.call-live.has-products .picked-stage {
+    gap: 24px;
+  }
+
+  body.call-live.has-products .looks-grid,
+  body.call-live.has-products .boutique-looks-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  body.call-live.has-products .shop-look-grid,
+  body.call-live.has-products .search-results-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 18px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  body.call-live.has-products .store-shell,
   .panel-layer,
   .panel-backdrop,
   .panel-sheet,
@@ -3501,6 +3632,7 @@ body.has-boutique #call .call-start__status:empty {
   .stage-tryon-video,
   .stage-video-play-btn,
   .stage-thumb-btn,
+  .stage-download-link,
   .render-tile,
   .board-pointer-ring,
   .piece-note-item,

@@ -695,6 +695,153 @@
   50% { transform: scale(1.14); opacity: 0.12; }
 }
 
+/* ---- right rail on wide screens during a live call with products ---------- */
+
+@media (min-width: 1100px) {
+  body.call-live.has-products #call {
+    overflow: hidden;
+  }
+
+  body.call-live.has-products .call-stage {
+    position: absolute;
+    top: var(--c-top);
+    right: 0;
+    bottom: 0;
+    left: auto;
+    width: var(--rail-w, 320px);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 12px;
+    box-sizing: border-box;
+    background: #14110f;
+    border-left: 1px solid rgba(250, 247, 242, 0.14);
+    pointer-events: auto;
+    overflow: hidden;
+    animation: rail-enter 0.45s var(--ease) both;
+  }
+
+  body.call-live.has-products .alice,
+  body.call-live.has-products.panel-open .alice {
+    position: relative;
+    inset: auto;
+    order: 1;
+    flex: 0 0 auto;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 4 / 3;
+    border-radius: 6px;
+    border: 1px solid rgba(250, 247, 242, 0.1);
+    box-sizing: border-box;
+    box-shadow: none;
+  }
+
+  body.call-live.has-products .controls,
+  body.call-live.has-products.panel-open .controls {
+    position: relative;
+    left: auto;
+    right: auto;
+    bottom: auto;
+    top: auto;
+    order: 2;
+    flex: 0 0 auto;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 4px;
+    padding: 6px;
+    border-radius: 12px;
+    box-shadow: none;
+    transform: none;
+  }
+
+  body.call-live.has-products .controls button {
+    min-height: 34px;
+    padding: 0.45rem 0.6rem;
+    font-size: 0.72rem;
+  }
+
+  body.call-live.has-products .controls button[data-act='mute'] {
+    min-height: 36px;
+    min-width: 84px;
+    padding: 0 0.9rem;
+    font-size: 0.75rem;
+  }
+
+  body.call-live.has-products .controls .controls__end {
+    margin-left: auto;
+  }
+
+  body.call-live.has-products .typebox,
+  body.call-live.has-products.panel-open .typebox {
+    position: relative;
+    left: auto;
+    right: auto;
+    bottom: auto;
+    top: auto;
+    order: 3;
+    flex: 0 0 auto;
+    width: 100%;
+    max-width: 100%;
+    margin-inline: 0;
+    box-shadow: none;
+  }
+
+  body.call-live.has-products .captions,
+  body.call-live.has-products.typing-open .captions,
+  body.call-live.has-products.panel-open .captions,
+  body.call-live.has-products.typing-open.panel-open .captions {
+    position: relative;
+    left: auto;
+    right: auto;
+    bottom: auto;
+    top: auto;
+    order: 4;
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    max-width: 100%;
+    justify-content: flex-end;
+    align-items: stretch;
+    gap: 8px;
+    transform: none;
+    overflow: hidden;
+  }
+
+  body.call-live.has-products .caption {
+    box-sizing: border-box;
+    max-width: 100%;
+    align-self: flex-start;
+    padding: 0.5rem 0.8rem;
+    border-radius: 12px;
+    border: 1px solid rgba(250, 247, 242, 0.12);
+    background: rgba(250, 247, 242, 0.1);
+    font-size: 0.84rem;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+
+  body.call-live.has-products .caption--you {
+    align-self: flex-end;
+    border-color: transparent;
+    background: rgba(250, 247, 242, 0.94);
+    color: var(--c-ink);
+  }
+
+  /* Keep whichever speaker spoke most recently at the bottom of the stack. */
+  body.call-live.has-products .caption.is-latest {
+    order: 1;
+  }
+}
+
+@keyframes rail-enter {
+  from { opacity: 0; transform: translateX(24px); }
+  to { opacity: 1; transform: none; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .alice, .selfview, .caption, .alice__orb span, .mute-quick, .typebox, .typebox__send { transition: none; }
   .alice__dot,
@@ -702,5 +849,6 @@
   .alice-thinking .alice__orb span,
   .has-products.alice-joining .alice::after,
   .has-products.alice-thinking .alice::after,
-  .typebox.is-unsent { animation: none; }
+  .typebox.is-unsent,
+  body.call-live.has-products .call-stage { animation: none; }
 }
