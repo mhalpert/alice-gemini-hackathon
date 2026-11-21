@@ -5,6 +5,7 @@ import {
   createCallStateStore,
   createInitialCallState,
   extractNameFromFact,
+  isLowCritique,
   normalizeSlotKey,
   reduceCallState,
   summarize,
@@ -376,4 +377,74 @@ test('CallStateStore keeps recent shopper turns deduplicated and capped without 
   assert.equal(normalizeSlotKey('outerwear'), 'layer');
   assert.equal(normalizeSlotKey('blazer'), 'layer');
   assert.equal(normalizeSlotKey('jacket'), 'layer');
+});
+
+test('set_critique stores critiques, adds swap_hint to CALL STATE only for low/unpresentable looks without scores/critic, and clears on replace/update', () => {
+  let state = createInitialCallState();
+  state = reduceCallState(state, {
+    type: 'set_looks',
+    replace: true,
+    looks: [
+      { number: 1, name: 'Skyline Knit', total: 160, slots: ['top', 'bottom', 'shoes'] },
+      { number: 2, name: 'Warm Neutrals', total: 110, slots: ['top', 'shoes'] },
+      { number: 3, name: 'City Crisp', total: 180, slots: ['top', 'bottom', 'shoes'] },
+    ],
+  }).state;
+
+  // Passing critique (score 8, presentable) is stored but adds no swap_hint.
+  const passStep = reduceCallState(state, {
+    type: 'set_critique',
+    look: 1,
+    critique: { score: 8, presentable: true, issues: [], weakPiece: null },
+  });
+  assert.deepEqual(passStep.changed, ['critiques']);
+  state = passStep.state;
+  assert.equal(isLowCritique(state.critiques[1]), false);
+
+  // Low/unpresentable critique adds compact swap_hint without mentioning scores or critic.
+  const lowStep = reduceCallState(state, {
+    type: 'set_critique',
+    look: 2,
+    critique: {
+      score: 5,
+      presentable: false,
+      issues: ['black belt with brown shoes'],
+      weakPiece: { slot: 'shoes', reason: 'clashes with leather tone', ask: 'black leather loafers' },
+    },
+  });
+  assert.deepEqual(lowStep.changed, ['critiques']);
+  state = lowStep.state;
+  assert.equal(isLowCritique(state.critiques[2]), true);
+
+  // Errored critique (score 0, presentable false, error set) is NOT treated as a low critique.
+  state = reduceCallState(state, {
+    type: 'set_critique',
+    look: 3,
+    critique: { score: 0, presentable: false, issues: [], weakPiece: null, error: 'timeout' },
+  }).state;
+  assert.equal(isLowCritique(state.critiques[3]), false);
+
+  const summary = summarize(state);
+  assert.equal(summary.includes('\n'), false);
+  assert.match(summary, /#2 Warm Neutrals.*swap_hint=shoes \(clashes with leather tone; try black leather loafers\)/);
+  assert.doesNotMatch(summary, /#1 Skyline Knit[^;]*swap_hint/);
+  assert.doesNotMatch(summary, /#3 City Crisp[^;]*swap_hint/);
+  assert.doesNotMatch(summary, /\bscore\b|\bcritic\b/i);
+
+  // update_look clears that look's critique; set_looks(replace: true) clears all critiques.
+  const swapped = reduceCallState(state, {
+    type: 'update_look',
+    look: { number: 2, name: 'Warm Neutrals', total: 125, slots: ['top', 'shoes'] },
+  });
+  assert.ok(swapped.changed.includes('critiques'));
+  assert.equal(swapped.state.critiques[2], undefined);
+  assert.ok(swapped.state.critiques[1]);
+
+  const replaced = reduceCallState(swapped.state, {
+    type: 'set_looks',
+    replace: true,
+    looks: [{ number: 1, name: 'Fresh Look', total: 140, slots: ['top', 'bottom'] }],
+  });
+  assert.ok(replaced.changed.includes('critiques'));
+  assert.deepEqual(replaced.state.critiques, {});
 });

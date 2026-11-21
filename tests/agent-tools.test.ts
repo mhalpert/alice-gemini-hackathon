@@ -13,6 +13,7 @@ import type {
   SearchResult,
 } from '../src/types.ts';
 import type { BuildOptions, SwapOptions } from '../src/brain/index.ts';
+import type { Critique } from '../src/brain/critic.ts';
 import type { SearchOpts } from '../src/store/catalog.ts';
 import type { BagLineAdded, BagLineNotAdded } from '../src/store/index.ts';
 import type { PageSender } from '../src/agent/page.ts';
@@ -2204,4 +2205,399 @@ test('createAgentTools invokes onToolResult callback when build_outfits, show_on
   assert.ok(names.includes('show_on_me'));
   assert.ok(names.includes('add_to_bag'));
   assert.equal(results.find((r) => r.name === 'build_outfits')?.callId, 'b1');
+});
+
+test('build_outfits enforces single active build: skips same-brief passing remark and supersedes on materially different brief', async () => {
+  const logs: RecordedLog[] = [];
+  const { page, calls } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-single-build', log: () => {} });
+  let clockNow = 1_000;
+  let buildInvocations = 0;
+
+  // Deferred controls for Run 1 (still running 16s later when shopper says "I prefer classic").
+  let finishRun1!: () => void;
+  let emitRun1Look2!: () => void;
+  const run1Gate = new Promise<void>((r) => {
+    finishRun1 = r;
+  });
+
+  // Deferred controls for Run 2 (materially different brief: different occasion/budget).
+  let finishRun2!: () => void;
+  const run2Gate = new Promise<void>((r) => {
+    finishRun2 = r;
+  });
+
+  const setA = makeSampleOutfits();
+  const setB: Outfit[] = [
+    {
+      number: 1,
+      name: 'Beach Linen',
+      difference: 'Airy linen shirt and espadrilles.',
+      story: 'Breezy coastal look.',
+      pieces: [
+        { slot: 'top', why: 'Cool linen.', item: makeItem({ id: 'b-top', variant_id: 'vb-top', title: 'Linen Camp Shirt', price: 85 }) },
+        { slot: 'shoes', why: 'Easy slip-on.', item: makeItem({ id: 'b-sho', variant_id: 'vb-sho', title: 'Canvas Espadrille', price: 65 }) },
+      ],
+      total: 150,
+    },
+  ];
+
+  const tools = createAgentTools({
+    room: 'r-single-build',
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    now: () => clockNow,
+    page,
+    state,
+    deps: makeFakeDeps({
+      async buildOutfits(brief, opts): Promise<BuildResult> {
+        buildInvocations += 1;
+        const idx = buildInvocations;
+        if (idx === 1) {
+          opts?.onOutfit?.(structuredClone(setA[0]!), 0);
+          emitRun1Look2 = () => opts?.onOutfit?.(structuredClone(setA[1]!), 1);
+          await run1Gate;
+          return { outfits: structuredClone(setA), source: 'live', timing: { first_outfit_ms: 200, total_ms: 18_000 }, problems: [] };
+        }
+        if (idx === 2) {
+          opts?.onOutfit?.(structuredClone(setA[0]!), 0);
+          emitRun1Look2 = () => opts?.onOutfit?.(structuredClone(setA[1]!), 1);
+          await run2Gate;
+          return { outfits: structuredClone(setA), source: 'live', timing: { first_outfit_ms: 200, total_ms: 18_000 }, problems: [] };
+        }
+        opts?.onOutfit?.(structuredClone(setB[0]!), 0);
+        return { outfits: structuredClone(setB), source: 'live', timing: { first_outfit_ms: 150, total_ms: 200 }, problems: [] };
+      },
+    }),
+  });
+
+  // Tool description documents single-build and passing-remark rules.
+  assert.match(tools.build_outfits.description, /only one build may run at a time/i);
+  assert.match(tools.build_outfits.description, /once looks are on screen/i);
+  assert.match(tools.build_outfits.description, /swap_piece/i);
+
+  await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+
+  // 1) Start Run 1, advance 16s (past 15s dedupe window!), call again with "I prefer classic" notes.
+  const run1Promise = tools.build_outfits.execute(
+    { occasion: 'wedding', budget_usd: 300 },
+    fakeToolOpts('b-run1'),
+  );
+  await flushMicrotasks();
+  assert.equal(buildInvocations, 1);
+
+  clockNow += 16_000;
+  const skippedRes = await tools.build_outfits.execute(
+    { occasion: 'wedding', budget_usd: 300, notes: 'I prefer classic' },
+    fakeToolOpts('b-classic'),
+  );
+  assert.equal(buildInvocations, 1, 'must NOT start a second build while first is running for same occasion/budget');
+  assert.match(skippedRes, /already on their way/i);
+  assert.match(skippedRes, /I prefer classic/);
+
+  const skipLog = logs.find((l) => l.ev === 'build_skipped' && l.data?.reason === 'build_in_progress');
+  assert.ok(skipLog, 'must log build_skipped with reason build_in_progress');
+
+  // Finish Run 1 -> page received only Run 1's two looks.
+  emitRun1Look2();
+  finishRun1();
+  const run1Res = await run1Promise;
+  assert.match(run1Res, /Built 2 looks and they are now on screen/i);
+  assert.equal(calls.filter((c) => c.action === 'showOutfits').length, 2);
+
+  // 2) Now test superseding: start a build for "wedding" ($300), then call with materially different
+  //    occasion ("beach party", $200) before it finishes -> first run's remaining output is ignored!
+  calls.length = 0;
+  const oldRunPromise = tools.build_outfits.execute(
+    { occasion: 'wedding', budget_usd: 300 },
+    fakeToolOpts('b-old'),
+  );
+  await flushMicrotasks();
+  assert.equal(buildInvocations, 2);
+
+  const newRunRes = await tools.build_outfits.execute(
+    { occasion: 'beach party', budget_usd: 200 },
+    fakeToolOpts('b-new'),
+  );
+  assert.equal(buildInvocations, 3);
+  assert.match(newRunRes, /Beach Linen/);
+
+  // Late look + completion from superseded build must be ignored completely!
+  const showsBeforeLate = calls.filter((c) => c.action === 'showOutfits').length;
+  emitRun1Look2();
+  finishRun2();
+  const oldRunRes = await oldRunPromise;
+  assert.match(oldRunRes, /superseded/i);
+  assert.equal(
+    calls.filter((c) => c.action === 'showOutfits').length,
+    showsBeforeLate,
+    'superseded build must NOT emit remaining looks to the page',
+  );
+  assert.deepEqual(
+    state.get().looks.map((l) => l.name),
+    ['Beach Linen'],
+  );
+
+  const supersedeLog = logs.find((l) => l.ev === 'build_skipped' && l.data?.reason === 'superseded_by_new_brief');
+  assert.ok(supersedeLog, 'must log build_skipped when a build is superseded');
+});
+
+test('set_department and other tool results avoid duplicating prompt-arc questions', async () => {
+  const { page } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-norepeat', log: () => {} });
+
+  const tools = createAgentTools({
+    room: 'r-norepeat',
+    log: () => {},
+    page,
+    state,
+    deps: makeFakeDeps(),
+  });
+
+  const deptRes = await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  assert.match(deptRes, /Department set to men/i);
+  assert.match(deptRes, /without repeating a question you just asked/i);
+  assert.doesNotMatch(deptRes, /ask occasion and budget/i);
+
+  const buildRes = await tools.build_outfits.execute(
+    { occasion: 'dinner', budget_usd: 250 },
+    fakeToolOpts('b1'),
+  );
+  assert.match(buildRes, /Built 2 looks and they are now on screen\./);
+  assert.doesNotMatch(buildRes, /ask which catches their eye/i);
+
+  const pickRes = await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+  assert.doesNotMatch(pickRes, /see it on themselves/i);
+
+  const swapRes = await tools.swap_piece.execute(
+    { slot: 'shoes', request: 'loafers' },
+    fakeToolOpts('sw1'),
+  );
+  assert.doesNotMatch(swapRes, /Name only the replacement piece/i);
+});
+
+test('onCritique wires background critic into call state, logs critique_seen, never blocks build_outfits, and surfaces swap offer on pick_outfit without mentioning scores or critic', async () => {
+  const logs: RecordedLog[] = [];
+  const { page } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-critic', log: () => {} });
+  let capturedOnCritique: ((number: number, critique: Critique) => void) | undefined;
+
+  const tools = createAgentTools({
+    room: 'r-critic',
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    page,
+    state,
+    deps: makeFakeDeps({
+      async buildOutfits(brief, opts) {
+        capturedOnCritique = opts?.onCritique;
+        // Return immediately without firing onCritique yet (critic runs in background after build_outfits returns).
+        return makeFakeDeps().buildOutfits!(brief, opts);
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  const buildRes = await tools.build_outfits.execute(
+    { occasion: 'bank interview', budget_usd: 300 },
+    fakeToolOpts('b1'),
+  );
+  assert.match(buildRes, /Built 2 looks and they are now on screen/);
+  assert.equal(typeof capturedOnCritique, 'function', 'buildOutfits must receive onCritique callback');
+
+  // Fire critiques asynchronously in the background after build_outfits has already returned.
+  capturedOnCritique!(1, {
+    score: 5,
+    presentable: false,
+    occasion_fit: 5,
+    cohesion: 6,
+    completeness: 7,
+    issues: ['sneakers too casual for a bank interview'],
+    weak_piece: {
+      slot: 'shoes',
+      reason: 'sneakers are too casual for a bank interview',
+      ask: 'black leather oxford shoes',
+    },
+    model: 'gemini-4-argon',
+    ms: 1200,
+  });
+
+  capturedOnCritique!(2, {
+    score: 8,
+    presentable: true,
+    occasion_fit: 8,
+    cohesion: 8,
+    completeness: 8,
+    issues: [],
+    weak_piece: null,
+    model: 'gemini-4-argon',
+    ms: 1100,
+  });
+
+  // Both logged via critique_seen and stored in state.
+  const critLogs = logs.filter((l) => l.ev === 'critique_seen');
+  assert.equal(critLogs.length, 2);
+  assert.equal(critLogs[0]!.data?.outfit, 1);
+  assert.equal(critLogs[0]!.data?.score, 5);
+  assert.equal(critLogs[0]!.data?.presentable, false);
+  assert.equal(state.get().critiques[1]?.score, 5);
+  assert.equal(state.get().critiques[2]?.score, 8);
+
+  // CALL STATE includes swap_hint for Look 1 only, never mentioning scores or critic.
+  const summary = state.summarize();
+  assert.match(summary, /#1 Skyline Knit.*swap_hint=shoes.*black leather oxford shoes/);
+  assert.doesNotMatch(summary, /#2 Warm Neutrals.*swap_hint/);
+  assert.doesNotMatch(summary, /\bscore\b|\bcritic\b/i);
+
+  // Picking Look 1 includes one short swap offer note without mentioning scores or critic.
+  const pick1 = await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+  assert.match(pick1, /Stylist note: the shoes is the weakest piece.*black leather oxford shoes/i);
+  assert.doesNotMatch(pick1, /\bscore\b|\bcritic\b/i);
+
+  // Picking Look 2 (passing critique) has NO Stylist note.
+  const pick2 = await tools.pick_outfit.execute({ outfit: 2 }, fakeToolOpts('p2'));
+  assert.doesNotMatch(pick2, /Stylist note:/i);
+
+  // Swapping shoes in Look 1 clears its critique and ignores any late pre-swap critique.
+  await tools.swap_piece.execute({ outfit: 1, slot: 'shoes', request: 'black leather oxfords' }, fakeToolOpts('sw1'));
+  assert.equal(state.get().critiques[1], undefined);
+  capturedOnCritique!(1, {
+    score: 4,
+    presentable: false,
+    occasion_fit: 4,
+    cohesion: 4,
+    completeness: 7,
+    issues: ['stale issue'],
+    weak_piece: { slot: 'shoes', reason: 'stale', ask: 'stale' },
+    model: 'gemini-4-argon',
+    ms: 2000,
+  });
+  assert.equal(state.get().critiques[1], undefined, 'stale pre-swap critique must be ignored');
+});
+
+test('add_to_bag enforces $10,000 running bag ceiling across the call without double-counting size corrections', async () => {
+  const { page, calls } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-bag-cap', log: () => {} });
+  let storeAddCalls = 0;
+  let livePriceOverride: number | null = null;
+
+  const luxuryOutfits: Outfit[] = [
+    {
+      number: 1,
+      name: 'Couture One',
+      difference: 'First luxury look.',
+      story: 'Statement.',
+      pieces: [
+        { slot: 'top', why: 'Cashmere.', item: makeItem({ id: 'lux-1', variant_id: 'vl1', title: 'Cashmere Jacket', price: 6_000, sizes: ['M', 'L'] }) },
+      ],
+      total: 6_000,
+    },
+    {
+      number: 2,
+      name: 'Couture Two',
+      difference: 'Second luxury look.',
+      story: 'Evening.',
+      pieces: [
+        { slot: 'top', why: 'Silk.', item: makeItem({ id: 'lux-2', variant_id: 'vl2', title: 'Silk Gown', price: 4_500, sizes: ['M', 'L'] }) },
+      ],
+      total: 4_500,
+    },
+    {
+      number: 3,
+      name: 'Over-Cap Solo',
+      difference: 'Single over-cap look.',
+      story: 'Ultra luxury.',
+      pieces: [
+        { slot: 'top', why: 'Haute.', item: makeItem({ id: 'lux-3', variant_id: 'vl3', title: 'Diamond Coat', price: 11_000, sizes: ['M', 'L'] }) },
+      ],
+      total: 11_000,
+    },
+  ];
+
+  const tools = createAgentTools({
+    room: 'r-bag-cap',
+    log: () => {},
+    page,
+    state,
+    deps: makeFakeDeps({
+      async buildOutfits(_brief, opts) {
+        luxuryOutfits.forEach((o, i) => opts?.onOutfit?.(structuredClone(o), i));
+        return { outfits: structuredClone(luxuryOutfits), source: 'live', timing: { first_outfit_ms: 10, total_ms: 20 }, problems: [] };
+      },
+      async addToBag(outfit, sizes): Promise<BagOut> {
+        storeAddCalls += 1;
+        const total = livePriceOverride ?? outfit.total;
+        return {
+          carts: [
+            {
+              store: 'Everlane',
+              store_domain: 'everlane.myshopify.com',
+              cart_id: `cart-${storeAddCalls}`,
+              continue_url: `https://everlane.com/cart/${storeAddCalls}`,
+              total_usd: total,
+              added: outfit.pieces.map((p) => ({
+                variant_id: p.item.variant_id,
+                title: p.item.title,
+                size: sizes[p.slot.toLowerCase()] ?? 'M',
+              })),
+              not_added: [],
+              ms: 10,
+            },
+          ],
+          summary: `Added 1 item, $${total}.`,
+          total_usd: total,
+        };
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'women' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute({ occasion: 'gala', budget_usd: 25_000 }, fakeToolOpts('b1'));
+  calls.length = 0;
+
+  // 1) Single look over $10,000 returns NOT DONE without calling addToBag or sending bagReady.
+  const soloOver = await tools.add_to_bag.execute(
+    { outfit: 3, sizes: { top: 'M' } },
+    fakeToolOpts('bag-solo-over'),
+  );
+  assert.equal(soloOver.startsWith('NOT DONE:'), true);
+  assert.match(soloOver, /\$10,000|\$10000/);
+  assert.equal(storeAddCalls, 0);
+  assert.equal(calls.some((c) => c.action === 'bagReady'), false);
+
+  // 2) Bag Look 1 ($6,000) -> succeeds.
+  const bag1 = await tools.add_to_bag.execute(
+    { outfit: 1, sizes: { top: 'M' } },
+    fakeToolOpts('bag-1'),
+  );
+  assert.match(bag1, /^Added 1 piece, total \$6000/);
+  assert.equal(storeAddCalls, 1);
+
+  // 3) Re-bagging Look 1 with corrected size (L instead of M) replaces Look 1 ($6,000, NOT $12,000) -> succeeds!
+  const bag1Corrected = await tools.add_to_bag.execute(
+    { outfit: 1, sizes: { top: 'L' } },
+    fakeToolOpts('bag-1-corr'),
+  );
+  assert.match(bag1Corrected, /^Added 1 piece, total \$6000/);
+  assert.equal(storeAddCalls, 2);
+
+  // 4) Adding Look 2 ($4,500) would bring running total to $10,500 > $10,000 -> NOT DONE!
+  calls.length = 0;
+  const bag2Over = await tools.add_to_bag.execute(
+    { outfit: 2, sizes: { top: 'M' } },
+    fakeToolOpts('bag-2-over'),
+  );
+  assert.equal(bag2Over.startsWith('NOT DONE:'), true);
+  assert.match(bag2Over, /\$10500/);
+  assert.match(bag2Over, /\$10000|\$10,000/);
+  assert.equal(storeAddCalls, 2, 'must not call addToBag when estimated running total exceeds $10,000');
+  assert.equal(calls.some((c) => c.action === 'bagReady'), false);
+
+  // 5) Live store price jump pushing a normally-under-cap look over $10,000 -> NOT DONE without bagReady!
+  livePriceOverride = 10_500;
+  const bag1LiveJump = await tools.add_to_bag.execute(
+    { outfit: 1, sizes: { top: 'S' } },
+    fakeToolOpts('bag-1-jump'),
+  );
+  assert.equal(bag1LiveJump.startsWith('NOT DONE:'), true);
+  assert.match(bag1LiveJump, /\$10500/);
+  assert.equal(calls.some((c) => c.action === 'bagReady'), false);
 });

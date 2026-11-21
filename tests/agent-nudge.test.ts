@@ -4,6 +4,7 @@ import type { TimerHandle } from '../src/agent/context.ts';
 import {
   DEFAULT_RESULT_NUDGE_DELAY_MS,
   createToolResultNudger,
+  isPreResultAddingLine,
 } from '../src/agent/nudge.ts';
 
 function createFakeClock(start = 10_000) {
@@ -242,4 +243,118 @@ test('pauses while shopper is speaking, ignores non-watched tools, and disposes 
   assert.equal(clock.activeTimers(), 0);
   clock.advance(10_000);
   assert.equal(replies.length, 1);
+});
+
+test('add_to_bag nudge is not cancelled by pre-result speech or a short "adding it" line, but cancels on real confirmation', () => {
+  assert.equal(isPreResultAddingLine('Adding this look in medium, 32, and 10 and a half.'), true);
+  assert.equal(isPreResultAddingLine('Adding it in medium, 30 by 34, and 8 and a half wide.'), true);
+  assert.equal(isPreResultAddingLine('Putting that in your bag now.'), true);
+  assert.equal(
+    isPreResultAddingLine('All three pieces are in your bag, total is $160, and your checkout link is on the page.'),
+    false,
+  );
+  assert.equal(
+    isPreResultAddingLine('Two pieces are in your bag for $105, but the sneakers are sold out in size 10.'),
+    false,
+  );
+  assert.equal(isPreResultAddingLine('What shoe size do you wear?'), false);
+
+  const clock = createFakeClock();
+  const replies: Array<{ instructions: string }> = [];
+  const logs: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+
+  const nudger = createToolResultNudger({
+    room: 'nudge-bag-pre',
+    initialAgentState: 'speaking',
+    generateReply: (opts) => replies.push(opts),
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+  });
+
+  // Case 1: Speech already started before add_to_bag finished; ConversationItemAdded fires after listening.
+  nudger.onToolResult({
+    name: 'add_to_bag',
+    callId: 'bag-pre-1',
+    text: 'Added 3 pieces, total $160.',
+  });
+  nudger.onAgentStateChanged('listening');
+  clock.advance(10);
+  nudger.onAssistantMessage('Adding this look in medium, 32, and 10 and a half.');
+  assert.equal(nudger.hasPending, true, 'pre-result speech must not cancel add_to_bag nudge');
+
+  clock.advance(DEFAULT_RESULT_NUDGE_DELAY_MS);
+  assert.equal(replies.length, 1);
+  assert.match(replies[0]!.instructions, /in the bag and the total/i);
+  assert.equal(logs[0]!.data?.call_id, 'bag-pre-1');
+
+  // Case 2: SpeechCreated fired before add_to_bag finished, then speaking started after result arrived.
+  nudger.onSpeechCreated?.();
+  nudger.onToolResult({
+    name: 'add_to_bag',
+    callId: 'bag-pre-2',
+    text: 'Added 3 pieces, total $160.',
+  });
+  clock.advance(50);
+  nudger.onAgentStateChanged('speaking');
+  clock.advance(2_000);
+  assert.equal(replies.length, 1, 'must not nudge while pre-result speech is still playing');
+  nudger.onAgentStateChanged('listening');
+  nudger.onAssistantMessage('Got it, grabbing those sizes now.');
+  assert.equal(nudger.hasPending, true);
+
+  clock.advance(DEFAULT_RESULT_NUDGE_DELAY_MS);
+  assert.equal(replies.length, 2);
+  assert.equal(logs[1]!.data?.call_id, 'bag-pre-2');
+
+  // Case 3: Short pre-result "adding it" line plays right after result arrived (without prior SpeechCreated).
+  nudger.onToolResult({
+    name: 'add_to_bag',
+    callId: 'bag-pre-3',
+    text: 'Added 3 pieces, total $160.',
+  });
+  clock.advance(100);
+  nudger.onAgentStateChanged('speaking');
+  clock.advance(1_200);
+  nudger.onAgentStateChanged('listening');
+  nudger.onAssistantMessage('Adding this look in medium, 32, and 10 and a half.');
+  assert.equal(nudger.hasPending, true, 'short "adding it" line must not count as bag confirmation');
+
+  clock.advance(DEFAULT_RESULT_NUDGE_DELAY_MS);
+  assert.equal(replies.length, 3);
+  assert.equal(logs[2]!.data?.call_id, 'bag-pre-3');
+
+  // Case 4: Real bag confirmation cancels the nudge with zero double-speak.
+  nudger.onToolResult({
+    name: 'add_to_bag',
+    callId: 'bag-confirm-4',
+    text: 'Added 3 pieces, total $160.',
+  });
+  clock.advance(100);
+  nudger.onAgentStateChanged('speaking');
+  clock.advance(1_500);
+  nudger.onAgentStateChanged('listening');
+  nudger.onAssistantMessage(
+    'Your polo, trousers, and sneakers are in the bag for $160, and your checkout links are on the page.',
+  );
+  assert.equal(nudger.hasPending, false);
+  clock.advance(10_000);
+  assert.equal(replies.length, 3, 'real bag confirmation must prevent nudge');
+
+  // Case 5: Skipped or superseded build_outfits results never arm a nudge.
+  nudger.onToolResult({
+    name: 'build_outfits',
+    callId: 'b-skip',
+    text: 'Looks are already on their way for wedding ($300 budget) — did not start a second build.',
+  });
+  assert.equal(nudger.hasPending, false);
+  nudger.onToolResult({
+    name: 'build_outfits',
+    callId: 'b-sup',
+    text: 'Previous build for wedding was superseded by a newer brief.',
+  });
+  assert.equal(nudger.hasPending, false);
+  clock.advance(10_000);
+  assert.equal(replies.length, 3);
 });

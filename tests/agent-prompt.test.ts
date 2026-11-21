@@ -132,3 +132,24 @@ test('ALICE_SYSTEM_PROMPT encodes polish3 rules: interruption recovery, surprise
   assert.match(ALICE_SYSTEM_PROMPT, /never for jacket, belt, or accessory sizes/i);
   assert.match(ALICE_SYSTEM_PROMPT, /matched the jacket to their top size or the belt to their waist/i);
 });
+
+test('ALICE_SYSTEM_PROMPT encodes polish4 rules: single build, immediate bag confirmation, no repeated questions, critic swap, and $10,000 cap', () => {
+  // 1. Rebuild only when asked for different looks or occasion/budget changes; passing style remarks handled via presenting or swap_piece.
+  assert.match(ALICE_SYSTEM_PROMPT, /once looks are on screen.*different looks/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /passing style remarks.*swap_piece/i);
+
+  // 2. Say sizes once as calling add_to_bag (never after it returns) and confirm bag straight away.
+  assert.match(ALICE_SYSTEM_PROMPT, /repeat the sizes back in one short clause once as you call it/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never after it returns/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /state plainly what is in the bag and the total straight away/i);
+
+  // 3. Never repeat a question just asked.
+  assert.match(ALICE_SYSTEM_PROMPT, /never repeat a line you already finished or a question you just asked/i);
+
+  // 4. Offer once to swap weak piece without mentioning scores or a critic.
+  assert.match(ALICE_SYSTEM_PROMPT, /weak piece.*offer once to swap it/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /without mentioning scores or a critic/i);
+
+  // 5. Budget and bag $10,000 cap.
+  assert.match(ALICE_SYSTEM_PROMPT, /cap budgets and bags over \$10,000/i);
+});
