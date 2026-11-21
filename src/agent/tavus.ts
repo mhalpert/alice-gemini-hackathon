@@ -9,6 +9,7 @@ import {
 } from '@livekit/rtc-node';
 import { calllog } from '../calllog.ts';
 import { type AgentConfig, resolveTavusConfig } from './config.ts';
+import { installPlayoutWatchdog } from './playout.ts';
 
 export const DEFAULT_TAVUS_API_URL = tavus.DEFAULT_API_URL || 'https://tavusapi.com/v2';
 export const ALICE_TAVUS_CONVERSATION_PREFIX = 'alice-stylist-';
@@ -497,6 +498,15 @@ export async function startTavusAvatar(params: {
 
   const runStart = (async () => {
     await avatar.start(session, room);
+    // The framework waits without limit for the avatar to say a line finished playing; when
+    // that report is lost Alice goes silent for the rest of the call. See playout.ts.
+    try {
+      installPlayoutWatchdog((session as { output?: { audio?: unknown } }).output?.audio, {
+        log: (fields) => logFn(roomName, 'playout_watchdog', fields),
+      });
+    } catch {
+      // Never let the watchdog stop the face from starting.
+    }
     if (timedOut) {
       throw new Error(`tavus start timed out after ${startTimeoutMs}ms`);
     }
