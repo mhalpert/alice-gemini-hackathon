@@ -34,6 +34,7 @@ import {
   sendRealtimeContext,
 } from './context.ts';
 import { createBitPicker } from './bits.ts';
+import { createExtraAnnouncer } from './extras.ts';
 import { createToolFiller } from './filler.ts';
 import { applyRealtimeSessionPatches, sendInterimToolNote } from './patches.ts';
 import { createToolResultNudger } from './nudge.ts';
@@ -46,7 +47,7 @@ import {
   startTavusAvatar,
   type TavusAvatarHandle,
 } from './tavus.ts';
-import { createAgentTools } from './tools.ts';
+import { createAgentTools, resolveTryOnExtras } from './tools.ts';
 import { createVisionController } from './vision.ts';
 
 const { Behavior, FunctionResponseScheduling } = google.realtime;
@@ -356,6 +357,9 @@ export default defineAgent({
 
     startCallLog(roomName);
     const uninstallCrashLogging = installCrashLogging(roomName);
+    if (!resolveTryOnExtras()) {
+      calllog(roomName, 'tryon_extras_unavailable', {});
+    }
     await bindStoreCallRoom(roomName);
     void warmCallMedia(roomName).catch((err) => {
       calllog(roomName, 'session_error', {
@@ -456,6 +460,12 @@ export default defineAgent({
       log: calllog,
     });
 
+    const extraAnnouncer = createExtraAnnouncer({
+      room: roomName,
+      generateReply: (opts) => sessionRef?.generateReply(opts),
+      log: calllog,
+    });
+
     const toolFiller = createToolFiller({
       room: roomName,
       bitPicker,
@@ -467,7 +477,8 @@ export default defineAgent({
     const silenceCheckIn = createSilenceCheckIn({
       room: roomName,
       generateReply: (opts) => sessionRef?.generateReply(opts),
-      isSuppressed: () => resultNudger.hasPending || toolFiller.isRunning,
+      isSuppressed: () =>
+        resultNudger.hasPending || toolFiller.isRunning || extraAnnouncer.hasPending,
       log: calllog,
     });
 
@@ -478,11 +489,18 @@ export default defineAgent({
       bitPicker,
       signal: toolAbort.signal,
       sendWorkingNote: (params) => sendInterimToolNote(activeRealtimeSession, params),
-      onToolStart: (ev) => silenceCheckIn.onToolStart(ev.callId),
-      onToolEnd: (ev) => silenceCheckIn.onToolEnd(ev.callId),
+      onToolStart: (ev) => {
+        silenceCheckIn.onToolStart(ev.callId);
+        extraAnnouncer.onToolStart(ev.callId);
+      },
+      onToolEnd: (ev) => {
+        silenceCheckIn.onToolEnd(ev.callId);
+        extraAnnouncer.onToolEnd(ev.callId);
+      },
       onSlowToolStart: (ev) => toolFiller.onToolStart(ev),
       onSlowToolEnd: (ev) => toolFiller.onToolEnd(ev.callId),
       onToolResult: (ev) => resultNudger.onToolResult(ev),
+      onExtraLanded: (ev) => extraAnnouncer.announce(ev),
       getSnapshot: () => vision?.latest() ?? null,
     });
 
@@ -505,6 +523,7 @@ export default defineAgent({
     session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev) => {
       appContext.setAgentState(ev.newState);
       resultNudger.onAgentStateChanged(ev.newState);
+      extraAnnouncer.onAgentStateChanged(ev.newState);
       toolFiller.onAgentStateChanged(ev.newState);
       silenceCheckIn.onAgentStateChanged(ev.newState);
       calllog(roomName, 'agent_state', { old: ev.oldState, state: ev.newState });
@@ -512,6 +531,7 @@ export default defineAgent({
 
     session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
       resultNudger.onUserStateChanged(ev.newState);
+      extraAnnouncer.onUserStateChanged(ev.newState);
       toolFiller.onUserStateChanged(ev.newState);
       silenceCheckIn.onUserStateChanged(ev.newState);
       calllog(roomName, 'user_state', { old: ev.oldState, state: ev.newState });
@@ -589,6 +609,7 @@ export default defineAgent({
       });
       toolAbort.abort();
       resultNudger.dispose();
+      extraAnnouncer.dispose();
       toolFiller.dispose();
       silenceCheckIn.dispose();
       cleanupTavusWatcher?.();
@@ -601,6 +622,7 @@ export default defineAgent({
     ctx.addShutdownCallback(async () => {
       toolAbort.abort();
       resultNudger.dispose();
+      extraAnnouncer.dispose();
       toolFiller.dispose();
       silenceCheckIn.dispose();
       cleanupCameraWatcher?.();

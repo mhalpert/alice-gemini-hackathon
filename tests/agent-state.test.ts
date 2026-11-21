@@ -448,3 +448,71 @@ test('set_critique stores critiques, adds swap_hint to CALL STATE only for low/u
   assert.ok(replaced.changed.includes('critiques'));
   assert.deepEqual(replaced.state.critiques, {});
 });
+
+test('set_tryon_extra records scene/video URLs, summarizes short flags without URLs, and clears on look update/replace', () => {
+  let state = createInitialCallState();
+  state = reduceCallState(state, {
+    type: 'set_brief',
+    occasion: 'rooftop party',
+    where: 'Brooklyn',
+    when: 'Saturday',
+    weather: '70F clear',
+  }).state;
+  assert.equal(state.where, 'Brooklyn');
+  assert.equal(state.when, 'Saturday');
+  assert.equal(state.weather, '70F clear');
+
+  state = reduceCallState(state, {
+    type: 'set_looks',
+    replace: true,
+    looks: [{ number: 1, name: 'Skyline Knit', total: 160, slots: ['top', 'bottom'] }],
+  }).state;
+
+  const sceneStep = reduceCallState(state, {
+    type: 'set_tryon_extra',
+    look: 1,
+    kind: 'scene',
+    url: 'https://cdn.example/scene-1.jpg',
+  });
+  assert.deepEqual(sceneStep.changed, ['tryOnExtras']);
+  state = sceneStep.state;
+  assert.equal(state.tryOnExtras[1]?.scene, 'https://cdn.example/scene-1.jpg');
+
+  const summaryScene = summarize(state);
+  assert.match(summaryScene, /scene ready/);
+  assert.doesNotMatch(summaryScene, /video ready/);
+  assert.doesNotMatch(summaryScene, /cdn\.example/);
+
+  state = reduceCallState(state, {
+    type: 'set_tryon_extra',
+    look: 1,
+    kind: 'video',
+    url: 'https://cdn.example/video-1.mp4',
+  }).state;
+  const summaryBoth = summarize(state);
+  assert.match(summaryBoth, /scene ready, video ready/);
+  assert.doesNotMatch(summaryBoth, /cdn\.example/);
+
+  // update_look clears that look's extras.
+  const updated = reduceCallState(state, {
+    type: 'update_look',
+    look: { number: 1, name: 'Skyline Knit', total: 170, slots: ['top', 'bottom'] },
+  });
+  assert.ok(updated.changed.includes('tryOnExtras'));
+  assert.equal(updated.state.tryOnExtras[1], undefined);
+
+  // set_looks(replace: true) clears all extras.
+  const withExtras = reduceCallState(updated.state, {
+    type: 'set_tryon_extra',
+    look: 1,
+    kind: 'scene',
+    url: 'https://cdn.example/scene-2.jpg',
+  }).state;
+  const replaced = reduceCallState(withExtras, {
+    type: 'set_looks',
+    replace: true,
+    looks: [{ number: 1, name: 'New Look', total: 150, slots: ['top'] }],
+  });
+  assert.ok(replaced.changed.includes('tryOnExtras'));
+  assert.deepEqual(replaced.state.tryOnExtras, {});
+});

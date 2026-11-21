@@ -5,6 +5,7 @@ import sharp from 'sharp';
 import { recordCost } from '../ledger.ts';
 import type { Outfit } from '../types.ts';
 import { runSceneSafetyGate } from './inspect.ts';
+import { getRenderLimiter } from './limits.ts';
 import {
   GATE_PASS_THRESHOLD,
   newTryonId,
@@ -91,25 +92,27 @@ export async function renderTryOnScene(
 
     const genStart = Date.now();
     const remMs = Math.max(5_000, capMs - (Date.now() - t0) - 2500);
-    const response = await withTimeout(
-      getGenAI().models.generateContent({
-        model,
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { inlineData: { mimeType: 'image/jpeg', data: studioBuf.toString('base64') } },
-              { text: prompt },
-            ],
+    const response = await getRenderLimiter().run('image', () =>
+      withTimeout(
+        getGenAI().models.generateContent({
+          model,
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                { inlineData: { mimeType: 'image/jpeg', data: studioBuf.toString('base64') } },
+                { text: prompt },
+              ],
+            },
+          ],
+          config: {
+            responseModalities: ['IMAGE'],
+            imageConfig: { aspectRatio: '3:4' },
           },
-        ],
-        config: {
-          responseModalities: ['IMAGE'],
-          imageConfig: { aspectRatio: '3:4' },
-        },
-      }),
-      remMs,
-      'tryon-scene',
+        }),
+        remMs,
+        'tryon-scene',
+      ),
     );
     const genMs = Date.now() - genStart;
 
@@ -203,34 +206,38 @@ export async function renderTryOnVideo(
     ].join(' ');
 
     const aiBeta = getBetaGenAI();
-    const createTimeout = Math.min(15_000, Math.max(3_000, deadline - Date.now()));
-    let inter = await withTimeout(
-      aiBeta.interactions.create({
-        model,
-        background: true,
-        input: [
-          { type: 'image', data: stillBuf.toString('base64'), mime_type: 'image/jpeg' },
-          { type: 'text', text: prompt },
-        ],
-        response_modalities: ['video'],
-        generation_config: {
-          video_config: { task: 'image_to_video' },
-        },
-      }),
-      createTimeout,
-      'tryon-video create',
-    );
+    const inter = await getRenderLimiter().run('video', async () => {
+      const createTimeout = Math.min(15_000, Math.max(3_000, deadline - Date.now()));
+      let current = await withTimeout(
+        aiBeta.interactions.create({
+          model,
+          background: true,
+          input: [
+            { type: 'image', data: stillBuf.toString('base64'), mime_type: 'image/jpeg' },
+            { type: 'text', text: prompt },
+          ],
+          response_modalities: ['video'],
+          generation_config: {
+            video_config: { task: 'image_to_video' },
+          },
+        }),
+        createTimeout,
+        'tryon-video create',
+      );
 
-    while (inter.status === 'in_progress' || inter.status === 'queued') {
-      const rem = deadline - Date.now();
-      if (rem <= 1000) {
-        void aiBeta.interactions.cancel(inter.id).catch(() => {});
-        throw new Error(`tryon-video timed out after ${capMs}ms`);
+      while (current.status === 'in_progress' || current.status === 'queued') {
+        const rem = deadline - Date.now();
+        if (rem <= 1000) {
+          void aiBeta.interactions.cancel(current.id).catch(() => {});
+          throw new Error(`tryon-video timed out after ${capMs}ms`);
+        }
+        await sleep(Math.min(VIDEO_POLL_INTERVAL_MS, rem - 500));
+        const pollRem = Math.min(10_000, Math.max(1000, deadline - Date.now()));
+        current = await withTimeout(aiBeta.interactions.get(current.id), pollRem, 'tryon-video poll');
       }
-      await sleep(Math.min(VIDEO_POLL_INTERVAL_MS, rem - 500));
-      const pollRem = Math.min(10_000, Math.max(1000, deadline - Date.now()));
-      inter = await withTimeout(aiBeta.interactions.get(inter.id), pollRem, 'tryon-video poll');
-    }
+
+      return current;
+    });
 
     if (inter.status !== 'completed') {
       const errDetail = inter.errors?.map((e) => e.message).join('; ') || inter.status;

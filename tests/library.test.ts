@@ -83,6 +83,7 @@ afterEach(() => {
   delete process.env.ALICE_LIBRARY;
   delete process.env.ALICE_LIBRARY_THRESHOLD;
   delete process.env.ALICE_LIBRARY_MIN_SCORE;
+  delete process.env.ALICE_LIBRARY_MAX_BUDGET_RATIO;
   delete process.env.ALICE_LOG_DIR;
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop()!;
@@ -1287,4 +1288,80 @@ test('libraryLooks with occasion on a 5-look graded set returns all 5 servable l
       [5, 'Occ Six'],
     ],
   );
+});
+
+test('serveLibrary steps aside when brief budget far exceeds the set budget, except in rescue mode or with env override', async () => {
+  const outfits = [
+    makeOutfit('Karaoke One', 'men', [35, 45, 40]),
+    makeOutfit('Karaoke Two', 'men', [30, 50, 40]),
+    makeOutfit('Karaoke Three', 'men', [40, 40, 40]),
+  ];
+  createTempLibrary({
+    version: 1,
+    built_at: new Date().toISOString(),
+    sets: [
+      {
+        key: 'karaoke',
+        gender: 'men',
+        occasion: 'karaoke night with friends',
+        budget_usd: 120,
+        outfits,
+        vectors: [[1, 0, 0]],
+        built_ms: 500,
+      },
+    ],
+  });
+
+  const stock = allAvailableLookup(outfits);
+  let lookupCalls = 0;
+  _setDeps({
+    embed: async (texts) => texts.map(() => [1, 0, 0]),
+    lookup: async () => {
+      lookupCalls += 1;
+      return stock;
+    },
+  });
+
+  const logDir = mkdtempSync(path.join(tmpdir(), 'alice-lib-log-'));
+  tempDirs.push(logDir);
+  process.env.ALICE_LOG_DIR = logDir;
+
+  // 3.5x set budget ($420 vs $120) -> returns null and logs library_skip without lookup.
+  const skipped = await serveLibrary(
+    { gender: 'men', occasion: 'karaoke night', budget_usd: 420 },
+    { room: 'room-lib-budget' },
+  );
+  assert.equal(skipped, null);
+  assert.equal(lookupCalls, 0);
+
+  const events = readFileSync(getCallLogPath('room-lib-budget'), 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  assert.equal(events.length, 1);
+  assert.equal(events[0].ev, 'library_skip');
+  assert.equal(events[0].key, 'karaoke');
+  assert.equal(events[0].reason, 'budget');
+  assert.equal(events[0].brief_budget, 420);
+  assert.equal(events[0].set_budget, 120);
+
+  // 2.5x set budget ($300 vs $120) -> serves normally.
+  const within = await serveLibrary({ gender: 'men', occasion: 'karaoke night', budget_usd: 300 });
+  assert.ok(within);
+  assert.equal(within.source, 'library');
+  assert.equal(within.outfits.length, 3);
+
+  // Rescue mode (anyMatch) with 4x set budget ($480 vs $120) -> still serves.
+  const rescued = await serveLibrary(
+    { gender: 'men', occasion: 'karaoke night', budget_usd: 480 },
+    { anyMatch: true },
+  );
+  assert.ok(rescued);
+  assert.equal(rescued.source, 'library');
+  assert.equal(rescued.outfits.length, 3);
+
+  // Env override ALICE_LIBRARY_MAX_BUDGET_RATIO=2 makes 2.5x ($300) return null.
+  process.env.ALICE_LIBRARY_MAX_BUDGET_RATIO = '2';
+  const overridden = await serveLibrary({ gender: 'men', occasion: 'karaoke night', budget_usd: 300 });
+  assert.equal(overridden, null);
 });
