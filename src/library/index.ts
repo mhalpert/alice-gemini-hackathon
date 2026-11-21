@@ -62,12 +62,47 @@ export interface ServeLibraryOptions {
 const DEFAULT_THRESHOLD = 0.78;
 const DEFAULT_MIN_SCORE = 6;
 const DEFAULT_MAX_BUDGET_RATIO = 3;
+const TIER_BUDGET_TOLERANCE = 1.2;
 const SERVE_MAX_OUTFITS = 3;
 const SERVE_MAX_SPARES = 2;
 const DEFAULT_SETS_PATH = path.resolve(import.meta.dirname, 'sets.json');
 const DROP_ON_MISSING_SLOTS = new Set(['shoes', 'bottom', 'dress']);
 const OPTIONAL_SLOTS = new Set(['accessory', 'bag', 'jewelry', 'layer']);
 const NOT_SWAPPED_RE = /nothing was swapped|\bkept\b|no .+ in stock/i;
+
+export const PREMIUM_TIER_SUFFIX = '@premium';
+
+export function baseKeyOf(key: string): string {
+  const at = key.indexOf('@');
+  return at > 0 ? key.slice(0, at) : key;
+}
+
+export function isTierKey(key: string): boolean {
+  return baseKeyOf(key) !== key;
+}
+
+export function chooseTier(tiers: LibrarySet[], budgetUsd: number): LibrarySet | null {
+  if (tiers.length === 0) return null;
+  if (tiers.length === 1) return tiers[0];
+
+  const cap = budgetUsd * TIER_BUDGET_TOLERANCE + 1e-9;
+  const within = tiers.filter((s) => s.budget_usd <= cap);
+  if (within.length > 0) {
+    return within.reduce((best, cur) => {
+      if (cur.budget_usd !== best.budget_usd) {
+        return cur.budget_usd > best.budget_usd ? cur : best;
+      }
+      return !isTierKey(cur.key) && isTierKey(best.key) ? cur : best;
+    });
+  }
+
+  return tiers.reduce((best, cur) => {
+    if (cur.budget_usd !== best.budget_usd) {
+      return cur.budget_usd < best.budget_usd ? cur : best;
+    }
+    return !isTierKey(cur.key) && isTierKey(best.key) ? cur : best;
+  });
+}
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const sumPieces = (pieces: Piece[]) => round2(pieces.reduce((s, p) => s + p.item.price, 0));
@@ -268,7 +303,7 @@ async function queryVector(gender: Gender, occasion: string): Promise<number[] |
 async function findMatch(
   brief: Brief,
   anyMatch = false,
-): Promise<{ match: LibraryMatch; set: LibrarySet } | null> {
+): Promise<{ match: LibraryMatch; set: LibrarySet; baseKey: string; tierCount: number } | null> {
   const sets = await loadSets();
   const candidates = sets.filter((s) => s.gender === brief.gender && Array.isArray(s.vectors) && s.vectors.length > 0);
   if (candidates.length === 0) return null;
@@ -294,13 +329,21 @@ async function findMatch(
   if (!bestSet) return null;
   if (!anyMatch && bestSim < threshold()) return null;
 
+  const baseKey = baseKeyOf(bestSet.key);
+  const tierCandidates = sets.filter(
+    (s) => s.gender === brief.gender && baseKeyOf(s.key) === baseKey,
+  );
+  const chosen = chooseTier(tierCandidates, brief.budget_usd) ?? bestSet;
+
   return {
     match: {
-      key: bestSet.key,
-      occasion: bestSet.occasion,
+      key: chosen.key,
+      occasion: chosen.occasion,
       similarity: bestSim,
     },
-    set: bestSet,
+    set: chosen,
+    baseKey,
+    tierCount: tierCandidates.length,
   };
 }
 
@@ -352,7 +395,16 @@ export async function serveLibrary(
     const found = await findMatch(brief, Boolean(opts.anyMatch));
     if (!found) return null;
 
-    const { match, set } = found;
+    const { match, set, baseKey, tierCount } = found;
+    if (tierCount > 1 || isTierKey(set.key)) {
+      log(opts.room, 'library_tier', {
+        base: baseKey,
+        key: set.key,
+        budget: brief.budget_usd,
+        set_budget: set.budget_usd,
+      });
+    }
+
     const grades = await loadGrades();
     const selected = selectOutfitsForSet(set, grades, brief);
     const minOutfits = opts.anyMatch ? 1 : 2;
@@ -486,9 +538,22 @@ export async function serveLibrary(
   }
 }
 
+function pickSetForBase(
+  genderSets: LibrarySet[],
+  baseKey: string,
+  budget?: number,
+): LibrarySet | undefined {
+  const tiers = genderSets.filter((s) => baseKeyOf(s.key) === baseKey);
+  if (tiers.length === 0) return undefined;
+  if (typeof budget === 'number' && Number.isFinite(budget) && budget > 0) {
+    return chooseTier(tiers, budget) ?? undefined;
+  }
+  return tiers.find((s) => s.key === baseKey) ?? chooseTier(tiers, 0) ?? tiers[0];
+}
+
 export async function libraryLooks(
   gender: Gender,
-  opts: { limit?: number; occasion?: string } = {},
+  opts: { limit?: number; occasion?: string; budget?: number } = {},
 ): Promise<Outfit[]> {
   try {
     const limit = opts.limit ?? 6;
@@ -498,14 +563,25 @@ export async function libraryLooks(
     if (allGenderSets.length === 0) return [];
 
     const grades = await loadGrades();
+    const hasBudget = typeof opts.budget === 'number' && Number.isFinite(opts.budget) && opts.budget > 0;
     const occasionQuery = opts.occasion?.trim();
     if (occasionQuery) {
-      let matchedSet = allGenderSets.find((s) => s.key === occasionQuery);
+      let matchedSet: LibrarySet | undefined;
+      if (isTierKey(occasionQuery)) {
+        matchedSet = allGenderSets.find((s) => s.key === occasionQuery);
+      } else if (allGenderSets.some((s) => baseKeyOf(s.key) === occasionQuery)) {
+        matchedSet = pickSetForBase(allGenderSets, occasionQuery, opts.budget);
+      }
       let occasionBrief = { gender, occasion: matchedSet ? matchedSet.occasion : occasionQuery };
       if (!matchedSet) {
-        const match = await matchLibrary({ gender, occasion: occasionQuery, budget_usd: 1e9 });
-        if (!match) return [];
-        matchedSet = allGenderSets.find((s) => s.key === match.key);
+        const found = await findMatch(
+          { gender, occasion: occasionQuery, budget_usd: hasBudget ? opts.budget! : 0 },
+          false,
+        );
+        if (!found) return [];
+        matchedSet = hasBudget
+          ? found.set
+          : pickSetForBase(allGenderSets, found.baseKey);
         if (!matchedSet) return [];
         occasionBrief = { gender, occasion: occasionQuery };
       }
@@ -541,10 +617,21 @@ export async function libraryLooks(
       return limited;
     }
 
-    const clonedSets = allGenderSets.map((s) => {
+    const baseKeysSeen = new Set<string>();
+    const dedupedGenderSets: LibrarySet[] = [];
+    for (const s of allGenderSets) {
+      const baseKey = baseKeyOf(s.key);
+      if (baseKeysSeen.has(baseKey)) continue;
+      baseKeysSeen.add(baseKey);
+      const picked = pickSetForBase(allGenderSets, baseKey, opts.budget);
+      if (picked) dedupedGenderSets.push(picked);
+    }
+
+    const clonedSets = dedupedGenderSets.map((s) => {
       const selected = selectOutfitsForSet(s, grades, { gender: s.gender, occasion: s.occasion });
       return {
         key: s.key,
+        baseKey: baseKeyOf(s.key),
         outfits: selected.failedGrade ? [] : selected.outfits,
       };
     });
@@ -573,11 +660,11 @@ export async function libraryLooks(
           ok.push(outfit);
         }
       }
-      return { key: s.key, outfits: ok };
+      return { key: s.key, baseKey: s.baseKey, outfits: ok };
     });
 
-    const demoSets = checkedBySet.filter((s) => s.key === DEMO_OCCASION_KEY);
-    const otherSets = checkedBySet.filter((s) => s.key !== DEMO_OCCASION_KEY);
+    const demoSets = checkedBySet.filter((s) => s.baseKey === DEMO_OCCASION_KEY);
+    const otherSets = checkedBySet.filter((s) => s.baseKey !== DEMO_OCCASION_KEY);
 
     const ordered: Outfit[] = [];
     for (const demo of demoSets) {
@@ -651,8 +738,10 @@ export async function libraryOccasions(
         occasion: set.occasion,
       });
       if (selected.failedGrade || selected.outfits.length < 2) continue;
-      if (!servableByKey.has(set.key)) {
-        servableByKey.set(set.key, set);
+      const baseKey = baseKeyOf(set.key);
+      const existing = servableByKey.get(baseKey);
+      if (!existing || (isTierKey(existing.key) && !isTierKey(set.key))) {
+        servableByKey.set(baseKey, set);
       }
     }
 
@@ -665,12 +754,12 @@ export async function libraryOccasions(
       emitted.add(occ.key);
       const firstWording = occ.wordings?.[0]?.trim();
       const label = firstWording ? capitalizeFirst(firstWording) : set.occasion;
-      result.push({ key: set.key, occasion: set.occasion, label });
+      result.push({ key: occ.key, occasion: set.occasion, label });
     }
 
-    for (const [key, set] of servableByKey) {
-      if (emitted.has(key)) continue;
-      result.push({ key: set.key, occasion: set.occasion, label: set.occasion });
+    for (const [baseKey, set] of servableByKey) {
+      if (emitted.has(baseKey)) continue;
+      result.push({ key: baseKey, occasion: set.occasion, label: set.occasion });
     }
 
     return result;
