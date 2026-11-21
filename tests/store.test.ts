@@ -190,9 +190,10 @@ describe('toItem and store mapping on real fixtures', () => {
     assert.equal(item.price, 149.95);
     assert.equal(item.store, 'Steve Madden');
     assert.equal(item.store_domain, 'stevemadden.myshopify.com');
+    assert.equal(item.url, product.variants[0].url);
     assert.equal(
       item.url,
-      'https://www.stevemadden.com/products/naxos-black-leather?variant=41356358090885',
+      'https://www.stevemadden.com/products/naxos-black-leather?variant=41356358090885&_gsid=LnFMJbLQAbF9&utm_source=shopify&utm_medium=catalog',
     );
     assert.ok(!item.image.includes('width='));
     assert.ok(!item.image.includes('height='));
@@ -207,7 +208,7 @@ describe('toItem and store mapping on real fixtures', () => {
     assert.equal(item.department, 'men');
   });
 
-  it('maps Fashion Nova fixture, strips non-variant params, and strips image width/height', () => {
+  it('maps Fashion Nova fixture, keeps product URL untouched, and strips image width/height', () => {
     const fixture = loadFixtureJson('search_fn.json');
     const product = structuredClone(fixture.result.structuredContent.products[0]);
     product.variants[0].media[0].url += '?width=800&height=1200&v=42';
@@ -219,9 +220,10 @@ describe('toItem and store mapping on real fixtures', () => {
     assert.equal(item.price, 16.99);
     assert.equal(item.store, 'Fashion Nova');
     assert.equal(item.store_domain, 'fnova.myshopify.com');
+    assert.equal(item.url, product.variants[0].url);
     assert.equal(
       item.url,
-      'https://www.fashionnova.com/products/taryn-sweater-midi-dress-fncolorname-black',
+      'https://www.fashionnova.com/products/taryn-sweater-midi-dress-fncolorname-black?_gsid=u3DTVEzMkSrw&utm_source=shopify&utm_medium=catalog',
     );
     assert.ok(!item.image.includes('width='));
     assert.ok(!item.image.includes('height='));
@@ -448,6 +450,183 @@ describe('rate limiting, timeouts, and saved fallbacks', () => {
   });
 });
 
+describe('ALICE_SAVED modes', () => {
+  it('fallback (default) hits Shop MCP even with a fresh saved entry, writes live results, falls back on failure, and logs mode once', async () => {
+    const prevMode = process.env.ALICE_SAVED;
+    delete process.env.ALICE_SAVED;
+
+    let nowMs = 10_000_000;
+    const now = () => nowMs;
+    const searchFixtureText = loadFixtureText('search.json');
+    const searchFixture = JSON.parse(searchFixtureText);
+    const savedItems = searchFixture.result.structuredContent.products
+      .map((p: any) => toItem(p, 'men'))
+      .filter(Boolean);
+
+    let fetchCalls = 0;
+    let shouldFail = false;
+    const fakeFetch: typeof fetch = async () => {
+      fetchCalls += 1;
+      if (shouldFail) {
+        throw new Error('upstream down');
+      }
+      return jsonResponse(searchFixtureText);
+    };
+
+    const mcp = createShopMcp({ fetch: fakeFetch, now });
+    const saved = createSavedStore({ dir: makeTempDir(), now });
+    const key = savedKey("men's loafers", 'men', { shops: ALL_SITES, limit: 6 });
+    saved.putSaved(key, "men's loafers", 'men', savedItems);
+
+    const store = createStore({ mcp, saved, now });
+
+    const loggedLines: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => {
+      loggedLines.push(args.map(String).join(' '));
+      origLog(...args);
+    };
+
+    try {
+      // Fresh saved entry exists (age 0ms), yet default fallback mode still calls Shop MCP
+      const liveRes = await store.search("men's loafers", 'men', { limit: 6 });
+      assert.equal(liveRes.source, 'live');
+      assert.equal(liveRes.items.length, 3);
+      assert.equal(fetchCalls, 1);
+
+      // Advance time and verify saved entry was refreshed on live success
+      nowMs += 5000;
+      shouldFail = true;
+      const fallbackRes = await store.search("men's loafers", 'men', { limit: 6 });
+      assert.equal(fallbackRes.source, 'saved');
+      assert.equal(fallbackRes.items.length, 3);
+      assert.equal(fetchCalls, 2);
+
+      // Mode banner logged exactly once at first use
+      const modeLogs = loggedLines.filter((l) => l.includes('[store] saved results mode:'));
+      assert.deepEqual(modeLogs, ['[store] saved results mode: fallback']);
+    } finally {
+      console.log = origLog;
+      if (prevMode === undefined) delete process.env.ALICE_SAVED;
+      else process.env.ALICE_SAVED = prevMode;
+    }
+  });
+
+  it('fresh skips Shop MCP when saved entry is under 60 minutes old and fetches once stale', async () => {
+    const prevMode = process.env.ALICE_SAVED;
+    process.env.ALICE_SAVED = 'fresh';
+
+    let nowMs = 20_000_000;
+    const now = () => nowMs;
+    const searchFixtureText = loadFixtureText('search.json');
+    const searchFixture = JSON.parse(searchFixtureText);
+    const savedItems = searchFixture.result.structuredContent.products
+      .map((p: any) => toItem(p, 'men'))
+      .filter(Boolean);
+
+    let fetchCalls = 0;
+    const fakeFetch: typeof fetch = async () => {
+      fetchCalls += 1;
+      return jsonResponse(searchFixtureText);
+    };
+
+    const mcp = createShopMcp({ fetch: fakeFetch, now });
+    const saved = createSavedStore({ dir: makeTempDir(), now });
+    const key = savedKey("men's loafers", 'men', { shops: ALL_SITES, limit: 6 });
+    saved.putSaved(key, "men's loafers", 'men', savedItems);
+
+    const store = createStore({ mcp, saved, now });
+
+    try {
+      const freshRes = await store.search("men's loafers", 'men', { limit: 6 });
+      assert.equal(freshRes.source, 'saved');
+      assert.equal(freshRes.items.length, 3);
+      assert.equal(fetchCalls, 0);
+
+      // Advance past 60 min -> now fetches live
+      nowMs += 61 * 60 * 1000;
+      const liveRes = await store.search("men's loafers", 'men', { limit: 6 });
+      assert.equal(liveRes.source, 'live');
+      assert.equal(liveRes.items.length, 3);
+      assert.equal(fetchCalls, 1);
+    } finally {
+      if (prevMode === undefined) delete process.env.ALICE_SAVED;
+      else process.env.ALICE_SAVED = prevMode;
+    }
+  });
+
+  it('off never reads or writes saved results and returns empty on failure', async () => {
+    const prevMode = process.env.ALICE_SAVED;
+    process.env.ALICE_SAVED = 'off';
+
+    const nowMs = 30_000_000;
+    const now = () => nowMs;
+    const searchFixtureText = loadFixtureText('search.json');
+    const searchFixture = JSON.parse(searchFixtureText);
+    const savedItems = searchFixture.result.structuredContent.products
+      .map((p: any) => toItem(p, 'men'))
+      .filter(Boolean);
+
+    let fetchCalls = 0;
+    let shouldFail = false;
+    const fakeFetch: typeof fetch = async () => {
+      fetchCalls += 1;
+      if (shouldFail) {
+        throw new Error('upstream down');
+      }
+      return jsonResponse(searchFixtureText);
+    };
+
+    const rawSaved = createSavedStore({ dir: makeTempDir(), now });
+    const key = savedKey("men's loafers", 'men', { shops: ALL_SITES, limit: 6 });
+    rawSaved.putSaved(key, "men's loafers", 'men', savedItems);
+
+    let getCalls = 0;
+    let putCalls = 0;
+    let nearCalls = 0;
+    const trackedSaved = {
+      getSaved: (k: string) => {
+        getCalls += 1;
+        return rawSaved.getSaved(k);
+      },
+      putSaved: (k: string, q: string, g: 'men' | 'women', items: any[]) => {
+        putCalls += 1;
+        return rawSaved.putSaved(k, q, g, items);
+      },
+      nearestSaved: (q: string, g: 'men' | 'women') => {
+        nearCalls += 1;
+        return rawSaved.nearestSaved(q, g);
+      },
+      flush: () => rawSaved.flush(),
+    };
+
+    const mcp = createShopMcp({ fetch: fakeFetch, now });
+    const store = createStore({ mcp, saved: trackedSaved, now });
+
+    try {
+      const liveRes = await store.search("men's loafers", 'men', { limit: 6 });
+      assert.equal(liveRes.source, 'live');
+      assert.equal(liveRes.items.length, 3);
+      assert.equal(fetchCalls, 1);
+      assert.equal(getCalls, 0);
+      assert.equal(putCalls, 0);
+      assert.equal(nearCalls, 0);
+
+      shouldFail = true;
+      const failRes = await store.search("men's loafers", 'men', { limit: 6 });
+      assert.equal(failRes.source, 'empty');
+      assert.deepEqual(failRes.items, []);
+      assert.equal(fetchCalls, 2);
+      assert.equal(getCalls, 0);
+      assert.equal(putCalls, 0);
+      assert.equal(nearCalls, 0);
+    } finally {
+      if (prevMode === undefined) delete process.env.ALICE_SAVED;
+      else process.env.ALICE_SAVED = prevMode;
+    }
+  });
+});
+
 describe('lookup, getProduct, and sizeVariant', () => {
   it('lookup keys by both product id and variant id', async () => {
     const lookupText = loadFixtureText('lookup.json');
@@ -505,6 +684,16 @@ describe('lookup, getProduct, and sizeVariant', () => {
     const mcp = createShopMcp({ fetch: fakeFetch });
     const saved = createSavedStore({ dir: makeTempDir() });
     const store = createStore({ mcp, saved });
+
+    // ProductDetail.variant.url must keep every query parameter byte for byte
+    const detail = await store.getProduct('gid://shopify/ProductVariant/41356358090885');
+    assert.ok(detail);
+    assert.equal(detail.variant.url, baseFixture.result.structuredContent.product.variants[0].url);
+    assert.equal(
+      detail.variant.url,
+      'https://www.stevemadden.com/products/naxos-black-leather?variant=41356358090885&_gsid=wYMi6p9HHoRK&utm_source=shopify&utm_medium=catalog',
+    );
+    calls.length = 0;
 
     // Select size "11.0" -> matches "11" and calls step 3 with PRODUCT id
     const okRes = await store.sizeVariant('gid://shopify/ProductVariant/41356358090885', '11.0');
