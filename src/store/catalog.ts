@@ -82,6 +82,16 @@ const FRESH_SAVED_MS = 60 * 60 * 1000;
 const LOOKUP_BATCH_SIZE = 10;
 const GET_PRODUCT_TIMEOUT_MS = 3000;
 
+export type SavedMode = 'fallback' | 'fresh' | 'off';
+
+export function getSavedMode(raw: string | undefined = process.env.ALICE_SAVED): SavedMode {
+  const norm = (raw ?? '').trim().toLowerCase();
+  if (norm === 'fresh' || norm === 'off' || norm === 'fallback') {
+    return norm;
+  }
+  return 'fallback';
+}
+
 const WRONG_FOR_MEN_RE =
   /\bwomen'?s?\b|\bwomens[-\s]|\bladies\b|\bgirls?\b|\bmaternity\b|\bbralette\b|\bskirt\b/;
 const WRONG_FOR_WOMEN_RE = /(^|[^a-z])men'?s\b|(^|[-/\s])mens[-\s]|\bboys?\b/;
@@ -133,21 +143,6 @@ function stripHtmlAndDecode(raw: string, maxChars: number): string {
     text = slice.trimEnd();
   }
   return text;
-}
-
-function cleanProductUrl(rawUrl: string): string {
-  if (!rawUrl) return '';
-  try {
-    const u = new URL(rawUrl);
-    const variant = u.searchParams.get('variant');
-    u.search = '';
-    if (variant !== null) {
-      u.searchParams.set('variant', variant);
-    }
-    return u.toString();
-  } catch {
-    return rawUrl;
-  }
 }
 
 function cleanImageUrl(rawUrl: string): string {
@@ -250,7 +245,7 @@ function toItemFromVariant(product: any, variant: any, gender: Gender): Item | n
 
   const title = String(product.title ?? variant.title ?? '').trim();
   const price = amountCents / 100;
-  const url = cleanProductUrl(String(variant.url ?? ''));
+  const url = typeof variant.url === 'string' ? variant.url : String(variant.url ?? '');
   const image = firstImageFromMedia(variant.media) || firstImageFromMedia(product.media);
   const store_domain = String(variant.seller?.domain ?? '');
   const store = storeNameForDomain(store_domain, variant.seller?.name);
@@ -438,6 +433,7 @@ export function createCatalog(deps?: {
   const mcp = deps?.mcp ?? shopMcp;
   const saved = deps?.saved ?? savedStore;
   const now = deps?.now ?? (() => Date.now());
+  let modeLogged = false;
 
   async function search(
     query: string,
@@ -445,13 +441,18 @@ export function createCatalog(deps?: {
     opts?: SearchOpts,
   ): Promise<SearchResult> {
     const t0 = now();
+    const mode = getSavedMode();
+    if (!modeLogged) {
+      modeLogged = true;
+      console.log(`[store] saved results mode: ${mode}`);
+    }
     const shops = opts?.shops ?? ALL_SITES;
     const limit = Math.min(opts?.limit ?? 24, 50);
     const maxPrice = opts?.maxPrice;
     const key = savedKey(query, gender, { shops, maxPrice, limit });
 
-    const existing = saved.getSaved(key);
-    if (existing && now() - existing.t < FRESH_SAVED_MS) {
+    const existing = mode === 'fresh' ? saved.getSaved(key) : undefined;
+    if (mode === 'fresh' && existing && now() - existing.t < FRESH_SAVED_MS) {
       const ms = Math.max(0, now() - t0);
       console.log(`[store] search "${query}" ${gender} saved ${existing.items.length} items ${ms}ms`);
       logEvent('store_search', { query, gender, source: 'saved', n: existing.items.length, ms });
@@ -487,7 +488,9 @@ export function createCatalog(deps?: {
 
       const ms = Math.max(0, now() - t0);
       if (items.length > 0) {
-        saved.putSaved(key, query, gender, items);
+        if (mode !== 'off') {
+          saved.putSaved(key, query, gender, items);
+        }
         console.log(`[store] search "${query}" ${gender} live ${items.length} items ${ms}ms`);
         logEvent('store_search', { query, gender, source: 'live', n: items.length, ms });
         return { items, source: 'live', ms };
@@ -498,20 +501,29 @@ export function createCatalog(deps?: {
       return { items: [], source: 'empty', ms };
     } catch {
       const ms = Math.max(0, now() - t0);
-      if (existing) {
-        console.log(
-          `[store] search "${query}" ${gender} saved ${existing.items.length} items ${ms}ms`,
-        );
-        logEvent('store_search', { query, gender, source: 'saved', n: existing.items.length, ms });
-        return { items: existing.items, source: 'saved', ms };
-      }
-      const near = saved.nearestSaved(query, gender);
-      if (near) {
-        console.log(
-          `[store] search "${query}" ${gender} saved-near ${near.items.length} items ${ms}ms`,
-        );
-        logEvent('store_search', { query, gender, source: 'saved-near', n: near.items.length, ms });
-        return { items: near.items, source: 'saved-near', ms };
+      if (mode !== 'off') {
+        const fallbackExact = existing ?? saved.getSaved(key);
+        if (fallbackExact) {
+          console.log(
+            `[store] search "${query}" ${gender} saved ${fallbackExact.items.length} items ${ms}ms`,
+          );
+          logEvent('store_search', {
+            query,
+            gender,
+            source: 'saved',
+            n: fallbackExact.items.length,
+            ms,
+          });
+          return { items: fallbackExact.items, source: 'saved', ms };
+        }
+        const near = saved.nearestSaved(query, gender);
+        if (near) {
+          console.log(
+            `[store] search "${query}" ${gender} saved-near ${near.items.length} items ${ms}ms`,
+          );
+          logEvent('store_search', { query, gender, source: 'saved-near', n: near.items.length, ms });
+          return { items: near.items, source: 'saved-near', ms };
+        }
       }
       console.log(`[store] search "${query}" ${gender} empty 0 items ${ms}ms`);
       logEvent('store_search', { query, gender, source: 'empty', n: 0, ms });
@@ -667,7 +679,7 @@ export function createCatalog(deps?: {
           price,
           available: Boolean(variant.availability?.available),
           options: variantOptions,
-          url: cleanProductUrl(String(variant.url ?? '')),
+          url: typeof variant.url === 'string' ? variant.url : String(variant.url ?? ''),
         },
       };
     } catch {
