@@ -2,6 +2,7 @@ import { llm } from '@livekit/agents';
 import { z } from 'zod';
 import { buildOutfits as defaultBuildOutfits, swapPiece as defaultSwapPiece } from '../brain/index.ts';
 import type { BuildOptions, SwapOptions, SwapResult } from '../brain/index.ts';
+import type { Critique } from '../brain/critic.ts';
 import { calllog } from '../calllog.ts';
 import * as defaultMediaModule from '../media/index.ts';
 import type { SearchOpts } from '../store/catalog.ts';
@@ -28,7 +29,9 @@ import type { PageSender } from './page.ts';
 import {
   type BagNotAdded,
   type CallStateStore,
+  type LookCritique,
   createCallStateStore,
+  isLowCritique,
   normalizeSlotKey,
   outfitToStateLook,
 } from './state.ts';
@@ -669,6 +672,60 @@ function findPieceInOutfit(outfit: Outfit, rawSlot: string): Piece | undefined {
   return outfit.pieces.find((p) => normalizeSlotKey(p.slot) === normalized);
 }
 
+function normalizeOccasion(raw: string): string {
+  return raw.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function toLookCritique(critique: Critique): LookCritique {
+  const issues = Array.isArray(critique.issues)
+    ? critique.issues.filter((s): s is string => typeof s === 'string' && s.trim().length > 0).map((s) => s.trim())
+    : [];
+  const wp = critique.weak_piece;
+  const weakPiece =
+    wp && typeof wp === 'object' && typeof wp.slot === 'string' && wp.slot.trim().length > 0
+      ? {
+          slot: wp.slot.trim(),
+          reason: typeof wp.reason === 'string' ? wp.reason.trim() : '',
+          ask: typeof wp.ask === 'string' ? wp.ask.trim() : '',
+        }
+      : null;
+  return {
+    score: typeof critique.score === 'number' ? critique.score : 0,
+    presentable: Boolean(critique.presentable),
+    issues,
+    weakPiece,
+    ...(typeof critique.error === 'string' && critique.error.trim().length > 0
+      ? { error: critique.error.trim() }
+      : {}),
+  };
+}
+
+function formatCritiqueSwapNote(critique: LookCritique | undefined): string | null {
+  if (!isLowCritique(critique)) return null;
+  const clean = (s: string) => s.replace(/\s+/g, ' ').trim().replace(/\.$/, '');
+  if (critique.weakPiece) {
+    const slot = clean(critique.weakPiece.slot);
+    const reason = clean(critique.weakPiece.reason);
+    const ask = clean(critique.weakPiece.ask);
+    const reasonPart = reason ? ` (${reason})` : '';
+    const askPart = ask ? ` for ${ask}` : '';
+    return `Stylist note: the ${slot} is the weakest piece${reasonPart}; offer once in your own words to swap it${askPart}.`;
+  }
+  const firstIssue = critique.issues.map(clean).find(Boolean);
+  if (firstIssue) {
+    return `Stylist note: ${firstIssue}; offer once in your own words to swap the weakest piece.`;
+  }
+  return 'Stylist note: this look feels slightly off; offer once in your own words to swap the weakest piece.';
+}
+
+interface ActiveBuild {
+  gen: number;
+  department: Gender;
+  occasion: string;
+  occasionNorm: string;
+  budget: number;
+}
+
 /**
  * Returns an object map of anonymous function tools keyed by tool name.
  * IMPORTANT: Do NOT set `name` on any entry; @livekit/agents 1.10 rejects named entries in object maps.
@@ -710,6 +767,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
   const mediaVersionByLook = new Map<number, number>();
   const tryOnJobs = new Map<number, TryOnJob>();
   const baggedResults = new Map<string, string>();
+  const baggedLookTotals = new Map<string, number>();
+  let buildGen = 0;
+  let activeBuild: ActiveBuild | null = null;
   let lastBriefNotes: string | undefined;
   let lastBriefWeather: string | undefined;
 
@@ -1011,7 +1071,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       }),
       execute: wrapper.wrap('remember', async ({ fact }) => {
         stateStore.dispatch({ type: 'add_fact', fact });
-        return `Remembered: ${fact.trim()}. Continue naturally.`;
+        return `Remembered: ${fact.trim()}.`;
       }),
     }),
 
@@ -1023,12 +1083,13 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       execute: wrapper.wrap('set_department', async ({ department }) => {
         stateStore.dispatch({ type: 'set_department', department });
         wrapper.invalidate('set_department');
-        return `Department set to ${department}. State your choice casually so they can correct you, then ask occasion and budget if still needed.`;
+        return `Department set to ${department}. Mention it casually so they can correct you and continue without repeating a question you just asked.`;
       }),
     }),
 
     build_outfits: llm.tool({
-      description: 'Build three complete outfit looks for the shopper based on occasion and budget.',
+      description:
+        'Build three complete outfit looks for the shopper based on occasion and budget. Only one build may run at a time; once looks are on screen, call again only when the shopper asks for different looks or changes occasion or budget—handle passing style remarks by presenting what fits or using swap_piece.',
       parameters: z.object({
         occasion: z.string().describe('The event or occasion the shopper is dressing for'),
         budget_usd: z.number().describe('Total budget in US dollars'),
@@ -1053,138 +1114,233 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
         const budgetCapped = budget_usd > MAX_BUDGET_USD;
         const effectiveBudget = budgetCapped ? MAX_BUDGET_USD : budget_usd;
-        lastBriefNotes = notes;
+        const occasionNorm = normalizeOccasion(occasion);
 
-        const cleanWhere = typeof where === 'string' ? where.trim() : '';
-        const cleanWhen = typeof when === 'string' ? when.trim() : '';
-        const weatherLine =
-          cleanWhere && cleanWhen
-            ? await lookupWeatherForBrief(cleanWhere, cleanWhen)
-            : undefined;
-        lastBriefWeather = weatherLine;
+        if (activeBuild !== null) {
+          const materiallyDifferent =
+            department !== activeBuild.department ||
+            occasionNorm !== activeBuild.occasionNorm ||
+            effectiveBudget !== activeBuild.budget;
 
-        stateStore.dispatch({
-          type: 'set_brief',
-          occasion,
-          budgetAsked: true,
-          budgetGiven: effectiveBudget,
-          ownPiece: own_piece ?? null,
-        });
-
-        const brief: Brief = {
-          gender: department,
-          occasion,
-          budget_usd: effectiveBudget,
-          ...(notes ? { notes } : {}),
-          ...(own_piece ? { own_piece } : {}),
-          ...(weatherLine ? { weather: weatherLine } : {}),
-        };
-
-        cancelWalk();
-        const buildStarted = nowFn();
-        const subtitle = `${occasion} · ${formatPrice(effectiveBudget)} budget`;
-        const delivered = new Set<number>();
-        const pageShowPromises: Promise<PageActionReply>[] = [];
-        const shownOutfits: Outfit[] = [];
-
-        const handleOutfit = (rawOutfit: Outfit, index: number) => {
-          const lookNumber =
-            typeof rawOutfit.number === 'number' && Number.isFinite(rawOutfit.number)
-              ? rawOutfit.number
-              : index + 1;
-          if (delivered.has(lookNumber)) return;
-          delivered.add(lookNumber);
-
-          const numbered: Outfit = { ...rawOutfit, number: lookNumber };
-          const replace = shownOutfits.length === 0 && index === 0;
-          if (replace) {
-            outfitsByNumber.clear();
-            tryOnJobs.clear();
+          if (!materiallyDifferent) {
+            logFn(options.room, 'build_skipped', {
+              reason: 'build_in_progress',
+              occasion,
+              budget_usd: effectiveBudget,
+              ...(notes ? { notes } : {}),
+              active_occasion: activeBuild.occasion,
+              active_budget_usd: activeBuild.budget,
+            });
+            const pref = notes?.trim();
+            const prefHint = pref
+              ? `Keep the new preference ("${pref}") in mind when presenting them, or use swap_piece once they land.`
+              : 'Keep any new preference in mind when presenting them, or use swap_piece once they land.';
+            return `Looks are already on their way for ${activeBuild.occasion} (${formatPrice(activeBuild.budget)} budget) — did not start a second build. ${prefHint}`;
           }
-          outfitsByNumber.set(lookNumber, numbered);
-          shownOutfits.push(numbered);
+
+          logFn(options.room, 'build_skipped', {
+            reason: 'superseded_by_new_brief',
+            occasion: activeBuild.occasion,
+            budget_usd: activeBuild.budget,
+            new_occasion: occasion,
+            new_budget_usd: effectiveBudget,
+          });
+          // Invalidate any in-flight background media from the superseded build.
+          for (const num of new Set([1, 2, 3, ...outfitsByNumber.keys()])) {
+            nextLookMediaVersion(num);
+          }
+        }
+
+        buildGen += 1;
+        const myGen = buildGen;
+        activeBuild = {
+          gen: myGen,
+          department,
+          occasion,
+          occasionNorm,
+          budget: effectiveBudget,
+        };
+        const isCurrentBuild = () => myGen === buildGen && !options.signal?.aborted;
+
+        try {
+          lastBriefNotes = notes;
+
+          const cleanWhere = typeof where === 'string' ? where.trim() : '';
+          const cleanWhen = typeof when === 'string' ? when.trim() : '';
+          const weatherLine =
+            cleanWhere && cleanWhen
+              ? await lookupWeatherForBrief(cleanWhere, cleanWhen)
+              : undefined;
+          if (!isCurrentBuild()) {
+            return `Previous build for ${occasion} was superseded by a newer brief.`;
+          }
+          lastBriefWeather = weatherLine;
 
           stateStore.dispatch({
-            type: 'set_looks',
-            looks: [outfitToStateLook(numbered, lookNumber)],
-            replace,
+            type: 'set_brief',
+            occasion,
+            budgetAsked: true,
+            budgetGiven: effectiveBudget,
+            ownPiece: own_piece ?? null,
           });
 
-          logFn(options.room, 'build_progress', {
-            index,
-            name: numbered.name,
-            total: numbered.total,
-            ms: Math.max(0, Math.round(nowFn() - buildStarted)),
-          });
+          const brief: Brief = {
+            gender: department,
+            occasion,
+            budget_usd: effectiveBudget,
+            ...(notes ? { notes } : {}),
+            ...(own_piece ? { own_piece } : {}),
+            ...(weatherLine ? { weather: weatherLine } : {}),
+          };
 
-          pageShowPromises.push(
-            page.send('showOutfits', {
-              outfits: [numbered],
+          cancelWalk();
+          const buildStarted = nowFn();
+          const subtitle = `${occasion} · ${formatPrice(effectiveBudget)} budget`;
+          const delivered = new Set<number>();
+          const buildLookVersions = new Map<number, number>();
+          const pageShowPromises: Promise<PageActionReply>[] = [];
+          const shownOutfits: Outfit[] = [];
+
+          const handleOutfit = (rawOutfit: Outfit, index: number) => {
+            if (!isCurrentBuild()) return;
+            const lookNumber =
+              typeof rawOutfit.number === 'number' && Number.isFinite(rawOutfit.number)
+                ? rawOutfit.number
+                : index + 1;
+            if (delivered.has(lookNumber)) return;
+            delivered.add(lookNumber);
+
+            const numbered: Outfit = { ...rawOutfit, number: lookNumber };
+            const replace = shownOutfits.length === 0;
+            if (replace) {
+              outfitsByNumber.clear();
+              tryOnJobs.clear();
+            }
+            outfitsByNumber.set(lookNumber, numbered);
+            shownOutfits.push(numbered);
+
+            stateStore.dispatch({
+              type: 'set_looks',
+              looks: [outfitToStateLook(numbered, lookNumber)],
               replace,
-              subtitle,
-            }),
+            });
+
+            logFn(options.room, 'build_progress', {
+              index,
+              name: numbered.name,
+              total: numbered.total,
+              ms: Math.max(0, Math.round(nowFn() - buildStarted)),
+            });
+
+            pageShowPromises.push(
+              page.send('showOutfits', {
+                outfits: [numbered],
+                replace,
+                subtitle,
+              }),
+            );
+
+            startBackgroundMediaForLook(numbered);
+            const ver = mediaVersionByLook.get(lookNumber);
+            if (ver !== undefined) {
+              buildLookVersions.set(lookNumber, ver);
+            }
+          };
+
+          const handleCritique = (lookNumber: number, critique: Critique) => {
+            if (!isCurrentBuild()) return;
+            const expectedVer = buildLookVersions.get(lookNumber);
+            if (expectedVer !== undefined && mediaVersionByLook.get(lookNumber) !== expectedVer) {
+              return;
+            }
+            const stored = toLookCritique(critique);
+            stateStore.dispatch({
+              type: 'set_critique',
+              look: lookNumber,
+              critique: stored,
+            });
+            logFn(options.room, 'critique_seen', {
+              outfit: lookNumber,
+              score: stored.score,
+              presentable: stored.presentable,
+              issues: stored.issues,
+              weak_piece: critique.weak_piece ?? null,
+              ...(stored.error ? { error: stored.error } : {}),
+            });
+          };
+
+          const result = await buildOutfitsFn(brief, {
+            onOutfit: handleOutfit,
+            onCritique: handleCritique,
+            room: options.room,
+          });
+
+          if (!isCurrentBuild()) {
+            return `Previous build for ${occasion} was superseded by a newer brief.`;
+          }
+
+          for (const [idx, outfit] of (result.outfits ?? []).entries()) {
+            handleOutfit(outfit, idx);
+          }
+
+          const pageReplies = await Promise.all(pageShowPromises);
+          if (!isCurrentBuild()) {
+            return `Previous build for ${occasion} was superseded by a newer brief.`;
+          }
+
+          const pageConfirmed =
+            pageReplies.length > 0 && pageReplies.every((reply) => reply.ok === true);
+
+          logFn(options.room, 'build_done', {
+            source: result.source,
+            timing: result.timing,
+            problems: result.problems,
+          });
+          wrapper.invalidate('build_outfits');
+
+          const sorted = Array.from(outfitsByNumber.values()).sort(
+            (a, b) => (a.number ?? 0) - (b.number ?? 0),
           );
 
-          startBackgroundMediaForLook(numbered);
-        };
+          const headerLines: string[] = [];
+          if (budgetCapped) {
+            headerLines.push(
+              `Budget was above $${MAX_BUDGET_USD} and was capped at $${MAX_BUDGET_USD}; mention the cap in one light line.`,
+            );
+          }
+          if (pageConfirmed) {
+            headerLines.push(`Built ${sorted.length} looks and they are now on screen.`);
+          } else {
+            headerLines.push(
+              `Built ${sorted.length} looks, but the page did not confirm displaying them yet.`,
+            );
+          }
+          if (weatherLine) {
+            headerLines.push(`Weather: ${weatherLine}`);
+          }
 
-        const result = await buildOutfitsFn(brief, {
-          onOutfit: handleOutfit,
-          room: options.room,
-        });
+          const critiquesNow = stateStore.get().critiques;
+          const lookLines = sorted.map((outfit) => {
+            const num = outfit.number ?? 1;
+            const piecesText = outfit.pieces
+              .map((p) => `${p.slot}: ${p.item.title} (${formatPrice(p.item.price)}, ${p.item.store})`)
+              .join('; ');
+            const swapNote = formatCritiqueSwapNote(critiquesNow[num]);
+            const swapSuffix = swapNote ? ` ${swapNote}` : '';
+            return `Look ${num} — ${outfit.name} (${formatPrice(outfit.total)}): ${outfit.difference} Pieces: ${piecesText}${swapSuffix}`;
+          });
 
-        for (const [idx, outfit] of (result.outfits ?? []).entries()) {
-          handleOutfit(outfit, idx);
+          const footerLines: string[] = [];
+          if (Array.isArray(result.problems) && result.problems.length > 0) {
+            footerLines.push(`Internal notes (do not read aloud): ${result.problems.join('; ')}`);
+          }
+
+          return [...headerLines, ...lookLines, ...footerLines].join('\n');
+        } finally {
+          if (activeBuild?.gen === myGen) {
+            activeBuild = null;
+          }
         }
-
-        const pageReplies = await Promise.all(pageShowPromises);
-        const pageConfirmed =
-          pageReplies.length > 0 && pageReplies.every((reply) => reply.ok === true);
-
-        logFn(options.room, 'build_done', {
-          source: result.source,
-          timing: result.timing,
-          problems: result.problems,
-        });
-        wrapper.invalidate('build_outfits');
-
-        const sorted = Array.from(outfitsByNumber.values()).sort(
-          (a, b) => (a.number ?? 0) - (b.number ?? 0),
-        );
-
-        const headerLines: string[] = [];
-        if (budgetCapped) {
-          headerLines.push(
-            `Budget was above $${MAX_BUDGET_USD} and was capped at $${MAX_BUDGET_USD}; mention the cap with attitude.`,
-          );
-        }
-        if (pageConfirmed) {
-          headerLines.push(
-            `Built ${sorted.length} looks and they are now on screen. Give one tight sentence per look and ask which catches their eye.`,
-          );
-        } else {
-          headerLines.push(
-            `Built ${sorted.length} looks, but the page did not confirm displaying them yet. Do not claim they are live on screen; mention loading lightly.`,
-          );
-        }
-        if (weatherLine) {
-          headerLines.push(`Weather (you may mention in one short clause): ${weatherLine}`);
-        }
-
-        const lookLines = sorted.map((outfit) => {
-          const num = outfit.number ?? 1;
-          const piecesText = outfit.pieces
-            .map((p) => `${p.slot}: ${p.item.title} (${formatPrice(p.item.price)}, ${p.item.store})`)
-            .join('; ');
-          return `Look ${num} — ${outfit.name} (${formatPrice(outfit.total)}): ${outfit.difference} Pieces: ${piecesText}`;
-        });
-
-        const footerLines: string[] = [];
-        if (Array.isArray(result.problems) && result.problems.length > 0) {
-          footerLines.push(`Internal notes (do not read aloud): ${result.problems.join('; ')}`);
-        }
-
-        return [...headerLines, ...lookLines, ...footerLines].join('\n');
       }),
     }),
 
@@ -1204,7 +1360,8 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         const reply = await page.send('highlight', { outfit: lookNumber, piece: null });
         startHighlightWalk(outfit);
 
-        const tryOnInfo = stateStore.get().tryOn[lookNumber];
+        const st = stateStore.get();
+        const tryOnInfo = st.tryOn[lookNumber];
         let tryOnText = 'Try-on has not started yet.';
         if (tryOnInfo?.status === 'ready') {
           tryOnText = 'Try-on is ready to reveal.';
@@ -1223,10 +1380,13 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           ? `Look ${lookNumber} — ${outfit.name} (${formatPrice(outfit.total)}) is highlighted on screen.`
           : `Look ${lookNumber} — ${outfit.name} (${formatPrice(outfit.total)}) was selected, though the page did not confirm highlighting it.`;
 
+        const swapNote = formatCritiqueSwapNote(st.critiques[lookNumber]);
+
         return [
           `${statusLine} ${tryOnText}`,
           ...pieceLines,
-          'Keep it to two or three short sentences total (about 12 seconds), naming the pieces in walk order (the order listed above) using words from their titles, then ask one question about whether they want to see it on themselves.',
+          ...(swapNote ? [swapNote] : []),
+          'Walk order is listed above; keep it to two or three short sentences (about 12 seconds) using words from the piece titles.',
         ].join('\n');
       }),
     }),
@@ -1345,7 +1505,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           : `Updated Look ${lookNum} (page did not confirm the visual update)`;
         const notePart = swapResult.note ? ` Note: ${swapResult.note}` : '';
 
-        return `${screenStatus}: ${targetSlot} is now ${pieceDesc}. New look total: ${formatPrice(updatedOutfit.total)}.${notePart} Try-on and flat-lay are refreshing. Name only the replacement piece and new total.`;
+        return `${screenStatus}: ${targetSlot} is now ${pieceDesc}. New look total: ${formatPrice(updatedOutfit.total)}.${notePart} Try-on and flat-lay are refreshing.`;
       }),
     }),
 
@@ -1596,6 +1756,34 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           return `Already in the bag. ${earlier}`;
         }
 
+        const bagLookKey = `${buildGen}:${lookNum}`;
+        let otherLooksTotal = 0;
+        for (const [key, amount] of baggedLookTotals.entries()) {
+          if (key !== bagLookKey) {
+            otherLooksTotal = roundMoney(otherLooksTotal + amount);
+          }
+        }
+
+        const formatBagCeilingNotDone = (lookAmount: number, projectedTotal: number): string => {
+          if (otherLooksTotal > 0) {
+            return `NOT DONE: Adding Look ${lookNum} (${formatPrice(lookAmount)}) would bring the bag total across this call to ${formatPrice(projectedTotal)}, which exceeds the ${formatPrice(MAX_BUDGET_USD)} cap (current bag total is ${formatPrice(otherLooksTotal)}). Tell the shopper plainly that bags are capped at $10,000 and offer to swap pieces to stay under the cap.`;
+          }
+          return `NOT DONE: Look ${lookNum} (${formatPrice(lookAmount)}) exceeds the ${formatPrice(MAX_BUDGET_USD)} bag cap. Tell the shopper plainly that bags are capped at $10,000 and offer to swap pieces for a lower total.`;
+        };
+
+        const estimatedPiecesTotal = roundMoney(
+          outfit.pieces.reduce(
+            (sum, p) => sum + (Number.isFinite(p.item.price) ? p.item.price : 0),
+            0,
+          ),
+        );
+        const estimatedLookTotal =
+          estimatedPiecesTotal > 0 ? estimatedPiecesTotal : roundMoney(outfit.total || 0);
+        const estimatedRunningTotal = roundMoney(otherLooksTotal + estimatedLookTotal);
+        if (estimatedRunningTotal > MAX_BUDGET_USD) {
+          return formatBagCeilingNotDone(estimatedLookTotal, estimatedRunningTotal);
+        }
+
         let addToBagFn = options.deps?.addToBag;
         let usedMock = false;
         let storeImportFailed = false;
@@ -1729,6 +1917,13 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           const reason = rawSummary ? ` ${rawSummary}` : '';
           return `NOT DONE: Added 0 pieces, total $0. No store cart could be created.${reason} No checkout links are on the page. Offer a swap or another size; never say any piece is in the bag, never say the bag is processing, and never pitch a different look.`;
         }
+
+        const actualRunningTotal = roundMoney(otherLooksTotal + bagPayload.total);
+        if (actualRunningTotal > MAX_BUDGET_USD) {
+          return formatBagCeilingNotDone(bagPayload.total, actualRunningTotal);
+        }
+
+        baggedLookTotals.set(bagLookKey, bagPayload.total);
 
         const reply = await page.send('bagReady', bagPayload);
 

@@ -11,6 +11,20 @@ export interface StateLook {
   slots: string[];
 }
 
+export interface LookCritique {
+  score: number;
+  presentable: boolean;
+  issues: string[];
+  weakPiece: { slot: string; reason: string; ask: string } | null;
+  error?: string;
+}
+
+export function isLowCritique(critique: LookCritique | undefined): critique is LookCritique {
+  if (!critique) return false;
+  if (critique.error || !Number.isFinite(critique.score) || critique.score <= 0) return false;
+  return !critique.presentable || critique.score < 7;
+}
+
 export interface TryOnInfo {
   status: TryOnState;
   url?: string;
@@ -39,6 +53,7 @@ export interface CallState {
   looks: StateLook[];
   pickedLook: number | null;
   tryOn: Record<number, TryOnInfo>;
+  critiques: Record<number, LookCritique>;
   revealsDone: number[];
   sizes: Record<string, string>;
   bag: BagState | null;
@@ -62,6 +77,7 @@ export type CallStateAction =
   | { type: 'update_look'; look: StateLook }
   | { type: 'pick_look'; look: number | null }
   | { type: 'set_tryon'; look: number; status: TryOnState; url?: string; error?: string }
+  | { type: 'set_critique'; look: number; critique: LookCritique }
   | { type: 'mark_revealed'; look: number }
   | { type: 'merge_sizes'; sizes: Record<string, string> }
   | { type: 'set_bag'; bag: BagState }
@@ -81,6 +97,7 @@ export function createInitialCallState(overrides: Partial<CallState> = {}): Call
     looks: [],
     pickedLook: null,
     tryOn: {},
+    critiques: {},
     revealsDone: [],
     sizes: {},
     bag: null,
@@ -266,6 +283,7 @@ export function reduceCallState(
 
       let nextPicked = state.pickedLook;
       let nextTryOn = state.tryOn;
+      let nextCritiques = state.critiques;
       let nextReveals = state.revealsDone;
 
       if (!sameLooksArray(state.looks, nextLooks)) {
@@ -280,6 +298,10 @@ export function reduceCallState(
           nextTryOn = {};
           changed.push('tryOn');
         }
+        if (Object.keys(state.critiques).length > 0) {
+          nextCritiques = {};
+          changed.push('critiques');
+        }
         if (state.revealsDone.length > 0) {
           nextReveals = [];
           changed.push('revealsDone');
@@ -293,6 +315,7 @@ export function reduceCallState(
           looks: nextLooks,
           pickedLook: nextPicked,
           tryOn: nextTryOn,
+          critiques: nextCritiques,
           revealsDone: nextReveals,
         },
         changed,
@@ -311,11 +334,19 @@ export function reduceCallState(
         tryOnChanged = true;
       }
 
+      const nextCritiques = { ...state.critiques };
+      let critiquesChanged = false;
+      if (nextCritiques[action.look.number] !== undefined) {
+        delete nextCritiques[action.look.number];
+        critiquesChanged = true;
+      }
+
       const nextReveals = state.revealsDone.filter((n) => n !== action.look.number);
       const revealsChanged = nextReveals.length !== state.revealsDone.length;
 
       if (!sameLooksArray(state.looks, nextLooks)) changed.push('looks');
       if (tryOnChanged) changed.push('tryOn');
+      if (critiquesChanged) changed.push('critiques');
       if (revealsChanged) changed.push('revealsDone');
 
       if (changed.length === 0) return { state, changed };
@@ -324,6 +355,7 @@ export function reduceCallState(
           ...state,
           looks: nextLooks,
           tryOn: nextTryOn,
+          critiques: nextCritiques,
           revealsDone: nextReveals,
         },
         changed,
@@ -359,6 +391,37 @@ export function reduceCallState(
           tryOn: { ...state.tryOn, [action.look]: nextInfo },
         },
         changed: ['tryOn'],
+      };
+    }
+
+    case 'set_critique': {
+      const prev = state.critiques[action.look];
+      const nextCritique: LookCritique = {
+        score: action.critique.score,
+        presentable: action.critique.presentable,
+        issues: [...action.critique.issues],
+        weakPiece: action.critique.weakPiece ? { ...action.critique.weakPiece } : null,
+        ...(action.critique.error ? { error: action.critique.error } : {}),
+      };
+      if (
+        prev &&
+        prev.score === nextCritique.score &&
+        prev.presentable === nextCritique.presentable &&
+        prev.error === nextCritique.error &&
+        prev.issues.length === nextCritique.issues.length &&
+        prev.issues.every((item, idx) => item === nextCritique.issues[idx]) &&
+        prev.weakPiece?.slot === nextCritique.weakPiece?.slot &&
+        prev.weakPiece?.reason === nextCritique.weakPiece?.reason &&
+        prev.weakPiece?.ask === nextCritique.weakPiece?.ask
+      ) {
+        return { state, changed };
+      }
+      return {
+        state: {
+          ...state,
+          critiques: { ...state.critiques, [action.look]: nextCritique },
+        },
+        changed: ['critiques'],
       };
     }
 
@@ -470,6 +533,23 @@ function formatMoney(amount: number): string {
   return Number.isInteger(amount) ? `$${amount}` : `$${amount.toFixed(2)}`;
 }
 
+function formatCritiqueStateTag(critique: LookCritique | undefined): string {
+  if (!isLowCritique(critique)) return '';
+  const clean = (s: string) => s.replace(/\s+/g, ' ').trim().replace(/\.$/, '');
+  if (critique.weakPiece) {
+    const slot = clean(critique.weakPiece.slot);
+    const reason = clean(critique.weakPiece.reason);
+    const ask = clean(critique.weakPiece.ask);
+    const detail = [reason, ask ? `try ${ask}` : ''].filter(Boolean).join('; ');
+    return detail ? ` swap_hint=${slot} (${detail})` : ` swap_hint=${slot}`;
+  }
+  const firstIssue = critique.issues.map(clean).find(Boolean);
+  if (firstIssue) {
+    return ` swap_hint=(${firstIssue})`;
+  }
+  return ' swap_hint=consider swapping a piece';
+}
+
 /**
  * Renders a compact single-paragraph `CALL STATE: ...` summary for Gemini Live.
  */
@@ -495,7 +575,8 @@ export function summarize(state: CallState): string {
       const tryOn = state.tryOn[look.number];
       const tryOnTag = tryOn ? ` tryon=${tryOn.status}` : '';
       const revTag = state.revealsDone.includes(look.number) ? ' revealed' : '';
-      return `#${look.number} ${look.name} (${formatMoney(look.total)}: ${look.slots.join(',')}${tryOnTag}${revTag})`;
+      const critTag = formatCritiqueStateTag(state.critiques[look.number]);
+      return `#${look.number} ${look.name} (${formatMoney(look.total)}: ${look.slots.join(',')}${tryOnTag}${revTag}${critTag})`;
     });
     parts.push(`looks=[${lookStrs.join('; ')}]`);
   }

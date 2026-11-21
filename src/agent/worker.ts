@@ -498,7 +498,7 @@ export default defineAgent({
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev) => {
       if (ev.item.type === 'message' && ev.item.role === 'assistant') {
         const text = ev.item.textContent ?? '';
-        resultNudger.onAssistantMessage();
+        resultNudger.onAssistantMessage(text);
         calllog(roomName, 'alice_said', { text, interrupted: ev.item.interrupted });
       } else if (ev.item.type === 'message' && ev.item.role === 'user') {
         const text = ev.item.textContent ?? '';
@@ -515,6 +515,7 @@ export default defineAgent({
     });
 
     session.on(voice.AgentSessionEventTypes.SpeechCreated, (ev) => {
+      resultNudger.onSpeechCreated?.();
       calllog(roomName, 'speech_created', {
         source: ev.source,
         user_initiated: ev.userInitiated,
