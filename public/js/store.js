@@ -119,15 +119,46 @@ function normalizeBoxes(raw) {
   return count > 0 ? out : null;
 }
 
-function getBoxForSlot(boxes, slot) {
+function getBoxForSlot(boxes, slot, occurrence = 1) {
   if (!boxes || !slot) return null;
-  if (boxes[slot]) return boxes[slot];
-  const lower = slot.toLowerCase();
+  const occ = Number.isInteger(occurrence) && occurrence >= 1 ? occurrence : 1;
+  const key = occ > 1 ? `${slot}#${occ}` : slot;
+  if (boxes[key]) return boxes[key];
+  const lower = key.toLowerCase();
   if (boxes[lower]) return boxes[lower];
-  for (const [key, val] of Object.entries(boxes)) {
-    if (key.toLowerCase() === lower) return val;
+  for (const [boxKey, val] of Object.entries(boxes)) {
+    if (boxKey.toLowerCase() === lower) return val;
   }
   return null;
+}
+
+// Parse "slot" or "slot#N" into a slot name and optional explicit 1-based occurrence
+function parseHighlightPiece(rawPiece) {
+  if (typeof rawPiece !== 'string') return { slot: null, explicitOccurrence: null, hasHash: false };
+  const trimmed = rawPiece.trim();
+  if (!trimmed) return { slot: null, explicitOccurrence: null, hasHash: false };
+  const hashIdx = trimmed.indexOf('#');
+  if (hashIdx === -1) {
+    return { slot: trimmed, explicitOccurrence: null, hasHash: false };
+  }
+  const slot = trimmed.slice(0, hashIdx).trim();
+  if (!slot) return { slot: null, explicitOccurrence: null, hasHash: false };
+  const occText = trimmed.slice(hashIdx + 1).trim();
+  const parsed = /^\d+$/.test(occText) ? Number(occText) : NaN;
+  return {
+    slot,
+    explicitOccurrence: Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : null,
+    hasHash: true,
+  };
+}
+
+function countSlotPieces(look, slot) {
+  if (!look || !Array.isArray(look.pieces) || !slot) return 0;
+  let count = 0;
+  for (const piece of look.pieces) {
+    if (piece && piece.slot === slot) count += 1;
+  }
+  return count;
 }
 
 function prefersReducedMotion() {
@@ -380,6 +411,7 @@ export function mountStore(root, { onTalk } = {}) {
     subtitleMeta: { raw: '', cleanSubtitle: '', occasion: '', budget: null },
     pickedOutfit: null,
     highlightedSlot: null,
+    highlightedOccurrence: null,
     bagCount: 0,
     bagData: null,
     bagOpen: false,
@@ -1006,7 +1038,11 @@ export function mountStore(root, { onTalk } = {}) {
     }
   }
 
-  function buildProductCard(piece, outfitNumber, { compact = false, pointed = false, onSelect = null } = {}) {
+  function buildProductCard(
+    piece,
+    outfitNumber,
+    { compact = false, pointed = false, occurrence = null, onSelect = null } = {}
+  ) {
     const item = piece?.item || {};
     const imgWidth = compact ? 420 : 600;
     const imgUrl = sized(item.image, imgWidth);
@@ -1034,6 +1070,7 @@ export function mountStore(root, { onTalk } = {}) {
         dataset: {
           itemId: item.id || '',
           slot: piece?.slot || '',
+          occurrence,
           outfit: outfitNumber,
         },
         onClick: (e) => {
@@ -1660,6 +1697,7 @@ export function mountStore(root, { onTalk } = {}) {
     leaveSearchView();
     state.pickedOutfit = null;
     state.highlightedSlot = null;
+    state.highlightedOccurrence = null;
     activePickedRefs = null;
     renderHomeView();
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1863,6 +1901,7 @@ export function mountStore(root, { onTalk } = {}) {
     leaveSearchView();
     state.pickedOutfit = null;
     state.highlightedSlot = null;
+    state.highlightedOccurrence = null;
     activePickedRefs = null;
     state.view = 'boutique';
 
@@ -2083,12 +2122,14 @@ export function mountStore(root, { onTalk } = {}) {
     boardFrame.style.height = '';
   }
 
-  function updateBoardPointerRing(refs, media, slot) {
+  function updateBoardPointerRing(refs, media, slot, occurrence = 1) {
     if (!refs || !refs.pointerRing) return;
     const ring = refs.pointerRing;
     const normalized = typeof slot === 'string' && slot.trim() ? slot.trim() : null;
     const box =
-      media && media.collageUrl && normalized ? getBoxForSlot(media.collageBoxes, normalized) : null;
+      media && media.collageUrl && normalized
+        ? getBoxForSlot(media.collageBoxes, normalized, occurrence)
+        : null;
 
     if (!box) {
       ring.classList.remove('is-visible');
@@ -2541,7 +2582,7 @@ export function mountStore(root, { onTalk } = {}) {
       tryOnStatusEl.hidden = true;
     }
 
-    updateBoardPointerRing(panelRefs, media, state.highlightedSlot);
+    updateBoardPointerRing(panelRefs, media, state.highlightedSlot, state.highlightedOccurrence);
   }
 
   function isElementInView(node) {
@@ -2561,6 +2602,8 @@ export function mountStore(root, { onTalk } = {}) {
     const look = state.outfits.get(state.pickedOutfit);
     if (!look) {
       state.pickedOutfit = null;
+      state.highlightedSlot = null;
+      state.highlightedOccurrence = null;
       if (state.outfits.size > 0) {
         state.view = 'looks';
         renderLooksView();
@@ -2793,15 +2836,27 @@ export function mountStore(root, { onTalk } = {}) {
       renderStrip
     );
 
+    const slotCounts = new Map();
+    const piecesWithOccurrence = (look.pieces || []).map((piece) => {
+      const slot = piece?.slot || '';
+      const occurrence = slot ? (slotCounts.get(slot) || 0) + 1 : 1;
+      if (slot) slotCounts.set(slot, occurrence);
+      return { piece, occurrence };
+    });
+
     let hasActiveRow = false;
-    const pieceRows = (look.pieces || []).map((piece) => {
-      const isPointed = Boolean(state.highlightedSlot && piece.slot === state.highlightedSlot);
+    const pieceRows = piecesWithOccurrence.map(({ piece, occurrence }) => {
+      const isPointed = Boolean(
+        state.highlightedSlot &&
+          piece.slot === state.highlightedSlot &&
+          occurrence === state.highlightedOccurrence
+      );
       if (isPointed) hasActiveRow = true;
       return el(
         'li',
         {
           className: `piece-note-item${isPointed ? ' is-pointed' : ''}`,
-          dataset: { slot: piece.slot || '', outfit: look.number },
+          dataset: { slot: piece.slot || '', occurrence, outfit: look.number },
         },
         el(
           'div',
@@ -2871,14 +2926,19 @@ export function mountStore(root, { onTalk } = {}) {
       notesCol
     );
 
-    const piecesCount = (look.pieces || []).length;
+    const piecesCount = piecesWithOccurrence.length;
     const shopGrid = el(
       'div',
       { className: 'shop-look-grid' },
-      (look.pieces || []).map((piece) =>
+      piecesWithOccurrence.map(({ piece, occurrence }) =>
         buildProductCard(piece, look.number, {
           compact: false,
-          pointed: Boolean(state.highlightedSlot && piece.slot === state.highlightedSlot),
+          pointed: Boolean(
+            state.highlightedSlot &&
+              piece.slot === state.highlightedSlot &&
+              occurrence === state.highlightedOccurrence
+          ),
+          occurrence,
         })
       )
     );
@@ -2923,24 +2983,30 @@ export function mountStore(root, { onTalk } = {}) {
     updateNavActive();
   }
 
-  function applyPointerInPlace(slot) {
+  function applyPointerInPlace(slot, occurrence = 1) {
     if (!activePickedRefs) return;
     const normalized = typeof slot === 'string' && slot.trim() ? slot.trim() : null;
+    const targetOcc = normalized && Number.isInteger(occurrence) && occurrence >= 1 ? occurrence : 1;
+    const targetOccStr = String(targetOcc);
 
     for (const card of activePickedRefs.shopGrid.querySelectorAll('.product-card')) {
-      const match = Boolean(normalized && card.dataset.slot === normalized);
+      const match = Boolean(
+        normalized && card.dataset.slot === normalized && card.dataset.occurrence === targetOccStr
+      );
       card.classList.toggle('is-pointed', match);
     }
 
     let activeRow = null;
     for (const row of activePickedRefs.pieceNotesList.querySelectorAll('.piece-note-item')) {
-      const match = Boolean(normalized && row.dataset.slot === normalized);
+      const match = Boolean(
+        normalized && row.dataset.slot === normalized && row.dataset.occurrence === targetOccStr
+      );
       row.classList.toggle('is-pointed', match);
       if (match) activeRow = row;
     }
     activePickedRefs.pieceNotesList.classList.toggle('has-active', Boolean(activeRow));
 
-    updateBoardPointerRing(activePickedRefs, getMedia(activePickedRefs.outfit), normalized);
+    updateBoardPointerRing(activePickedRefs, getMedia(activePickedRefs.outfit), normalized, targetOcc);
 
     if (activeRow) {
       scrollRowIntoList(activePickedRefs.pieceNotesList, activeRow);
@@ -4041,6 +4107,7 @@ export function mountStore(root, { onTalk } = {}) {
         state.media.clear();
         state.pickedOutfit = null;
         state.highlightedSlot = null;
+        state.highlightedOccurrence = null;
         activePickedRefs = null;
         state.subtitleMeta = { raw: '', cleanSubtitle: '', occasion: '', budget: null };
       }
@@ -4061,6 +4128,7 @@ export function mountStore(root, { onTalk } = {}) {
         state.view = 'looks';
         state.pickedOutfit = null;
         state.highlightedSlot = null;
+        state.highlightedOccurrence = null;
         activePickedRefs = null;
         setHasProducts();
         renderLooksView();
@@ -4081,21 +4149,40 @@ export function mountStore(root, { onTalk } = {}) {
 
       leaveSearchView();
 
-      const nextSlot =
-        typeof payload.piece === 'string' && payload.piece.trim() ? payload.piece.trim() : null;
-      const samePicked =
-        state.view === 'picked' &&
-        state.pickedOutfit === payload.outfit &&
-        activePickedRefs &&
-        activePickedRefs.outfit === payload.outfit;
+      const look = state.outfits.get(payload.outfit);
+      const parsed = parseHighlightPiece(payload.piece);
+      const nextSlot = parsed.slot;
+      const sameLook = state.view === 'picked' && state.pickedOutfit === payload.outfit;
+      const samePicked = sameLook && activePickedRefs && activePickedRefs.outfit === payload.outfit;
+
+      // Resolve 1-based slot occurrence: explicit "slot#N", cycle on repeated plain slot, else 1
+      let nextOccurrence = null;
+      if (nextSlot) {
+        const slotCount = countSlotPieces(look, nextSlot);
+        if (parsed.hasHash) {
+          nextOccurrence =
+            parsed.explicitOccurrence !== null && parsed.explicitOccurrence <= slotCount
+              ? parsed.explicitOccurrence
+              : 1;
+        } else if (sameLook && state.highlightedSlot === nextSlot && slotCount > 1) {
+          const currentOcc =
+            Number.isInteger(state.highlightedOccurrence) && state.highlightedOccurrence >= 1
+              ? state.highlightedOccurrence
+              : 1;
+          nextOccurrence = currentOcc >= slotCount ? 1 : currentOcc + 1;
+        } else {
+          nextOccurrence = 1;
+        }
+      }
 
       state.view = 'picked';
       state.pickedOutfit = payload.outfit;
       state.highlightedSlot = nextSlot;
+      state.highlightedOccurrence = nextOccurrence;
       setHasProducts();
 
       if (samePicked) {
-        applyPointerInPlace(nextSlot);
+        applyPointerInPlace(nextSlot, nextOccurrence);
       } else {
         renderPickedView();
         window.scrollTo({ top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
@@ -4141,6 +4228,7 @@ export function mountStore(root, { onTalk } = {}) {
 
       if (state.pickedOutfit === payload.outfit) {
         state.highlightedSlot = null;
+        state.highlightedOccurrence = null;
       }
 
       if (state.view === 'looks') {
@@ -4263,6 +4351,7 @@ export function mountStore(root, { onTalk } = {}) {
       leaveSearchView();
       state.pickedOutfit = null;
       state.highlightedSlot = null;
+      state.highlightedOccurrence = null;
       activePickedRefs = null;
       if (state.outfits.size > 0) {
         state.view = 'looks';
@@ -4322,6 +4411,7 @@ export function mountStore(root, { onTalk } = {}) {
         state.view = 'picked';
         state.pickedOutfit = payload.outfit;
         state.highlightedSlot = null;
+        state.highlightedOccurrence = null;
         renderPickedView({ deferReveal: !wasAlreadyShowingTryOn });
         window.scrollTo({ top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
       } else {
@@ -4339,7 +4429,7 @@ export function mountStore(root, { onTalk } = {}) {
         }
       }
 
-      return { ok: true };
+      return { ok: true, kind: media.activeRender || chosenKind };
     }),
 
     // -----------------------------------------------------------------------
