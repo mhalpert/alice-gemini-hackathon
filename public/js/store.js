@@ -6285,7 +6285,7 @@ export function mountStore(root, { onTalk, isLive, tellAlice } = {}) {
     if (!order) return;
 
     const footerNodes = [];
-    if (order.total) {
+    if (order.total && !(order.needs_sign_in && order.stores.length === 0)) {
       footerNodes.push(
         el(
           'div',
@@ -6417,6 +6417,14 @@ export function mountStore(root, { onTalk, isLive, tellAlice } = {}) {
                   rel: 'noopener noreferrer',
                 },
                 'Connect Shop Pay'
+              )
+            : null,
+          // Before sign-in there is no order to list yet, so say what happens next
+          order.stores.length === 0
+            ? el(
+                'p',
+                { className: 'order-signin-copy' },
+                'Your bag is safe. When your phone says you are connected, tell Alice "I\'m signed in" and your order appears here.'
               )
             : null
         )
