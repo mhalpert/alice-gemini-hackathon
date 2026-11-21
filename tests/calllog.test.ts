@@ -7,7 +7,9 @@ import {
   MAX_STRING_LEN,
   calllog,
   getCallLogPath,
+  redactSecrets,
   sanitizeRoomName,
+  sanitizeValue,
   startCallLog,
 } from '../src/calllog.ts';
 import { isBadEvent, runCli } from '../scripts/calllog.ts';
@@ -214,4 +216,172 @@ test('scripts/calllog.ts reader lists calls, filters states/errors, and prefixes
     assert.match(errorsView.output, /tool_error/);
     assert.match(errorsView.output, /custom_ev/);
   });
+});
+
+function withEnv(overrides: Record<string, string | undefined>, fn: () => void): void {
+  const prev = new Map<string, string | undefined>();
+  for (const [k, v] of Object.entries(overrides)) {
+    prev.set(k, process.env[k]);
+    if (v === undefined) {
+      delete process.env[k];
+    } else {
+      process.env[k] = v;
+    }
+  }
+  try {
+    fn();
+  } finally {
+    for (const [k, v] of prev.entries()) {
+      if (v === undefined) {
+        delete process.env[k];
+      } else {
+        process.env[k] = v;
+      }
+    }
+  }
+}
+
+test('redactSecrets masks configured env vars (>= 12 chars), Google keys, query params, and JWTs', () => {
+  const fakeEnv = {
+    GOOGLE_API_KEY: 'fake-google-' + 'g'.repeat(12),
+    GOOGLE_TRYON_API_KEY: 'fake-tryon-' + 't'.repeat(12),
+    LIVEKIT_API_SECRET: 'fake-lk-sec-' + 's'.repeat(12),
+    TAVUS_API_KEY: 'fake-tavus-' + 'k'.repeat(12),
+    ALICE_PASSCODE: 'pass.[a-z]+$' + 'p'.repeat(6),
+  };
+
+  withEnv(fakeEnv, () => {
+    for (const [name, val] of Object.entries(fakeEnv)) {
+      const text = `first=${val} second=${val}`;
+      assert.equal(redactSecrets(text), `first=[redacted:${name}] second=[redacted:${name}]`);
+    }
+  });
+
+  // After env vars are restored, the same fake values (without key-like patterns) are not masked.
+  assert.equal(redactSecrets(fakeEnv.TAVUS_API_KEY), fakeEnv.TAVUS_API_KEY);
+
+  // Google-key shape
+  const fakeGoogleKey = 'AIza' + 'x'.repeat(35);
+  assert.equal(
+    redactSecrets(`upstream failed with ${fakeGoogleKey} and ${fakeGoogleKey}`),
+    'upstream failed with [redacted:google-key] and [redacted:google-key]',
+  );
+
+  // Key-bearing query parameters
+  const qSecret = 'sec' + '9'.repeat(16);
+  assert.equal(
+    redactSecrets(`https://api.example.com/v1?key=${qSecret}&alt=json`),
+    'https://api.example.com/v1?key=[redacted]&alt=json',
+  );
+  assert.equal(
+    redactSecrets(`https://api.example.com/v1?foo=1&api_key=${qSecret}&bar=2`),
+    'https://api.example.com/v1?foo=1&api_key=[redacted]&bar=2',
+  );
+  assert.equal(
+    redactSecrets(`https://api.example.com/v1?APIKEY=${qSecret}`),
+    'https://api.example.com/v1?APIKEY=[redacted]',
+  );
+  assert.equal(
+    redactSecrets(`https://api.example.com/v1?access_token=${qSecret} "next"`),
+    'https://api.example.com/v1?access_token=[redacted] "next"',
+  );
+  assert.equal(
+    redactSecrets(`https://api.example.com/v1?room=r1&token=${qSecret}&v=1`),
+    'https://api.example.com/v1?room=r1&token=[redacted]&v=1',
+  );
+
+  // JWT
+  const fakeJwt = ['eyJ' + 'a'.repeat(14), 'eyJ' + 'b'.repeat(14), 'c'.repeat(16)].join('.');
+  assert.equal(
+    redactSecrets(`Authorization: Bearer ${fakeJwt}`),
+    'Authorization: Bearer [redacted:jwt]',
+  );
+});
+
+test('redactSecrets ignores env values shorter than 12 chars and masks 12+ char values', () => {
+  const shortVal = 'pass' + '1'.repeat(7); // 11 chars
+  assert.equal(shortVal.length, 11);
+  withEnv({ ALICE_PASSCODE: shortVal }, () => {
+    const msg = `entered ${shortVal} on screen`;
+    assert.equal(redactSecrets(msg), msg);
+  });
+
+  const minVal = 'pass' + '2'.repeat(8); // 12 chars
+  assert.equal(minVal.length, 12);
+  withEnv({ ALICE_PASSCODE: minVal }, () => {
+    const msg = `entered ${minVal} on screen`;
+    assert.equal(redactSecrets(msg), 'entered [redacted:ALICE_PASSCODE] on screen');
+  });
+});
+
+test('redactSecrets returns ordinary strings unchanged', () => {
+  const samples = [
+    'https://cdn.shopify.com/s/files/1/0000/1111/products/coat.jpg?v=123&width=600',
+    '/tryon/tryon-abc123def456.jpg',
+    'gid://shopify/ProductVariant/123',
+    'alice-room_01',
+    'The key insight is that the token budget stayed low.',
+  ];
+  for (const sample of samples) {
+    assert.equal(redactSecrets(sample), sample);
+  }
+});
+
+test('sanitizeValue masks secrets in nested objects, arrays, Error message, and Error stack while preserving keys', () => {
+  const fakeGoogleKey = 'AIza' + 'z'.repeat(35);
+  const fakeJwt = ['eyJ' + 'd'.repeat(12), 'eyJ' + 'e'.repeat(12), 'f'.repeat(12)].join('.');
+  const err = new Error(`request failed: https://generativelanguage.googleapis.com/v1?key=${fakeGoogleKey}`);
+  err.stack = `Error: ${fakeGoogleKey}\n    at fetch (https://example.com?token=${fakeJwt}:1:1)`;
+
+  const sanitized = sanitizeValue({
+    keyNameUnchanged: {
+      deep: `key=${fakeGoogleKey}`,
+      list: [fakeJwt, `https://example.com/x?api_key=${'k'.repeat(16)}&ok=1`],
+    },
+    err,
+  }) as {
+    keyNameUnchanged: { deep: string; list: string[] };
+    err: { message: string; stack?: string };
+  };
+
+  assert.equal(sanitized.keyNameUnchanged.deep, 'key=[redacted:google-key]');
+  assert.equal(sanitized.keyNameUnchanged.list[0], '[redacted:jwt]');
+  assert.equal(sanitized.keyNameUnchanged.list[1], 'https://example.com/x?api_key=[redacted]&ok=1');
+  assert.ok(!sanitized.err.message.includes('AIza'));
+  assert.ok(sanitized.err.message.includes('?key=[redacted]'));
+  assert.ok(sanitized.err.stack && !sanitized.err.stack.includes('AIza'));
+  assert.ok(sanitized.err.stack && !sanitized.err.stack.includes('eyJ'));
+});
+
+test('calllog end-to-end leaves no AIza key in written JSONL file', async () => {
+  await withTempLogDir(() => {
+    const fakeGoogleKey = 'AIza' + 'm'.repeat(35);
+    calllog('redact-e2e-room', 'upstream_error', {
+      url: `https://generativelanguage.googleapis.com/v1beta/models?key=${fakeGoogleKey}`,
+      error: new Error(`403 for ${fakeGoogleKey}`),
+    });
+
+    const raw = readFileSync(getCallLogPath('redact-e2e-room'), 'utf8');
+    assert.ok(!raw.includes('AIza'), `expected no AIza in log file, got: ${raw}`);
+    const parsed = JSON.parse(raw.trim()) as {
+      url: string;
+      error: { message: string; stack?: string };
+    };
+    assert.equal(parsed.url, 'https://generativelanguage.googleapis.com/v1beta/models?key=[redacted]');
+    assert.equal(parsed.error.message, '403 for [redacted:google-key]');
+  });
+});
+
+test('sanitizeValue handles a 5 MB string quickly and truncates to MAX_STRING_LEN', () => {
+  const fakeGoogleKey = 'AIza' + 'q'.repeat(35);
+  const big = `prefix ${fakeGoogleKey} ` + 'a'.repeat(5 * 1024 * 1024);
+
+  const start = performance.now();
+  const result = sanitizeValue(big) as string;
+  const elapsedMs = performance.now() - start;
+
+  assert.equal(result.length, MAX_STRING_LEN);
+  assert.ok(result.startsWith('prefix [redacted:google-key] '));
+  assert.ok(!result.includes('AIza'));
+  assert.ok(elapsedMs < 500, `expected fast redaction of 5 MB string, took ${elapsedMs.toFixed(1)}ms`);
 });
