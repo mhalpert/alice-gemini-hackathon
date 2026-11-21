@@ -60,13 +60,21 @@ test('ALICE_SYSTEM_PROMPT word count is within 450 to 1100 words and avoids tabl
 });
 
 test('ALICE_SYSTEM_PROMPT encodes waiting, bag, camera-off try-on, and weather guidance', () => {
-  // 1. Waiting on outfits: one short line, at most one useful style question, then stay quiet.
+  // 1. Waiting on slow tools: never silent, tell bit in own words, stop on result / shopper speech.
   assert.match(ALICE_SYSTEM_PROMPT, /pulling looks together/i);
   assert.match(ALICE_SYSTEM_PROMPT, /at most one useful style question/i);
-  assert.match(ALICE_SYSTEM_PROMPT, /stay quiet until/i);
-  assert.match(ALICE_SYSTEM_PROMPT, /no small talk|never fill silence with small talk/i);
-  assert.doesNotMatch(ALICE_SYSTEM_PROMPT, /keep talking while it runs/i);
-  assert.doesNotMatch(ALICE_SYSTEM_PROMPT, /keep the conversation moving/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never leave silence while a slow tool works/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /tell the bit naturally in your own words/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never read it out word for word/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never claim anything is ready/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never describe looks, prices, or products/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never ask a question that needs an answer/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /if the shopper talks during a bit, stop and answer them/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never return to an unfinished bit/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /finish your sentence and switch cleanly/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never start a new bit after a result arrives/i);
+  assert.doesNotMatch(ALICE_SYSTEM_PROMPT, /stay quiet until/i);
+  assert.doesNotMatch(ALICE_SYSTEM_PROMPT, /no small talk|never fill silence with small talk/i);
 
   // 2. After add_to_bag: plain bag facts, never say processing, never pitch another look.
   assert.match(ALICE_SYSTEM_PROMPT, /state plainly what is in the bag and the total/i);

@@ -441,8 +441,8 @@ test('build_outfits requires department, caps budget at $10000, streams looks, s
     fakeToolOpts('b1'),
   );
 
-  // Slow working note sent immediately.
-  assert.equal(notes.filter((n) => n.name === 'build_outfits').length, 2);
+  // Fast library result (< 2s) and missing-department early return skip working notes / bits.
+  assert.equal(notes.filter((n) => n.name === 'build_outfits').length, 0);
   // Budget capped at 10000 and room forwarded to buildOutfits alongside onOutfit.
   assert.equal(capturedBrief!.budget_usd, 10_000);
   assert.equal(capturedBuildOpts?.room, 'r-build');
@@ -2600,4 +2600,152 @@ test('add_to_bag enforces $10,000 running bag ceiling across the call without do
   assert.equal(bag1LiveJump.startsWith('NOT DONE:'), true);
   assert.match(bag1LiveJump, /\$10500/);
   assert.equal(calls.some((c) => c.action === 'bagReady'), false);
+});
+
+test('slow tools send working notes with bits after 2s, skip fast results and ready show_on_me, and notify slow hooks', async () => {
+  const clock = createFakeClock();
+  const logs: RecordedLog[] = [];
+  const notes: WorkingNoteParams[] = [];
+  const { page } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-slow-bits', log: () => {} });
+
+  let resolveSlowBuild!: (res: BuildResult) => void;
+  const slowBuildGate = new Promise<BuildResult>((r) => {
+    resolveSlowBuild = r;
+  });
+  let resolveTryOn2!: (res: { url: string; path: string; ms: number; id: string }) => void;
+  const tryOn2Gate = new Promise<{ url: string; path: string; ms: number; id: string }>((r) => {
+    resolveTryOn2 = r;
+  });
+  let resolveSwap!: (res: { outfit: Outfit; piece: Outfit['pieces'][0] }) => void;
+  const swapGate = new Promise<{ outfit: Outfit; piece: Outfit['pieces'][0] }>((r) => {
+    resolveSwap = r;
+  });
+
+  const sample = makeSampleOutfits();
+  const tools = createAgentTools({
+    room: 'r-slow-bits',
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+    sendWorkingNote: (n) => {
+      notes.push(n);
+      return true;
+    },
+    page,
+    state,
+    deps: makeFakeDeps({
+      async buildOutfits(_brief, opts) {
+        const res = await slowBuildGate;
+        res.outfits.forEach((o, i) => opts?.onOutfit?.(o, i));
+        return res;
+      },
+      async tryOn(_jpeg, outfit) {
+        if (outfit.number === 1) {
+          return { url: 'https://media.local/ready-1.jpg', path: '', ms: 5, id: 't1' };
+        }
+        return tryOn2Gate;
+      },
+      async swapPiece() {
+        return swapGate;
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+
+  // 1) Slow build_outfits (> 2s) sends working note with bit and records usedBitIds in state.
+  const buildPromise = tools.build_outfits.execute(
+    { occasion: 'rooftop', budget_usd: 250 },
+    fakeToolOpts('b-slow'),
+  );
+  await clock.advance(1_999);
+  assert.equal(notes.length, 0);
+  await clock.advance(1);
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0]!.name, 'build_outfits');
+  assert.match(notes[0]!.note, /While this runs, tell this in your own words:/);
+  assert.equal(state.get().usedBitIds.length, 1);
+
+  resolveSlowBuild({
+    outfits: structuredClone(sample),
+    source: 'live',
+    timing: { first_outfit_ms: 2_500, total_ms: 3_000 },
+    problems: [],
+  });
+  await buildPromise;
+  await flushMicrotasks();
+
+  // 2) show_on_me when try-on is ALREADY ready (Look 1) sends NO working note / bit.
+  const show1Res = await tools.show_on_me.execute({ outfit: 1 }, fakeToolOpts('s-ready'));
+  assert.match(show1Res, /revealed/i);
+  await clock.advance(5_000);
+  assert.equal(notes.length, 1, 'ready show_on_me must never send a working note or bit');
+
+  // 3) show_on_me when try-on is STILL rendering (Look 2) sends a different bit after 2s.
+  const show2Promise = tools.show_on_me.execute({ outfit: 2 }, fakeToolOpts('s-slow'));
+  await flushMicrotasks();
+  await clock.advance(2_000);
+  assert.equal(notes.length, 2);
+  assert.equal(notes[1]!.name, 'show_on_me');
+  assert.match(notes[1]!.note, /While this runs, tell this in your own words:/);
+  assert.equal(state.get().usedBitIds.length, 2);
+  assert.notEqual(state.get().usedBitIds[0], state.get().usedBitIds[1]);
+
+  resolveTryOn2({ url: 'https://media.local/ready-2.jpg', path: '', ms: 2_500, id: 't2' });
+  await show2Promise;
+
+  // 4) Fast swap_piece (< 2s) cancels working note and consumes NO bit.
+  const swapPromise = tools.swap_piece.execute(
+    { outfit: 1, slot: 'shoes', request: 'loafers' },
+    fakeToolOpts('sw-fast'),
+  );
+  await clock.advance(1_000);
+  resolveSwap({
+    outfit: structuredClone(sample[0]!),
+    piece: structuredClone(sample[0]!.pieces[2]!),
+  });
+  await swapPromise;
+  await clock.advance(5_000);
+  assert.equal(notes.length, 2, 'fast swap_piece must not send a working note or bit');
+  assert.equal(state.get().usedBitIds.length, 2);
+
+  // 5) onToolStart / onToolEnd / onSlowToolStart / onSlowToolEnd fire cleanly for add_to_bag and search_products.
+  const events: string[] = [];
+  const hookedTools = createAgentTools({
+    room: 'r-hooks',
+    log: () => {},
+    page,
+    state: createCallStateStore({ roomName: 'r-hooks', log: () => {} }),
+    onToolStart: (ev) => events.push(`start:${ev.name}`),
+    onToolEnd: (ev) => events.push(`end:${ev.name}`),
+    onSlowToolStart: (ev) => events.push(`slow_start:${ev.name}`),
+    onSlowToolEnd: (ev) => events.push(`slow_end:${ev.name}`),
+    deps: makeFakeDeps({
+      async searchProducts() {
+        return { items: [makeItem()], source: 'live', ms: 10 };
+      },
+    }),
+  });
+
+  await hookedTools.set_department.execute({ department: 'men' }, fakeToolOpts('hd1'));
+  await hookedTools.build_outfits.execute({ occasion: 'dinner', budget_usd: 200 }, fakeToolOpts('hb1'));
+  await hookedTools.search_products.execute({ query: 'blazer' }, fakeToolOpts('hs1'));
+  await hookedTools.add_to_bag.execute({ outfit: 1, sizes: { top: 'M', shoes: '10' } }, fakeToolOpts('hbag1'));
+
+  assert.ok(events.includes('slow_start:build_outfits'));
+  assert.ok(events.includes('slow_end:build_outfits'));
+  assert.ok(events.includes('slow_start:search_products'));
+  assert.ok(events.includes('slow_end:search_products'));
+  assert.ok(events.includes('slow_start:add_to_bag'));
+  assert.ok(events.includes('slow_end:add_to_bag'));
+  assert.ok(events.includes('start:set_department'));
+  assert.ok(events.includes('end:set_department'));
+  assert.equal(events.includes('slow_start:set_department'), false);
+
+  const fillerLogs = logs.filter((l) => l.ev === 'filler_bit');
+  assert.equal(fillerLogs.length, 2);
+  assert.equal(fillerLogs[0]!.data?.tool, 'build_outfits');
+  assert.equal(fillerLogs[1]!.data?.tool, 'show_on_me');
 });
