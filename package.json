@@ -14,6 +14,7 @@
     "serve": "node --watch server.ts",
     "dev": "python3 -m http.server 5173 --directory public",
     "calllog": "node scripts/calllog.ts",
+    "callstats": "node scripts/callstats.ts",
     "agent": "node --env-file-if-exists=.env.local src/agent/worker.ts dev",
     "agent:start": "node --env-file-if-exists=.env.local src/agent/worker.ts start",
     "cert": "node scripts/make-cert.mjs",
