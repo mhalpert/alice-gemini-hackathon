@@ -10,6 +10,7 @@
 import { readFileSync } from 'node:fs';
 import type { Brief, BuildResult, Outfit, Piece } from '../types.ts';
 import type { Critique } from './critic.ts';
+import type { SwapSizes } from './swap.ts';
 import { calllog } from '../calllog.ts';
 import { wantedColour, titleHas } from './words.ts';
 
@@ -111,8 +112,9 @@ async function buildMock(brief: Brief, opts: BuildOptions = {}): Promise<BuildRe
   return result;
 }
 
+export type { SwapSizes };
 export interface SwapResult { outfit: Outfit; piece: Piece; note?: string }
-export interface SwapOptions { room?: string }
+export interface SwapOptions { room?: string; sizes?: SwapSizes }
 
 export async function swapPiece(outfit: Outfit, slot: string, request: string, brief: Brief, opts: SwapOptions = {}): Promise<SwapResult> {
   const started = performance.now();
@@ -123,7 +125,7 @@ export async function swapPiece(outfit: Outfit, slot: string, request: string, b
   if (live) {
     try {
       const { swapLive } = await import('./swap.ts');
-      const out = await swapLive(outfit, slot, request, brief);
+      const out = await swapLive(outfit, slot, request, brief, opts.sizes ? { sizes: opts.sizes } : {});
       extra = { query: out.query, tried: out.tried, price: out.piece?.item?.price, store: out.piece?.item?.store };
       result = { outfit: out.outfit, piece: out.piece, ...(out.note ? { note: out.note } : {}) };
     } catch (err) {
@@ -134,7 +136,7 @@ export async function swapPiece(outfit: Outfit, slot: string, request: string, b
       extra = { error: (err as Error)?.message ?? String(err) };
     }
   } else {
-    result = await swapInner(outfit, slot, request, brief);
+    result = await swapInner(outfit, slot, request, brief, opts);
   }
   log(opts.room, 'swap_done', {
     outfit: result.outfit.number, slot, request, piece: result.piece?.item?.title,
@@ -143,7 +145,7 @@ export async function swapPiece(outfit: Outfit, slot: string, request: string, b
   return result;
 }
 
-async function swapInner(outfit: Outfit, slot: string, request: string, brief: Brief): Promise<SwapResult> {
+async function swapInner(outfit: Outfit, slot: string, request: string, brief: Brief, _opts: SwapOptions = {}): Promise<SwapResult> {
   await sleep(SWAP_MS[pace()]);
   const look = clone(outfit);
   const at = look.pieces.findIndex((p) => p.slot === slot);

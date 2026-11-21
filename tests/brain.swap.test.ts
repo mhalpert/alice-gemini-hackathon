@@ -2,6 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { swapLive, readRequest } from '../src/brain/swap.ts';
+import { swapPiece } from '../src/brain/index.ts';
 import { breaksDressCode } from '../src/brain/words.ts';
 import type { Brief, Item, Outfit, SearchResult } from '../src/types.ts';
 
@@ -149,4 +150,141 @@ test('breaksDressCode rejects novelty/printed ties at formal occasions and inter
     breaksDressCode({ title: 'Striped Silk Tie' }, 'accessory', { occasion: 'formal wedding', gender: 'men' }),
     true,
   );
+});
+
+function fakeSearchFrom(items: Item[], calls: string[] = []) {
+  return async (q: string, _g: string, opts: { maxPrice?: number }): Promise<SearchResult> => {
+    calls.push(q);
+    return { items: items.filter((i) => i.price <= (opts.maxPrice ?? Infinity)), source: 'live', ms: 1 };
+  };
+}
+
+test('"brown boots" with sizes.shoes 11 picks the in-size boot over a higher-scored out-of-size one', async () => {
+  const highScoredNo11 = item('Chelsea Boot - Brown Leather', 55, {
+    rating: 5.0, rating_count: 500, sizes: ['9', '10'],
+  });
+  const lowerScoredHas11 = item('Work Boot - Brown', 65, {
+    rating: 3.5, rating_count: 2, sizes: ['10.0', '11.0'],
+  });
+  const catalog = [highScoredNo11, lowerScoredHas11];
+
+  // Without sizes: the higher-scored boot wins (identical to today).
+  const withoutSizes = await swapLive(look, 'shoes', 'swap the black boots for brown boots', brief, {
+    search: fakeSearchFrom(catalog), rewrite: false,
+  });
+  assert.equal(withoutSizes.piece.item.id, highScoredNo11.id);
+  assert.equal(withoutSizes.note, undefined);
+
+  // With sizes.shoes '11': the in-size boot wins (11 matches 11.0 via matchSizeLabel).
+  const withSizes = await swapLive(look, 'shoes', 'swap the black boots for brown boots', brief, {
+    search: fakeSearchFrom(catalog), rewrite: false, sizes: { shoes: '11' },
+  });
+  assert.equal(withSizes.piece.item.id, lowerScoredHas11.id);
+  assert.equal(withSizes.note, undefined);
+});
+
+test('when no candidate has the requested size, returns the best candidate with an honest note', async () => {
+  const highScored = item('Chelsea Boot - Brown Leather', 55, {
+    rating: 5.0, rating_count: 500, sizes: ['8', '9', '10'],
+  });
+  const lowerScored = item('Work Boot - Brown', 65, {
+    rating: 3.5, rating_count: 2, sizes: ['7', '8'],
+  });
+  const out = await swapLive(look, 'shoes', 'swap the black boots for brown boots', brief, {
+    search: fakeSearchFrom([highScored, lowerScored]), rewrite: false, sizes: { shoes: '11' },
+  });
+  assert.equal(out.piece.item.id, highScored.id);
+  assert.equal(
+    out.note,
+    'Heads up: no shoes like that in size 11; this one is in 8, 9, 10.',
+  );
+});
+
+test('no sizes option gives the identical result to today', async () => {
+  const callsA: string[] = [];
+  const callsB: string[] = [];
+  const a = await swapLive(look, 'shoes', 'swap the black boots for brown boots', brief, {
+    search: fakeSearch(callsA), rewrite: false,
+  });
+  const b = await swapLive(look, 'shoes', 'swap the black boots for brown boots', brief, {
+    search: fakeSearch(callsB), rewrite: false, sizes: undefined,
+  });
+  assert.deepEqual(b, a);
+  assert.deepEqual(callsB, callsA);
+});
+
+test('a top swap uses sizes.top and matches canonical labels like L -> Large', async () => {
+  const highScoredNoL = item('Oxford Shirt - White', 40, {
+    rating: 5.0, rating_count: 300, sizes: ['Small', 'Medium'],
+  });
+  const inSizeL = item('Cotton Shirt - White', 45, {
+    rating: 3.5, rating_count: 2, sizes: ['Medium', 'Large'],
+  });
+  const out = await swapLive(look, 'top', 'a white shirt', brief, {
+    search: fakeSearchFrom([highScoredNoL, inSizeL]), rewrite: false, sizes: { top: 'L', shoes: '11' },
+  });
+  assert.equal(out.piece.item.id, inSizeL.id);
+  assert.equal(out.note, undefined);
+});
+
+test('bottom swap uses sizes.bottom (34 matches 34x32), unknown sizes rank below known matches, and accessory ignores sizes', async () => {
+  const no34 = item('Slim Chino - Navy', 35, { rating: 5.0, rating_count: 300, sizes: ['30x32', '32x32'] });
+  const unknownSizes = item('Tailored Chino - Navy', 36, { rating: 5.0, rating_count: 400, sizes: [] });
+  const has34 = item('Stretch Chino - Navy', 40, { rating: 3.5, rating_count: 2, sizes: ['32x32', '34x32'] });
+
+  // Known match beats both out-of-size and unknown-size higher-scored items.
+  const knownWins = await swapLive(look, 'bottom', 'navy chinos', brief, {
+    search: fakeSearchFrom([no34, unknownSizes, has34]), rewrite: false, sizes: { bottom: '34' },
+  });
+  assert.equal(knownWins.piece.item.id, has34.id);
+  assert.equal(knownWins.note, undefined);
+
+  // When no known match exists, unknown-size candidate is treated as a match (no heads-up note).
+  const unknownWins = await swapLive(look, 'bottom', 'navy chinos', brief, {
+    search: fakeSearchFrom([no34, unknownSizes]), rewrite: false, sizes: { bottom: '34' },
+  });
+  assert.equal(unknownWins.piece.item.id, unknownSizes.id);
+  assert.equal(unknownWins.note, undefined);
+
+  // Accessory slot ignores sizes completely.
+  const lookWithAcc: Outfit = {
+    ...look,
+    pieces: [...look.pieces, { slot: 'accessory', why: '', item: item('Leather Belt - Black', 15, { sizes: ['M'] }) }],
+    total: 150,
+  };
+  const accItem = item('Leather Belt - Brown', 15, { sizes: ['S'] });
+  const accOut = await swapLive(lookWithAcc, 'accessory', 'brown belt', brief, {
+    search: fakeSearchFrom([accItem]), rewrite: false, sizes: { top: 'XL', bottom: '38', shoes: '13' },
+  });
+  assert.equal(accOut.piece.item.id, accItem.id);
+  assert.equal(accOut.note, undefined);
+
+  // Layer uses sizes.top.
+  const lookWithLayer: Outfit = {
+    ...look,
+    pieces: [...look.pieces, { slot: 'layer', why: '', item: item('Bomber Jacket - Black', 15, { sizes: ['L'] }) }],
+    total: 150,
+  };
+  const layerNoL = item('Denim Jacket - Navy', 15, { rating: 5.0, rating_count: 300, sizes: ['S', 'M'] });
+  const layerHasL = item('Field Jacket - Navy', 15, { rating: 3.5, rating_count: 2, sizes: ['L', 'XL'] });
+  const layerOut = await swapLive(lookWithLayer, 'layer', 'navy jacket', brief, {
+    search: fakeSearchFrom([layerNoL, layerHasL]), rewrite: false, sizes: { top: 'L' },
+  });
+  assert.equal(layerOut.piece.item.id, layerHasL.id);
+  assert.equal(layerOut.note, undefined);
+});
+
+test('mock swapPiece accepts sizes option and ignores it', async () => {
+  const prevBrain = process.env.ALICE_BRAIN;
+  const prevPace = process.env.ALICE_MOCK_PACE;
+  process.env.ALICE_BRAIN = 'mock';
+  process.env.ALICE_MOCK_PACE = '0';
+  try {
+    const a = await swapPiece(look, 'shoes', 'brown', brief);
+    const b = await swapPiece(look, 'shoes', 'brown', brief, { sizes: { shoes: '15' } });
+    assert.deepEqual(b, a);
+  } finally {
+    if (prevBrain === undefined) delete process.env.ALICE_BRAIN; else process.env.ALICE_BRAIN = prevBrain;
+    if (prevPace === undefined) delete process.env.ALICE_MOCK_PACE; else process.env.ALICE_MOCK_PACE = prevPace;
+  }
 });
