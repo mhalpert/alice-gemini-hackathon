@@ -585,17 +585,47 @@ export interface TryOnInspectorResult {
   fix: string;
 }
 
+export type TryOnCheckPath = 'pass' | 'redo' | 'redo_skipped' | 'inspector_overruled';
+
 export interface TryOnCheck {
   gate: TryOnGateScores | null;
   inspector: TryOnInspectorResult | null;
+  inspector_pending?: boolean;
+  redo_skipped?: 'late' | 'cap';
+  path: TryOnCheckPath;
+  correction?: string;
   attempts: 1 | 2;
   passed: boolean;
   ms_gate: number;
   ms_inspector: number;
+  ms_total: number;
 }
 
 export const GATE_PASS_THRESHOLD = 0.6;
 export const GATE_INSPECT_THRESHOLD = 0.7;
+export const DEFAULT_TRYON_CAP_MS = 40_000;
+export const DEFAULT_LATE_FIRST_IMAGE_MS = 26_000;
+
+export function buildGateCorrection(gate: TryOnGateScores): string {
+  const lines: string[] = [];
+  if (gate.same_person < GATE_PASS_THRESHOLD) {
+    lines.push(
+      'The person must be exactly the shopper in Image 0: same face, hair, skin tone and build.',
+    );
+  }
+  if (gate.all_pieces < GATE_PASS_THRESHOLD) {
+    lines.push('Every listed piece must be clearly visible, including the shoes.');
+  }
+  if (gate.no_extras < GATE_PASS_THRESHOLD) {
+    lines.push(
+      'Remove anything worn or carried that is not in the list (no belts, hats, bags or jewellery unless listed).',
+    );
+  }
+  if (gate.colours_match < GATE_PASS_THRESHOLD) {
+    lines.push("Match each piece's colour to its product image and label exactly.");
+  }
+  return lines.join(' ');
+}
 
 const VALID_PROBLEM_KINDS = new Set<InspectorProblemKind>([
   'face',
@@ -687,14 +717,17 @@ export function parseInspectorReply(
 export interface VerifyLoopDeps<TImage> {
   generate: (correction: string | null) => Promise<TImage>;
   gate: (img: TImage) => Promise<{ scores: TryOnGateScores | null; ms: number }>;
-  inspect: (img: TImage, gate: TryOnGateScores) => Promise<{ result: TryOnInspectorResult | null; ms: number }>;
+  inspect: (
+    img: TImage,
+    gate: TryOnGateScores,
+  ) => Promise<{ result: TryOnInspectorResult | null; ms: number }>;
+  onBackgroundInspect?: (result: TryOnInspectorResult | null, ms: number) => void;
   verifyOff?: boolean;
   now?: () => number;
   startedAt?: number;
   capMs?: number;
+  lateFirstMs?: number;
   minGateBudgetMs?: number;
-  minInspectBudgetMs?: number;
-  minRedoBudgetMs?: number;
 }
 
 export interface VerifyLoopOut<TImage> {
@@ -707,13 +740,14 @@ export async function runTryOnVerifyLoop<TImage>(
 ): Promise<VerifyLoopOut<TImage>> {
   const now = deps.now ?? (() => Date.now());
   const startedAt = deps.startedAt ?? now();
-  const capMs = deps.capMs ?? 55_000;
-  const minGateBudgetMs = deps.minGateBudgetMs ?? 2_000;
-  const minInspectBudgetMs = deps.minInspectBudgetMs ?? 4_000;
-  const minRedoBudgetMs = deps.minRedoBudgetMs ?? 12_000;
-  const remaining = (): number => capMs - (now() - startedAt);
+  const capMs = deps.capMs ?? DEFAULT_TRYON_CAP_MS;
+  const lateFirstMs = deps.lateFirstMs ?? DEFAULT_LATE_FIRST_IMAGE_MS;
+  const minGateBudgetMs = deps.minGateBudgetMs ?? 1_500;
+  const msTotal = (): number => Math.max(0, now() - startedAt);
+  const remaining = (): number => capMs - msTotal();
 
   const img1 = await deps.generate(null);
+  const firstImgElapsed = msTotal();
 
   if (deps.verifyOff || remaining() < minGateBudgetMs) {
     return {
@@ -721,17 +755,19 @@ export async function runTryOnVerifyLoop<TImage>(
       check: {
         gate: null,
         inspector: null,
+        path: 'pass',
         attempts: 1,
         passed: true,
         ms_gate: 0,
         ms_inspector: 0,
+        ms_total: msTotal(),
       },
     };
   }
 
   const g1Res = await deps.gate(img1);
   const g1 = g1Res.scores;
-  let totalGateMs = g1Res.ms;
+  const msGate1 = g1Res.ms;
 
   // Unknown gate (timeout/error) -> pass
   if (!g1) {
@@ -740,154 +776,221 @@ export async function runTryOnVerifyLoop<TImage>(
       check: {
         gate: null,
         inspector: null,
+        path: 'pass',
         attempts: 1,
         passed: true,
-        ms_gate: totalGateMs,
+        ms_gate: msGate1,
         ms_inspector: 0,
+        ms_total: msTotal(),
       },
     };
   }
 
-  // Confident pass (>= 0.75 on every question) -> skip inspector
-  if (!needsInspector(g1)) {
+  // Gate passed (>= 0.6 on all questions)
+  if (gatePassed(g1)) {
+    // Borderline (0.6..0.7): return immediately and run inspector in background for logging only
+    if (needsInspector(g1)) {
+      void deps
+        .inspect(img1, g1)
+        .then((res) => {
+          deps.onBackgroundInspect?.(res.result, res.ms);
+        })
+        .catch(() => {});
+
+      return {
+        image: img1,
+        check: {
+          gate: g1,
+          inspector: null,
+          inspector_pending: true,
+          path: 'pass',
+          attempts: 1,
+          passed: true,
+          ms_gate: msGate1,
+          ms_inspector: 0,
+          ms_total: msTotal(),
+        },
+      };
+    }
+
     return {
       image: img1,
       check: {
         gate: g1,
         inspector: null,
+        path: 'pass',
         attempts: 1,
         passed: true,
-        ms_gate: totalGateMs,
+        ms_gate: msGate1,
         ms_inspector: 0,
+        ms_total: msTotal(),
       },
     };
   }
 
-  // Gate failed (< 0.6) or borderline (< 0.75) -> consult Gemini 4 inspector if time allows
-  if (remaining() < minInspectBudgetMs) {
+  // Gate failed (< 0.6 on at least one question)
+  if (firstImgElapsed > lateFirstMs) {
     return {
       image: img1,
       check: {
         gate: g1,
         inspector: null,
+        redo_skipped: 'late',
+        path: 'redo_skipped',
         attempts: 1,
-        passed: gatePassed(g1),
-        ms_gate: totalGateMs,
+        passed: false,
+        ms_gate: msGate1,
         ms_inspector: 0,
+        ms_total: msTotal(),
       },
     };
   }
 
-  const inspRes = await deps.inspect(img1, g1);
-  const insp = inspRes.result;
-  const msInspector = inspRes.ms;
-
-  // Inspector timeout/error -> keep first image
-  if (!insp) {
+  const remForRedo = remaining();
+  if (remForRedo <= 0) {
     return {
       image: img1,
       check: {
         gate: g1,
         inspector: null,
-        attempts: 1,
-        passed: gatePassed(g1),
-        ms_gate: totalGateMs,
-        ms_inspector: msInspector,
-      },
-    };
-  }
-
-  if (insp.verdict === 'show') {
-    return {
-      image: img1,
-      check: {
-        gate: g1,
-        inspector: insp,
-        attempts: 1,
-        passed: true,
-        ms_gate: totalGateMs,
-        ms_inspector: msInspector,
-      },
-    };
-  }
-
-  // Verdict is 'redo' -> regenerate ONCE if within the 55 s cap
-  if (remaining() < minRedoBudgetMs) {
-    return {
-      image: img1,
-      check: {
-        gate: g1,
-        inspector: insp,
+        redo_skipped: 'cap',
+        path: 'redo_skipped',
         attempts: 1,
         passed: false,
-        ms_gate: totalGateMs,
-        ms_inspector: msInspector,
+        ms_gate: msGate1,
+        ms_inspector: 0,
+        ms_total: msTotal(),
       },
     };
   }
 
-  let img2: TImage;
-  try {
-    img2 = await deps.generate(insp.fix || 'Fix the issues found in the previous try-on.');
-  } catch {
-    return {
-      image: img1,
-      check: {
-        gate: g1,
-        inspector: insp,
-        attempts: 2,
-        passed: false,
-        ms_gate: totalGateMs,
-        ms_inspector: msInspector,
-      },
+  // Start corrected re-render AND Neon inspector IN PARALLEL immediately
+  const correction = buildGateCorrection(g1);
+
+  return new Promise<VerifyLoopOut<TImage>>((resolve) => {
+    let settled = false;
+    let inspectSettled = false;
+    let inspectResult: TryOnInspectorResult | null = null;
+    let inspectMs = 0;
+    let redoImg: TImage | null = null;
+    let redoGate: TryOnGateScores | null = null;
+    let redoGateMs = 0;
+
+    const finish = (out: VerifyLoopOut<TImage>): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(capTimer);
+      resolve(out);
     };
-  }
 
-  if (remaining() < minGateBudgetMs) {
-    return {
-      image: img2,
-      check: {
-        gate: g1,
-        inspector: insp,
-        attempts: 2,
-        passed: false,
-        ms_gate: totalGateMs,
-        ms_inspector: msInspector,
-      },
-    };
-  }
+    const capTimer = setTimeout(() => {
+      // At the hard cap, return the best image so far
+      const haveRedo = redoImg !== null;
+      const keepRedo = haveRedo && (!redoGate || scoreGate(redoGate) >= scoreGate(g1));
+      const chosenImage = keepRedo && redoImg !== null ? redoImg : img1;
+      const chosenGate = keepRedo ? (redoGate ?? g1) : g1;
 
-  const g2Res = await deps.gate(img2);
-  totalGateMs += g2Res.ms;
-  const g2 = g2Res.scores;
+      finish({
+        image: chosenImage,
+        check: {
+          gate: chosenGate,
+          inspector: inspectSettled ? inspectResult : null,
+          ...(inspectSettled ? {} : { inspector_pending: true }),
+          ...(haveRedo ? {} : { redo_skipped: 'cap' as const }),
+          path: haveRedo ? 'redo' : 'redo_skipped',
+          correction,
+          attempts: haveRedo ? 2 : 1,
+          passed: keepRedo && redoGate ? gatePassed(redoGate) : false,
+          ms_gate: msGate1 + redoGateMs,
+          ms_inspector: inspectSettled ? inspectMs : 0,
+          ms_total: msTotal(),
+        },
+      });
+    }, Math.max(1, remForRedo));
 
-  if (!g2) {
-    return {
-      image: img2,
-      check: {
-        gate: g1,
-        inspector: insp,
-        attempts: 2,
-        passed: true,
-        ms_gate: totalGateMs,
-        ms_inspector: msInspector,
-      },
-    };
-  }
+    // Branch 1: Inspector runs in parallel; if it says 'show' before redo finishes, overrule immediately
+    void deps
+      .inspect(img1, g1)
+      .then((res) => {
+        inspectSettled = true;
+        inspectResult = res.result;
+        inspectMs = res.ms;
+        if (settled) {
+          deps.onBackgroundInspect?.(res.result, res.ms);
+          return;
+        }
+        if (res.result?.verdict === 'show') {
+          finish({
+            image: img1,
+            check: {
+              gate: g1,
+              inspector: res.result,
+              path: 'inspector_overruled',
+              correction,
+              attempts: 1,
+              passed: true,
+              ms_gate: msGate1,
+              ms_inspector: res.ms,
+              ms_total: msTotal(),
+            },
+          });
+        }
+      })
+      .catch(() => {
+        inspectSettled = true;
+      });
 
-  const keepSecond = scoreGate(g2) >= scoreGate(g1);
-  const chosenImage = keepSecond ? img2 : img1;
-  const chosenGate = keepSecond ? g2 : g1;
+    // Branch 2: Corrected re-render + second gate runs in parallel
+    void (async () => {
+      try {
+        const img2 = await deps.generate(correction);
+        if (settled) return;
+        redoImg = img2;
 
-  return {
-    image: chosenImage,
-    check: {
-      gate: chosenGate,
-      inspector: insp,
-      attempts: 2,
-      passed: gatePassed(chosenGate),
-      ms_gate: totalGateMs,
-      ms_inspector: msInspector,
-    },
-  };
+        if (remaining() >= minGateBudgetMs) {
+          const g2Res = await deps.gate(img2);
+          if (settled) return;
+          redoGate = g2Res.scores;
+          redoGateMs = g2Res.ms;
+        }
+
+        const keepSecond = !redoGate || scoreGate(redoGate) >= scoreGate(g1);
+        const chosenImage = keepSecond ? img2 : img1;
+        const chosenGate = keepSecond ? (redoGate ?? g1) : g1;
+
+        finish({
+          image: chosenImage,
+          check: {
+            gate: chosenGate,
+            inspector: inspectSettled ? inspectResult : null,
+            ...(inspectSettled ? {} : { inspector_pending: true }),
+            path: 'redo',
+            correction,
+            attempts: 2,
+            passed: redoGate ? gatePassed(chosenGate) : true,
+            ms_gate: msGate1 + redoGateMs,
+            ms_inspector: inspectSettled ? inspectMs : 0,
+            ms_total: msTotal(),
+          },
+        });
+      } catch {
+        if (settled) return;
+        finish({
+          image: img1,
+          check: {
+            gate: g1,
+            inspector: inspectSettled ? inspectResult : null,
+            ...(inspectSettled ? {} : { inspector_pending: true }),
+            path: 'redo',
+            correction,
+            attempts: 2,
+            passed: false,
+            ms_gate: msGate1,
+            ms_inspector: inspectSettled ? inspectMs : 0,
+            ms_total: msTotal(),
+          },
+        });
+      }
+    })();
+  });
 }

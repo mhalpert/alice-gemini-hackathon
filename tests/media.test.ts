@@ -9,6 +9,7 @@ import { outfitCollage, productShot, setCallRoom, warmMedia } from '../src/media
 import {
   TRYON_NAME_RE,
   boardFileName,
+  buildGateCorrection,
   classifyShotSource,
   collectImageUrls,
   cropRawRgb,
@@ -712,14 +713,46 @@ describe('media IPC client, warmMedia, call-log events, and fallback behavior', 
   });
 });
 
-describe('try-on verify loop and inspector parser', () => {
+describe('try-on verify loop, gate correction, and inspector parser', () => {
+  const delay = (ms: number): Promise<void> =>
+    new Promise((resolve) => {
+      setTimeout(resolve, ms);
+    });
+
+  it('buildGateCorrection combines lines for every gate score below 0.6', () => {
+    assert.equal(
+      buildGateCorrection({ same_person: 0.9, all_pieces: 0.8, no_extras: 0.7, colours_match: 0.6 }),
+      '',
+    );
+    const extrasOnly = buildGateCorrection({
+      same_person: 0.9,
+      all_pieces: 0.8,
+      no_extras: 0.2,
+      colours_match: 0.8,
+    });
+    assert.equal(
+      extrasOnly,
+      'Remove anything worn or carried that is not in the list (no belts, hats, bags or jewellery unless listed).',
+    );
+    const allFour = buildGateCorrection({
+      same_person: 0.1,
+      all_pieces: 0.2,
+      no_extras: 0.3,
+      colours_match: 0.4,
+    });
+    assert.match(allFour, /exactly the shopper in Image 0/);
+    assert.match(allFour, /including the shoes/);
+    assert.match(allFour, /Remove anything worn or carried/);
+    assert.match(allFour, /Match each piece's colour/);
+  });
+
   it('parseInspectorReply handles valid show/redo JSON, arrays, fences, and garbage', () => {
     const redo = parseInspectorReply(
       '{"verdict":"redo","problems":[{"kind":"extra_item","detail":"black belt"}],"fix":"Remove the black belt."}',
-      'gemini-4-argon',
+      'gemini-4-neon',
     );
     assert.deepEqual(redo, {
-      model: 'gemini-4-argon',
+      model: 'gemini-4-neon',
       verdict: 'redo',
       problems: [{ kind: 'extra_item', detail: 'black belt' }],
       fix: 'Remove the black belt.',
@@ -736,11 +769,11 @@ describe('try-on verify loop and inspector parser', () => {
       fix: '',
     });
 
-    assert.equal(parseInspectorReply('not json', 'gemini-4-argon'), null);
-    assert.equal(parseInspectorReply('{"verdict":"maybe"}', 'gemini-4-argon'), null);
+    assert.equal(parseInspectorReply('not json', 'gemini-4-neon'), null);
+    assert.equal(parseInspectorReply('{"verdict":"maybe"}', 'gemini-4-neon'), null);
   });
 
-  it('skips inspector when fast gate passes cleanly (>= 0.70 on all)', async () => {
+  it('pass path adds only gate time and never calls inspector (>= 0.70 on all)', async () => {
     let inspectCalls = 0;
     let genCalls = 0;
     const out = await runTryOnVerifyLoop<string>({
@@ -760,122 +793,199 @@ describe('try-on verify loop and inspector parser', () => {
     assert.equal(out.image, 'img1');
     assert.equal(genCalls, 1);
     assert.equal(inspectCalls, 0);
+    assert.equal(out.check.path, 'pass');
     assert.equal(out.check.attempts, 1);
     assert.equal(out.check.passed, true);
     assert.equal(out.check.inspector, null);
     assert.equal(out.check.ms_gate, 420);
+    assert.equal(typeof out.check.ms_total, 'number');
   });
 
-  it('calls inspector when any gate probability is below 0.70 even if >= 0.60', async () => {
-    let inspectCalls = 0;
+  it('borderline (0.60..0.70) returns immediately and runs inspector in background for logging only', async () => {
+    let bgVerdict: string | null = null;
+    const t0 = Date.now();
     const out = await runTryOnVerifyLoop<string>({
       generate: async () => 'img1',
       gate: async () => ({
-        scores: { same_person: 0.9, all_pieces: 0.68, no_extras: 0.85, colours_match: 0.9 },
-        ms: 350,
+        scores: { same_person: 0.9, all_pieces: 0.65, no_extras: 0.85, colours_match: 0.9 },
+        ms: 20,
       }),
       inspect: async () => {
-        inspectCalls += 1;
+        await delay(80);
         return {
           result: { model: 'gemini-4-neon', verdict: 'show', problems: [], fix: '' },
-          ms: 1200,
+          ms: 80,
         };
       },
+      onBackgroundInspect: (res) => {
+        bgVerdict = res?.verdict ?? null;
+      },
     });
+    const elapsed = Date.now() - t0;
+    assert.ok(elapsed < 60, `borderline should not wait for inspector, took ${elapsed}ms`);
     assert.equal(out.image, 'img1');
-    assert.equal(inspectCalls, 1);
-    assert.equal(out.check.attempts, 1);
+    assert.equal(out.check.path, 'pass');
     assert.equal(out.check.passed, true);
-    assert.equal(out.check.inspector?.verdict, 'show');
+    assert.equal(out.check.attempts, 1);
+    assert.equal(out.check.inspector, null);
+    assert.equal(out.check.inspector_pending, true);
+    await delay(100);
+    assert.equal(bgVerdict, 'show');
   });
 
-  it('regenerates once on gate fail + inspector redo and keeps second image when it scores higher', async () => {
+  it('gate fail starts redo immediately in parallel without waiting for inspector, and returns without inspector if still pending', async () => {
+    const events: string[] = [];
     const corrections: Array<string | null> = [];
-    let gateCalls = 0;
     const out = await runTryOnVerifyLoop<string>({
       generate: async (fix) => {
         corrections.push(fix);
-        return fix ? 'img2' : 'img1';
-      },
-      gate: async (img) => {
-        gateCalls += 1;
-        if (img === 'img1') {
-          return {
-            scores: { same_person: 0.9, all_pieces: 0.85, no_extras: 0.2, colours_match: 0.9 },
-            ms: 300,
-          };
+        if (fix) {
+          events.push('redo_started');
+          await delay(40);
+          events.push('redo_done');
+          return 'img2';
         }
-        return {
-          scores: { same_person: 0.92, all_pieces: 0.88, no_extras: 0.91, colours_match: 0.9 },
-          ms: 350,
-        };
+        return 'img1';
       },
-      inspect: async () => ({
-        result: {
-          model: 'gemini-4-argon',
-          verdict: 'redo',
-          problems: [{ kind: 'extra_item', detail: 'unlisted black belt' }],
-          fix: 'Remove the black belt: no belt is in this look.',
-        },
-        ms: 2100,
-      }),
-    });
-    assert.equal(out.image, 'img2');
-    assert.deepEqual(corrections, [null, 'Remove the black belt: no belt is in this look.']);
-    assert.equal(gateCalls, 2);
-    assert.equal(out.check.attempts, 2);
-    assert.equal(out.check.passed, true);
-    assert.equal(out.check.ms_gate, 650);
-    assert.equal(out.check.ms_inspector, 2100);
-  });
-
-  it('keeps first image when redo scores worse than the first image', async () => {
-    const out = await runTryOnVerifyLoop<string>({
-      generate: async (fix) => (fix ? 'img2' : 'img1'),
       gate: async (img) =>
         img === 'img1'
           ? {
-              scores: { same_person: 0.8, all_pieces: 0.7, no_extras: 0.65, colours_match: 0.8 },
-              ms: 200,
+              scores: { same_person: 0.9, all_pieces: 0.85, no_extras: 0.2, colours_match: 0.9 },
+              ms: 15,
             }
           : {
-              scores: { same_person: 0.2, all_pieces: 0.5, no_extras: 0.9, colours_match: 0.7 },
-              ms: 200,
+              scores: { same_person: 0.92, all_pieces: 0.88, no_extras: 0.91, colours_match: 0.9 },
+              ms: 15,
             },
-      inspect: async () => ({
-        result: {
-          model: 'gemini-4-argon',
-          verdict: 'redo',
-          problems: [{ kind: 'extra_item', detail: 'belt' }],
-          fix: 'Remove the belt.',
-        },
-        ms: 1500,
-      }),
+      inspect: async () => {
+        events.push('inspect_started');
+        await delay(120);
+        events.push('inspect_done');
+        return {
+          result: {
+            model: 'gemini-4-neon',
+            verdict: 'redo',
+            problems: [{ kind: 'extra_item', detail: 'belt' }],
+            fix: 'Remove belt.',
+          },
+          ms: 120,
+        };
+      },
     });
-    assert.equal(out.image, 'img1');
+
+    assert.equal(out.image, 'img2');
+    assert.equal(out.check.path, 'redo');
     assert.equal(out.check.attempts, 2);
     assert.equal(out.check.passed, true);
+    assert.equal(out.check.inspector, null);
+    assert.equal(out.check.inspector_pending, true);
+    assert.match(out.check.correction ?? '', /Remove anything worn or carried/);
+    assert.equal(corrections[1], out.check.correction);
+    // Redo finished BEFORE the slow inspector finished -> proves redo did not wait!
+    assert.ok(events.includes('redo_done'));
+    assert.equal(events.includes('inspect_done'), false);
+    await delay(100);
   });
 
-  it('keeps first image when inspector times out (returns null)', async () => {
-    let genCalls = 0;
+  it('inspector "show" overrules gate fail and returns first image early without waiting for slow redo', async () => {
+    const t0 = Date.now();
     const out = await runTryOnVerifyLoop<string>({
-      generate: async () => {
-        genCalls += 1;
+      generate: async (fix) => {
+        if (fix) {
+          await delay(150);
+          return 'img2';
+        }
         return 'img1';
       },
       gate: async () => ({
-        scores: { same_person: 0.9, all_pieces: 0.9, no_extras: 0.5, colours_match: 0.9 },
-        ms: 300,
+        scores: { same_person: 0.9, all_pieces: 0.55, no_extras: 0.9, colours_match: 0.9 },
+        ms: 10,
       }),
-      inspect: async () => ({ result: null, ms: 9000 }),
+      inspect: async () => {
+        await delay(25);
+        return {
+          result: { model: 'gemini-4-neon', verdict: 'show', problems: [], fix: '' },
+          ms: 25,
+        };
+      },
+    });
+    const elapsed = Date.now() - t0;
+    assert.ok(elapsed < 100, `expected early overrule return, took ${elapsed}ms`);
+    assert.equal(out.image, 'img1');
+    assert.equal(out.check.path, 'inspector_overruled');
+    assert.equal(out.check.attempts, 1);
+    assert.equal(out.check.passed, true);
+    assert.equal(out.check.inspector?.verdict, 'show');
+    await delay(150);
+  });
+
+  it('skips redo when first image took longer than 26 s (redo_skipped: late)', async () => {
+    let clock = 0;
+    let genCalls = 0;
+    let inspectCalls = 0;
+    const out = await runTryOnVerifyLoop<string>({
+      now: () => clock,
+      startedAt: 0,
+      capMs: 40_000,
+      lateFirstMs: 26_000,
+      generate: async () => {
+        genCalls += 1;
+        clock += 27_000;
+        return 'img1';
+      },
+      gate: async () => {
+        clock += 1_000;
+        return {
+          scores: { same_person: 0.9, all_pieces: 0.9, no_extras: 0.2, colours_match: 0.9 },
+          ms: 1000,
+        };
+      },
+      inspect: async () => {
+        inspectCalls += 1;
+        return { result: null, ms: 0 };
+      },
     });
     assert.equal(out.image, 'img1');
     assert.equal(genCalls, 1);
+    assert.equal(inspectCalls, 0);
+    assert.equal(out.check.path, 'redo_skipped');
+    assert.equal(out.check.redo_skipped, 'late');
     assert.equal(out.check.attempts, 1);
     assert.equal(out.check.passed, false);
-    assert.equal(out.check.inspector, null);
-    assert.equal(out.check.ms_inspector, 9000);
+  });
+
+  it('hard cap returns best image so far when redo exceeds remaining cap', async () => {
+    const t0 = Date.now();
+    const out = await runTryOnVerifyLoop<string>({
+      capMs: 90,
+      lateFirstMs: 50,
+      minGateBudgetMs: 5,
+      generate: async (fix) => {
+        if (fix) {
+          await delay(250);
+          return 'img2';
+        }
+        await delay(20);
+        return 'img1';
+      },
+      gate: async () => ({
+        scores: { same_person: 0.9, all_pieces: 0.9, no_extras: 0.2, colours_match: 0.9 },
+        ms: 10,
+      }),
+      inspect: async () => {
+        await delay(250);
+        return { result: null, ms: 250 };
+      },
+    });
+    const elapsed = Date.now() - t0;
+    assert.ok(elapsed < 180, `expected cap return near 90ms, took ${elapsed}ms`);
+    assert.equal(out.image, 'img1');
+    assert.equal(out.check.path, 'redo_skipped');
+    assert.equal(out.check.redo_skipped, 'cap');
+    assert.equal(out.check.attempts, 1);
+    assert.equal(out.check.passed, false);
+    assert.equal(out.check.inspector_pending, true);
+    await delay(250);
   });
 
   it('skips gate and inspector completely when verifyOff is true', async () => {
@@ -896,48 +1006,9 @@ describe('try-on verify loop and inspector parser', () => {
     assert.equal(out.image, 'img1');
     assert.equal(gateCalls, 0);
     assert.equal(inspectCalls, 0);
+    assert.equal(out.check.path, 'pass');
     assert.equal(out.check.attempts, 1);
     assert.equal(out.check.passed, true);
-  });
-
-  it('respects the 55 s total cap and skips redo when time budget is nearly exhausted', async () => {
-    let clock = 0;
-    let genCalls = 0;
-    const out = await runTryOnVerifyLoop<string>({
-      now: () => clock,
-      startedAt: 0,
-      capMs: 55_000,
-      minRedoBudgetMs: 12_000,
-      generate: async () => {
-        genCalls += 1;
-        clock += 42_000;
-        return 'img1';
-      },
-      gate: async () => {
-        clock += 1_000;
-        return {
-          scores: { same_person: 0.9, all_pieces: 0.9, no_extras: 0.3, colours_match: 0.9 },
-          ms: 1000,
-        };
-      },
-      inspect: async () => {
-        clock += 3_000;
-        return {
-          result: {
-            model: 'gemini-4-argon',
-            verdict: 'redo',
-            problems: [{ kind: 'extra_item', detail: 'belt' }],
-            fix: 'Remove belt.',
-          },
-          ms: 3000,
-        };
-      },
-    });
-    // Elapsed = 46_000ms -> remaining 9_000ms < 12_000ms -> must skip redo!
-    assert.equal(out.image, 'img1');
-    assert.equal(genCalls, 1);
-    assert.equal(out.check.attempts, 1);
-    assert.equal(out.check.passed, false);
   });
 });
 

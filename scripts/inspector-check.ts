@@ -7,10 +7,11 @@ import { buildContactSheet, runTryOnGate, runTryOnInspector } from '../src/media
 import {
   REPO_ROOT,
   gatePassed,
-  needsInspector,
+  runTryOnVerifyLoop,
   sortPiecesForTryOn,
   stripHtml,
   tryonDir,
+  type TryOnCheckPath,
   type TryOnGateScores,
   type TryOnInspectorResult,
 } from '../src/media/pure.ts';
@@ -144,12 +145,14 @@ async function getAltMenShopper(): Promise<Buffer> {
 interface CaseRow {
   name: string;
   expected: 'GOOD' | 'BAD';
+  path: TryOnCheckPath;
   gate: TryOnGateScores | null;
   inspector: TryOnInspectorResult | null;
   flagged: boolean;
   redoFixed: string;
   msGate: number;
   msInspect: number;
+  msTotal: number;
   savedPaths: string[];
 }
 
@@ -426,20 +429,20 @@ async function main(): Promise<void> {
     for (const g of goodResults) {
       const check = g.res.check;
       const flagged = Boolean(
-        (check && !check.passed) ||
-          check?.inspector?.verdict === 'redo' ||
-          (check?.attempts ?? 1) > 1,
+        check && (check.path === 'redo' || check.path === 'redo_skipped' || !check.passed),
       );
       goodAddedMs.push((check?.ms_gate ?? 0) + (check?.ms_inspector ?? 0));
       rows.push({
         name: g.id,
         expected: 'GOOD',
+        path: check?.path ?? 'pass',
         gate: check?.gate ?? null,
         inspector: check?.inspector ?? null,
         flagged,
         redoFixed: check?.attempts === 2 ? (check.passed ? 'yes' : 'no') : '-',
         msGate: check?.ms_gate ?? 0,
         msInspect: check?.ms_inspector ?? 0,
+        msTotal: g.res.ms,
         savedPaths: [g.saved],
       });
     }
@@ -455,26 +458,38 @@ async function main(): Promise<void> {
     console.log('3. Generating 4 synthetic BAD cases (extra, wrong face, missing piece, colour mismatch)...');
     const altShopper = await prepareShopperJpeg(await getAltMenShopper(), 'men');
 
-    const [badA, badB, badC] = await Promise.all([
-      // (a) extra belt + baseball cap
-      generateCustomTryOn(menShopper, look1.pieces, {
-        extraPrompt:
-          'Also wearing a wide black leather belt with a prominent silver buckle and a dark baseball cap on the head.',
-      }),
-      // (b) wrong person (alt shopper)
-      generateCustomTryOn(altShopper, look1.pieces),
-      // (c) drop shoes piece (barefoot)
-      generateCustomTryOn(
-        menShopper,
-        look1.pieces.filter((p) => p.slot !== 'shoes'),
-        { forceBarefoot: true },
+    const timeGen = async <T>(fn: () => Promise<T>): Promise<{ out: T; ms: number }> => {
+      const s = Date.now();
+      const out = await fn();
+      return { out, ms: Date.now() - s };
+    };
+
+    const [badARes, badBRes, badCRes] = await Promise.all([
+      timeGen(() =>
+        generateCustomTryOn(menShopper, look1.pieces, {
+          extraPrompt:
+            'Also wearing a wide black leather belt with a prominent silver buckle and a dark baseball cap on the head.',
+        }),
+      ),
+      timeGen(() => generateCustomTryOn(altShopper, look1.pieces)),
+      timeGen(() =>
+        generateCustomTryOn(
+          menShopper,
+          look1.pieces.filter((p) => p.slot !== 'shoes'),
+          { forceBarefoot: true },
+        ),
       ),
     ]);
+    const badA = badARes.out;
+    const badB = badBRes.out;
+    const badC = badCRes.out;
 
     // (d) colour mismatch: take good-1 try-on (white oxford) and swap the top in the list + sheet to bright crimson red
     const redShirtItem: Item = {
       ...menShirt,
-      title: menShirt.title.replace(/white|bone|cream|ivory|light/gi, 'Bright Red') || 'Bright Crimson Red Oxford Shirt',
+      title:
+        menShirt.title.replace(/white|bone|cream|ivory|light/gi, 'Bright Red') ||
+        'Bright Crimson Red Oxford Shirt',
       description: 'Vibrant bright crimson red cotton oxford button-down shirt.',
     };
     if (!/red/i.test(redShirtItem.title)) {
@@ -502,6 +517,7 @@ async function main(): Promise<void> {
       {
         name: 'bad-a-extra',
         tryonBuf: badA.tryonBuf,
+        gen1Ms: badARes.ms,
         shopperBuf: menShopper,
         pieces: look1Sorted,
         sheet: look1Sheet,
@@ -513,6 +529,7 @@ async function main(): Promise<void> {
       {
         name: 'bad-b-face',
         tryonBuf: badB.tryonBuf,
+        gen1Ms: badBRes.ms,
         shopperBuf: menShopper, // inspected against ORIGINAL shopper!
         pieces: look1Sorted,
         sheet: look1Sheet,
@@ -524,6 +541,7 @@ async function main(): Promise<void> {
       {
         name: 'bad-c-missing',
         tryonBuf: badC.tryonBuf,
+        gen1Ms: badCRes.ms,
         shopperBuf: menShopper,
         pieces: look1Sorted, // full list INCLUDING shoes!
         sheet: look1Sheet,
@@ -535,6 +553,7 @@ async function main(): Promise<void> {
       {
         name: 'bad-d-colour',
         tryonBuf: goodResults[0].buf, // white shirt try-on
+        gen1Ms: Math.max(1000, goodResults[0].res.ms - (goodResults[0].res.check?.ms_gate ?? 0)),
         shopperBuf: menShopper,
         pieces: badDPieces, // bright red shirt in list!
         sheet: badDSheet,
@@ -546,142 +565,170 @@ async function main(): Promise<void> {
       },
     ];
 
-    // 4. Benchmark gemini-4-argon vs gemini-4-carbon on the same real cases (2 good + 4 bad)
-    console.log('4. Benchmarking gemini-4-argon vs gemini-4-carbon (thinkingLevel=LOW)...');
-    const look3Sorted = sortPiecesForTryOn(looks[2].outfit.pieces);
-    const look3Bufs = (await Promise.all(look3Sorted.map((p) => loadPieceForTryOn(p)))).filter(
-      (b): b is Buffer => b !== null,
-    );
-    const look3Sheet = await buildContactSheet(look3Bufs);
-
-    const benchInputs = [
-      {
-        name: 'good-1-men-oxford',
-        expected: 'show' as const,
-        input: {
-          shopperJpeg: menShopper,
-          tryonJpeg: goodResults[0].buf,
-          contactSheetJpeg: look1Sheet,
-          pieces: look1Sorted,
-        },
-      },
-      {
-        name: 'good-3-women-dress',
-        expected: 'show' as const,
-        input: {
-          shopperJpeg: womenShopper,
-          tryonJpeg: goodResults[2].buf,
-          contactSheetJpeg: look3Sheet,
-          pieces: look3Sorted,
-        },
-      },
-      ...badCases.map((bc) => ({
-        name: bc.name,
-        expected: 'redo' as const,
-        input: {
-          shopperJpeg: bc.shopperBuf,
-          tryonJpeg: bc.tryonBuf,
-          contactSheetJpeg: bc.sheet,
-          pieces: bc.pieces,
-        },
-      })),
-    ];
-
-    const benchModels = ['gemini-4-carbon', 'gemini-4-neon', 'gemini-4-argon'];
-    const benchStats: Record<string, { ms: number[]; right: number; total: number; errors: number }> =
-      {};
-
-    console.log('\n--- MODEL BENCHMARK (gemini-4-carbon vs gemini-4-neon vs gemini-4-argon) ---');
-    console.log(
-      `${'Model'.padEnd(18)} ${'Case'.padEnd(20)} ${'Exp'.padEnd(5)} ${'Got'.padEnd(5)} ${'ms'.padStart(6)}  Problems`,
-    );
-
-    for (const model of benchModels) {
-      benchStats[model] = { ms: [], right: 0, total: benchInputs.length, errors: 0 };
-      const results = await Promise.all(
-        benchInputs.map(async (b) => {
-          const r = await runTryOnInspector(b.input, { model, timeoutMs: 25_000 });
-          return { b, r };
-        }),
+    if (process.argv.includes('--bench')) {
+      console.log('4. Benchmarking gemini-4-carbon vs gemini-4-neon vs gemini-4-argon (thinkingLevel=LOW)...');
+      const look3Sorted = sortPiecesForTryOn(looks[2].outfit.pieces);
+      const look3Bufs = (await Promise.all(look3Sorted.map((p) => loadPieceForTryOn(p)))).filter(
+        (b): b is Buffer => b !== null,
       );
-      for (const { b, r } of results) {
-        benchStats[model].ms.push(r.ms);
-        const got = r.result?.verdict ?? 'ERR';
-        if (!r.result) benchStats[model].errors += 1;
-        if (got === b.expected) benchStats[model].right += 1;
-        const probs = r.result
-          ? r.result.problems.map((p) => `${p.kind}: ${p.detail}`).join('; ') || '(none)'
-          : r.error || 'error';
+      const look3Sheet = await buildContactSheet(look3Bufs);
+
+      const benchInputs = [
+        {
+          name: 'good-1-men-oxford',
+          expected: 'show' as const,
+          input: {
+            shopperJpeg: menShopper,
+            tryonJpeg: goodResults[0].buf,
+            contactSheetJpeg: look1Sheet,
+            pieces: look1Sorted,
+          },
+        },
+        {
+          name: 'good-3-women-dress',
+          expected: 'show' as const,
+          input: {
+            shopperJpeg: womenShopper,
+            tryonJpeg: goodResults[2].buf,
+            contactSheetJpeg: look3Sheet,
+            pieces: look3Sorted,
+          },
+        },
+        ...badCases.map((bc) => ({
+          name: bc.name,
+          expected: 'redo' as const,
+          input: {
+            shopperJpeg: bc.shopperBuf,
+            tryonJpeg: bc.tryonBuf,
+            contactSheetJpeg: bc.sheet,
+            pieces: bc.pieces,
+          },
+        })),
+      ];
+
+      const benchModels = ['gemini-4-carbon', 'gemini-4-neon', 'gemini-4-argon'];
+      const benchStats: Record<string, { ms: number[]; right: number; total: number; errors: number }> =
+        {};
+
+      console.log('\n--- MODEL BENCHMARK (gemini-4-carbon vs gemini-4-neon vs gemini-4-argon) ---');
+      console.log(
+        `${'Model'.padEnd(18)} ${'Case'.padEnd(20)} ${'Exp'.padEnd(5)} ${'Got'.padEnd(5)} ${'ms'.padStart(6)}  Problems`,
+      );
+
+      for (const model of benchModels) {
+        benchStats[model] = { ms: [], right: 0, total: benchInputs.length, errors: 0 };
+        const results = await Promise.all(
+          benchInputs.map(async (b) => {
+            const r = await runTryOnInspector(b.input, { model, timeoutMs: 25_000 });
+            return { b, r };
+          }),
+        );
+        for (const { b, r } of results) {
+          benchStats[model].ms.push(r.ms);
+          const got = r.result?.verdict ?? 'ERR';
+          if (!r.result) benchStats[model].errors += 1;
+          if (got === b.expected) benchStats[model].right += 1;
+          const probs = r.result
+            ? r.result.problems.map((p) => `${p.kind}: ${p.detail}`).join('; ') || '(none)'
+            : r.error || 'error';
+          console.log(
+            `${model.padEnd(18)} ${b.name.padEnd(20)} ${b.expected.padEnd(5)} ${got.padEnd(5)} ${String(r.ms).padStart(6)}  ${probs.slice(0, 90)}`,
+          );
+        }
+      }
+
+      console.log('\nBenchmark summary:');
+      for (const model of benchModels) {
+        const s = benchStats[model];
         console.log(
-          `${model.padEnd(18)} ${b.name.padEnd(20)} ${b.expected.padEnd(5)} ${got.padEnd(5)} ${String(r.ms).padStart(6)}  ${probs.slice(0, 90)}`,
+          `  ${model}: ${s.right}/${s.total} correct, median=${median(s.ms)}ms, min=${Math.min(...s.ms)}ms, max=${Math.max(...s.ms)}ms, errors=${s.errors}`,
         );
       }
     }
 
-    console.log('\nBenchmark summary:');
-    for (const model of benchModels) {
-      const s = benchStats[model];
-      console.log(
-        `  ${model}: ${s.right}/${s.total} correct, median=${median(s.ms)}ms, min=${Math.min(...s.ms)}ms, max=${Math.max(...s.ms)}ms, errors=${s.errors}`,
-      );
-    }
-
-    // 5. Run full gate + inspector + redo loop on each BAD case in parallel
+    // 5. Run parallel verify/redo loop (gate -> parallel redo + Neon inspector, 40 s cap) on each BAD case
     const activeInspector = process.env.ALICE_MODEL_INSPECTOR || 'gemini-4-neon';
-    console.log(`\n5. Evaluating 4 BAD cases through gate + ${activeInspector} + redo loop...`);
+    const rawCap = Number(process.env.ALICE_TRYON_CAP_MS);
+    const capMs = Number.isFinite(rawCap) && rawCap > 0 ? rawCap : 40_000;
+    console.log(
+      `\n4. Evaluating 4 BAD cases through parallel gate + redo + ${activeInspector} loop (cap=${capMs}ms)...`,
+    );
 
     const badCaseRows = await Promise.all(
       badCases.map(async (bc): Promise<CaseRow> => {
-        const inspectInput = {
-          shopperJpeg: bc.shopperBuf,
-          tryonJpeg: bc.tryonBuf,
-          contactSheetJpeg: bc.sheet,
-          pieces: bc.pieces,
-        };
+        // Offset startedAt by gen1Ms so the 26s late check and 40s hard cap reflect true end-to-end time!
+        const syntheticStartedAt = Date.now() - bc.gen1Ms;
+        let firstGateScores: TryOnGateScores | null = null;
+        let gateCallNum = 0;
 
-        const gRes = await runTryOnGate(inspectInput);
-        const shouldInspect = !gRes.scores || needsInspector(gRes.scores);
-        let inspRes: { result: TryOnInspectorResult | null; ms: number } = { result: null, ms: 0 };
-        if (shouldInspect) {
-          inspRes = await runTryOnInspector(inspectInput, { model: activeInspector });
+        const out = await runTryOnVerifyLoop<Buffer>({
+          startedAt: syntheticStartedAt,
+          capMs,
+          generate: async (correction) => {
+            if (!correction) {
+              return bc.tryonBuf;
+            }
+            const redo = await generateCustomTryOn(bc.redoShopper, bc.redoPieces, {
+              extraPrompt: `Correction from the inspector: ${correction}`,
+              overridePieceBufs: (bc as { overridePieceBufs?: Map<number, Buffer> })
+                .overridePieceBufs,
+            });
+            return redo.tryonBuf;
+          },
+          gate: async (img) => {
+            gateCallNum += 1;
+            const res = await runTryOnGate({
+              shopperJpeg: bc.shopperBuf,
+              tryonJpeg: img,
+              contactSheetJpeg: gateCallNum === 1 ? bc.sheet : bc.redoSheet,
+              pieces: bc.pieces,
+            });
+            if (gateCallNum === 1) {
+              firstGateScores = res.scores;
+            }
+            return res;
+          },
+          inspect: async (img, gateScores) =>
+            runTryOnInspector(
+              {
+                shopperJpeg: bc.shopperBuf,
+                tryonJpeg: img,
+                contactSheetJpeg: bc.sheet,
+                pieces: bc.pieces,
+              },
+              { model: activeInspector, gateScores },
+            ),
+        });
+
+        const casePaths = [bc.savedPath];
+        let redoFixed = '-';
+        if (out.check.attempts === 2 && out.image !== bc.tryonBuf) {
+          const fixedPath = await saveInspectorImg(`inspector-${bc.name}-fixed.jpg`, out.image);
+          savedImages.push(fixedPath);
+          casePaths.push(fixedPath);
+          redoFixed = `${out.check.passed ? 'yes' : 'no'} (${fmtProbs(out.check.gate)})`;
+        } else if (out.check.redo_skipped) {
+          redoFixed = `skipped:${out.check.redo_skipped}`;
         }
 
         const caught = Boolean(
-          (gRes.scores && !gatePassed(gRes.scores)) || inspRes.result?.verdict === 'redo',
+          (firstGateScores && !gatePassed(firstGateScores)) ||
+            out.check.path === 'redo' ||
+            out.check.path === 'redo_skipped' ||
+            out.check.inspector?.verdict === 'redo',
         );
-
-        let redoFixed = '-';
-        const casePaths = [bc.savedPath];
-
-        if (inspRes.result?.verdict === 'redo') {
-          const correction = `Correction from the inspector: ${inspRes.result.fix}`;
-          const redo = await generateCustomTryOn(bc.redoShopper, bc.redoPieces, {
-            extraPrompt: correction,
-            overridePieceBufs: (bc as { overridePieceBufs?: Map<number, Buffer> }).overridePieceBufs,
-          });
-          const fixedPath = await saveInspectorImg(`inspector-${bc.name}-fixed.jpg`, redo.tryonBuf);
-          savedImages.push(fixedPath);
-          casePaths.push(fixedPath);
-
-          const g2 = await runTryOnGate({
-            shopperJpeg: bc.redoShopper,
-            tryonJpeg: redo.tryonBuf,
-            contactSheetJpeg: bc.redoSheet,
-            pieces: bc.pieces,
-          });
-          const fixedOk = g2.scores ? gatePassed(g2.scores) : false;
-          redoFixed = `${fixedOk ? 'yes' : 'no'} (${fmtProbs(g2.scores)})`;
-        }
 
         return {
           name: bc.name,
           expected: 'BAD',
-          gate: gRes.scores,
-          inspector: inspRes.result,
+          path: out.check.path,
+          gate: firstGateScores ?? out.check.gate,
+          inspector: out.check.inspector,
           flagged: caught,
           redoFixed,
-          msGate: gRes.ms,
-          msInspect: inspRes.ms,
+          msGate: out.check.ms_gate,
+          msInspect: out.check.ms_inspector,
+          msTotal: out.check.ms_total,
           savedPaths: casePaths,
         };
       }),
@@ -691,13 +738,13 @@ async function main(): Promise<void> {
     // 6. Print confusion table & summary
     console.log('\n--- CONFUSION TABLE ---');
     console.log(
-      `${'Case'.padEnd(22)} ${'Exp'.padEnd(4)} ${'Gate Probabilities'.padEnd(32)} ${'Insp'.padEnd(5)} ${'GateMs'.padStart(6)} ${'InspMs'.padStart(6)}  Redo Fixed`,
+      `${'Case'.padEnd(22)} ${'Exp'.padEnd(4)} ${'Path'.padEnd(19)} ${'Gate Probabilities'.padEnd(32)} ${'Insp'.padEnd(5)} ${'GateMs'.padStart(6)} ${'InspMs'.padStart(6)} ${'TotMs'.padStart(6)}  Redo Fixed`,
     );
-    console.log('-'.repeat(108));
+    console.log('-'.repeat(134));
     for (const r of rows) {
       const verdict = r.inspector ? r.inspector.verdict : 'skip';
       console.log(
-        `${r.name.padEnd(22)} ${r.expected.padEnd(4)} ${fmtProbs(r.gate).padEnd(32)} ${verdict.padEnd(5)} ${String(r.msGate).padStart(6)} ${String(r.msInspect).padStart(6)}  ${r.redoFixed}`,
+        `${r.name.padEnd(22)} ${r.expected.padEnd(4)} ${r.path.padEnd(19)} ${fmtProbs(r.gate).padEnd(32)} ${verdict.padEnd(5)} ${String(r.msGate).padStart(6)} ${String(r.msInspect).padStart(6)} ${String(r.msTotal).padStart(6)}  ${r.redoFixed}`,
       );
     }
 
