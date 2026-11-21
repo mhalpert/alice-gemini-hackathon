@@ -1,3 +1,10 @@
+/**
+ * Keyless weather forecast lookup via Open-Meteo for forecast-aware styling.
+ *
+ * The agent can call `warmWeather()` at job start to prime DNS/TLS and cache the
+ * default city's forecast in the background without blocking or throwing.
+ */
+
 export interface Weather {
   ok: boolean;
   source: 'forecast' | 'season' | 'none';
@@ -11,6 +18,7 @@ export interface Weather {
   rain_chance: number | null; // 0-100
   line: string;
   ms: number;
+  assumed_place?: boolean;
 }
 
 export type WhereInput = string | { lat: number; lon: number };
@@ -21,7 +29,9 @@ export interface ForecastOptions {
 }
 
 const DEFAULT_PLACE = 'New York';
-const TIME_BUDGET_MS = 1500;
+const DEFAULT_COORDS: GeoInfo = { name: 'New York', lat: 40.7128, lon: -74.006 };
+const COLD_TIME_BUDGET_MS = 3500;
+const WARM_TIME_BUDGET_MS = 1500;
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const MAX_FORECAST_DAYS = 10;
 const WINDY_THRESHOLD_MPH = 15;
@@ -43,10 +53,85 @@ interface GeoInfo {
 
 const weatherCache = new Map<string, CacheEntry>();
 const geocodeCache = new Map<string, GeoInfo>();
+let moduleWarm = false;
 
 export function clearWeatherCache(): void {
   weatherCache.clear();
   geocodeCache.clear();
+  moduleWarm = false;
+}
+
+// ---------------------------------------------------------------------------
+// Built-in coordinates for well-known places (skips geocoding)
+// ---------------------------------------------------------------------------
+
+const BUILTIN_PLACES: Record<string, GeoInfo> = {
+  'new york': { name: 'New York', lat: 40.7128, lon: -74.006 },
+  'new york city': { name: 'New York', lat: 40.7128, lon: -74.006 },
+  nyc: { name: 'New York', lat: 40.7128, lon: -74.006 },
+  ny: { name: 'New York', lat: 40.7128, lon: -74.006 },
+  manhattan: { name: 'Manhattan', lat: 40.7831, lon: -73.9712 },
+  brooklyn: { name: 'Brooklyn', lat: 40.6782, lon: -73.9442 },
+  queens: { name: 'Queens', lat: 40.7282, lon: -73.7949 },
+  'los angeles': { name: 'Los Angeles', lat: 34.0522, lon: -118.2437 },
+  la: { name: 'Los Angeles', lat: 34.0522, lon: -118.2437 },
+  chicago: { name: 'Chicago', lat: 41.8781, lon: -87.6298 },
+  miami: { name: 'Miami', lat: 25.7617, lon: -80.1918 },
+  'san francisco': { name: 'San Francisco', lat: 37.7749, lon: -122.4194 },
+  sf: { name: 'San Francisco', lat: 37.7749, lon: -122.4194 },
+  boston: { name: 'Boston', lat: 42.3601, lon: -71.0589 },
+  'washington dc': { name: 'Washington DC', lat: 38.9072, lon: -77.0369 },
+  'washington d c': { name: 'Washington DC', lat: 38.9072, lon: -77.0369 },
+  washington: { name: 'Washington DC', lat: 38.9072, lon: -77.0369 },
+  dc: { name: 'Washington DC', lat: 38.9072, lon: -77.0369 },
+  seattle: { name: 'Seattle', lat: 47.6062, lon: -122.3321 },
+  austin: { name: 'Austin', lat: 30.2672, lon: -97.7431 },
+  'las vegas': { name: 'Las Vegas', lat: 36.1699, lon: -115.1398 },
+  vegas: { name: 'Las Vegas', lat: 36.1699, lon: -115.1398 },
+  london: { name: 'London', lat: 51.5074, lon: -0.1278 },
+  paris: { name: 'Paris', lat: 48.8566, lon: 2.3522 },
+  tokyo: { name: 'Tokyo', lat: 35.6762, lon: 139.6503 },
+  lisbon: { name: 'Lisbon', lat: 38.7223, lon: -9.1393 },
+  'mexico city': { name: 'Mexico City', lat: 19.4326, lon: -99.1332 },
+  toronto: { name: 'Toronto', lat: 43.6532, lon: -79.3832 },
+};
+
+const VENUE_WORDS = new Set([
+  'rooftop',
+  'rooftops',
+  'bar',
+  'bars',
+  'party',
+  'parties',
+  'wedding',
+  'weddings',
+  'office',
+  'offices',
+  'downtown',
+  'uptown',
+  'restaurant',
+  'restaurants',
+  'club',
+  'clubs',
+  'beach',
+  'beaches',
+  'park',
+  'parks',
+]);
+
+function normalizePlaceKey(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/\./g, '')
+    .replace(/[^a-z0-9\s'-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function lookupBuiltinPlace(candidate: string): GeoInfo | null {
+  const key = normalizePlaceKey(candidate);
+  if (!key) return null;
+  return BUILTIN_PLACES[key] ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +254,94 @@ function diffDays(from: YMD, to: YMD): number {
   return Math.round((msB - msA) / 86_400_000);
 }
 
+const DATE_PHRASE_PATTERNS: RegExp[] = [
+  /\b\d{4}-\d{2}-\d{2}\b/i,
+  /\bin\s+\d+\s+days?\b/i,
+  /\b(?:this\s+)?weekend\b/i,
+  /\btomorrow(?:\s+(?:night|evening|afternoon|morning))?\b/i,
+  /\b(?:tonight|today|this\s+(?:evening|afternoon|morning))\b/i,
+  /\b(?:(?:this|next)\s+)?(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)(?:\s+(?:night|evening|afternoon|morning))?\b/i,
+  /\b(?:this|next)\s+(?:sun|mon|tues?|weds?|thurs?|thur|fri|sat)(?:\s+(?:night|evening|afternoon|morning))?\b/i,
+  /\b(?:sun|mon|tues?|weds?|thurs?|thur|fri|sat)\s+(?:night|evening|afternoon|morning)\b/i,
+];
+
+function extractDateFromPlace(raw: string): { datePhrase: string | null; stripped: string } {
+  for (const pattern of DATE_PHRASE_PATTERNS) {
+    const match = pattern.exec(raw);
+    if (match && match[0]) {
+      const before = raw.slice(0, match.index);
+      const after = raw.slice(match.index + match[0].length);
+      const stripped = `${before} ${after}`.replace(/\s+/g, ' ').trim();
+      return { datePhrase: match[0].trim(), stripped };
+    }
+  }
+  return { datePhrase: null, stripped: raw };
+}
+
+const PLACE_CUT_PATTERNS: RegExp[] = [
+  /\s\/\s/,
+  /\//,
+  /,/,
+  /\s[-–—]\s/,
+  /\son\s/i,
+  /\sat\s/i,
+  /\sthis\s/i,
+  /\snext\s/i,
+  /\stonight\b/i,
+  /\stomorrow\b/i,
+];
+
+function buildPlaceCandidates(raw: string): string[] {
+  let text = raw.trim().replace(/\s+/g, ' ');
+  if (!text) return [];
+
+  // Cut at the earliest separator or temporal/prepositional marker.
+  let earliestIdx = text.length;
+  for (const pattern of PLACE_CUT_PATTERNS) {
+    const m = pattern.exec(text);
+    if (m && m.index < earliestIdx) {
+      earliestIdx = m.index;
+    }
+  }
+  text = text.slice(0, earliestIdx).trim();
+
+  // Also strip any trailing/embedded date phrase if still present.
+  text = extractDateFromPlace(text).stripped;
+
+  // Strip stray punctuation at edges and collapse whitespace.
+  text = text.replace(/^[,/\-–—\s]+|[,/\-–—\s]+$/g, '').replace(/\s+/g, ' ').trim();
+  if (!text) return [];
+
+  // Drop venue words (rooftop, bar, party, wedding, office, downtown, uptown, restaurant, club, beach, park).
+  const words = text
+    .split(/\s+/)
+    .map((w) => w.replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9.'-]+$/g, ''))
+    .filter((w) => w.length > 0 && !VENUE_WORDS.has(w.toLowerCase()));
+
+  if (words.length === 0) return [];
+
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  const pushCandidate = (candidate: string): void => {
+    const trimmed = candidate.trim();
+    const key = normalizePlaceKey(trimmed);
+    if (trimmed && key && !seen.has(key)) {
+      seen.add(key);
+      candidates.push(trimmed);
+    }
+  };
+
+  pushCandidate(words.join(' '));
+  if (words.length >= 2) {
+    pushCandidate(words.slice(0, 2).join(' '));
+  }
+  if (words.length >= 1) {
+    pushCandidate(words[0]!);
+  }
+
+  return candidates;
+}
+
 export function resolveDate(when?: string | Date, now: Date = new Date()): string {
   const refDate = now instanceof Date && !Number.isNaN(now.getTime()) ? now : new Date();
   const today = dateToNyYmd(refDate);
@@ -213,7 +386,9 @@ export function resolveDate(when?: string | Date, now: Date = new Date()): strin
   if (
     normalized === 'tomorrow' ||
     normalized === 'tomorrow night' ||
-    normalized === 'tomorrow evening'
+    normalized === 'tomorrow evening' ||
+    normalized === 'tomorrow afternoon' ||
+    normalized === 'tomorrow morning'
   ) {
     return formatYmd(addDays(today, 1));
   }
@@ -342,10 +517,12 @@ const KNOWN_CITIES: Record<string, CityClimateHint> = {
   nyc: { lat: 40.71, humid: true },
   manhattan: { lat: 40.78, humid: true },
   brooklyn: { lat: 40.68, humid: true },
+  queens: { lat: 40.73, humid: true },
   miami: { lat: 25.77, humid: true },
   'los angeles': { lat: 34.05 },
   la: { lat: 34.05 },
   'san francisco': { lat: 37.77 },
+  sf: { lat: 37.77 },
   chicago: { lat: 41.88 },
   boston: { lat: 42.36 },
   seattle: { lat: 47.61 },
@@ -479,13 +656,14 @@ function buildSeasonWeather(
   target: YMD,
   deltaDays: number,
   startPerf: number,
+  assumedPlace = false,
 ): Weather {
   const dateStr = formatYmd(target);
   const conditions = describeSeason(target.month, lat, humid);
   const monthPhrase = formatMonthPhrase(target);
   const lead =
     deltaDays < 0
-      ? "That date is in the past"
+      ? 'That date is in the past'
       : "That's too far out for a forecast";
   const locationPhrase = isCoords ? 'at that latitude' : `in ${place}`;
   const line = `${lead}; ${monthPhrase} ${locationPhrase} is usually ${conditions}.`;
@@ -503,6 +681,7 @@ function buildSeasonWeather(
     rain_chance: null,
     line,
     ms: elapsedMs(startPerf),
+    ...(assumedPlace ? { assumed_place: true } : {}),
   };
 }
 
@@ -608,8 +787,9 @@ interface ParsedWhere {
   valid: boolean;
   isCoords: boolean;
   displayPlace: string;
-  cachePlaceKey: string;
-  cityQuery?: string;
+  candidates: string[];
+  builtinHit: GeoInfo | null;
+  assumedDefault: boolean;
   lat?: number;
   lon?: number;
 }
@@ -620,19 +800,47 @@ function parseWhere(where: WhereInput): ParsedWhere {
       valid: true,
       isCoords: false,
       displayPlace: DEFAULT_PLACE,
-      cachePlaceKey: `city:${DEFAULT_PLACE.toLowerCase()}`,
-      cityQuery: DEFAULT_PLACE,
+      candidates: [],
+      builtinHit: DEFAULT_COORDS,
+      assumedDefault: true,
     };
   }
 
   if (typeof where === 'string') {
-    const city = normalizeCityName(where);
+    const candidates = buildPlaceCandidates(where);
+    if (candidates.length === 0) {
+      return {
+        valid: true,
+        isCoords: false,
+        displayPlace: DEFAULT_PLACE,
+        candidates: [],
+        builtinHit: DEFAULT_COORDS,
+        assumedDefault: true,
+      };
+    }
+
+    // Check candidates against built-in places table before geocoding.
+    for (const candidate of candidates) {
+      const hit = lookupBuiltinPlace(candidate);
+      if (hit) {
+        return {
+          valid: true,
+          isCoords: false,
+          displayPlace: hit.name,
+          candidates,
+          builtinHit: hit,
+          assumedDefault: false,
+        };
+      }
+    }
+
     return {
       valid: true,
       isCoords: false,
-      displayPlace: city,
-      cachePlaceKey: `city:${city.toLowerCase()}`,
-      cityQuery: city,
+      displayPlace: candidates[0]!,
+      candidates,
+      builtinHit: null,
+      assumedDefault: false,
     };
   }
 
@@ -644,7 +852,9 @@ function parseWhere(where: WhereInput): ParsedWhere {
         valid: false,
         isCoords: true,
         displayPlace: '',
-        cachePlaceKey: '',
+        candidates: [],
+        builtinHit: null,
+        assumedDefault: false,
       };
     }
     const displayPlace = `${lat.toFixed(2)}, ${lon.toFixed(2)}`;
@@ -652,7 +862,9 @@ function parseWhere(where: WhereInput): ParsedWhere {
       valid: true,
       isCoords: true,
       displayPlace,
-      cachePlaceKey: `coords:${lat.toFixed(4)},${lon.toFixed(4)}`,
+      candidates: [],
+      builtinHit: null,
+      assumedDefault: false,
       lat,
       lon,
     };
@@ -662,26 +874,22 @@ function parseWhere(where: WhereInput): ParsedWhere {
     valid: false,
     isCoords: false,
     displayPlace: '',
-    cachePlaceKey: '',
+    candidates: [],
+    builtinHit: null,
+    assumedDefault: false,
   };
 }
 
 function lookupCityClimate(city: string): CityClimateHint {
-  const key = city.toLowerCase();
+  const key = normalizePlaceKey(city);
   const known = KNOWN_CITIES[key];
   if (known) return known;
 
+  const builtin = BUILTIN_PLACES[key];
+  if (builtin) return { lat: builtin.lat };
+
   const cachedGeo = geocodeCache.get(key);
   if (cachedGeo) return { lat: cachedGeo.lat };
-
-  // Also check city before comma, e.g. "Miami, FL" -> "miami"
-  const commaIdx = key.indexOf(',');
-  if (commaIdx > 0) {
-    const prefix = key.slice(0, commaIdx).trim();
-    if (KNOWN_CITIES[prefix]) return KNOWN_CITIES[prefix]!;
-    const cachedPrefix = geocodeCache.get(prefix);
-    if (cachedPrefix) return { lat: cachedPrefix.lat };
-  }
 
   // Fallback to northern temperate mid-latitude
   return { lat: 40.71 };
@@ -696,7 +904,9 @@ async function fetchJsonWithSignal(
   if (!res || !res.ok) {
     throw new Error(`HTTP ${res?.status ?? 'error'}`);
   }
-  return res.json();
+  const data = await res.json();
+  moduleWarm = true;
+  return data;
 }
 
 interface GeocodeApiResponse {
@@ -722,6 +932,49 @@ interface ForecastApiResponse {
   };
 }
 
+function cacheKeyForGeo(placeName: string, isCoords: boolean, lat: number, lon: number, dateStr: string): string {
+  if (isCoords) {
+    return `coords:${lat.toFixed(4)},${lon.toFixed(4)}|${dateStr}`;
+  }
+  return `city:${normalizePlaceKey(placeName)}|${dateStr}`;
+}
+
+function getCachedWeather(cacheKey: string, nowMs: number, startPerf: number, assumedPlace: boolean): Weather | null {
+  const cached = weatherCache.get(cacheKey);
+  if (!cached) return null;
+  const age = nowMs - cached.storedAt;
+  if (age >= 0 && age < CACHE_TTL_MS) {
+    const base: Weather = { ...cached.weather, ms: elapsedMs(startPerf) };
+    if (assumedPlace) {
+      base.assumed_place = true;
+    } else {
+      delete base.assumed_place;
+    }
+    return base;
+  }
+  weatherCache.delete(cacheKey);
+  return null;
+}
+
+function storeCachedWeather(cacheKey: string, nowMs: number, weather: Weather): void {
+  const canonical: Weather = { ...weather };
+  delete canonical.assumed_place;
+  weatherCache.set(cacheKey, { storedAt: nowMs, weather: canonical });
+}
+
+export function warmWeather(
+  place: WhereInput = DEFAULT_PLACE,
+  opts?: ForecastOptions,
+): Promise<Weather> {
+  try {
+    const p = forecast(place, 'today', opts);
+    p.catch(() => {});
+    return p;
+  } catch {
+    return Promise.resolve(noneWeather(DEFAULT_PLACE, resolveDate('today', opts?.now), performance.now()));
+  }
+}
+
 export async function forecast(
   where: WhereInput,
   when?: string | Date,
@@ -733,7 +986,21 @@ export async function forecast(
     const now = opts?.now instanceof Date && !Number.isNaN(opts.now.getTime()) ? opts.now : new Date();
     const nowMs = now.getTime();
     const todayYmd = dateToNyYmd(now);
-    const dateStr = resolveDate(when, now);
+
+    const hasExplicitWhen =
+      when !== undefined &&
+      when !== null &&
+      !(typeof when === 'string' && when.trim().length === 0);
+
+    let effectiveWhen: string | Date | undefined = when;
+    if (!hasExplicitWhen && typeof where === 'string') {
+      const extracted = extractDateFromPlace(where);
+      if (extracted.datePhrase) {
+        effectiveWhen = extracted.datePhrase;
+      }
+    }
+
+    const dateStr = resolveDate(effectiveWhen, now);
     const targetYmd = parseYmd(dateStr) ?? todayYmd;
     const deltaDays = diffDays(todayYmd, targetYmd);
 
@@ -742,31 +1009,58 @@ export async function forecast(
       return noneWeather(parsed.displayPlace, dateStr, startPerf);
     }
 
-    const cacheKey = `${parsed.cachePlaceKey}|${dateStr}`;
-    const cached = weatherCache.get(cacheKey);
-    if (cached) {
-      const age = nowMs - cached.storedAt;
-      if (age >= 0 && age < CACHE_TTL_MS) {
-        return { ...cached.weather, ms: elapsedMs(startPerf) };
-      }
-      weatherCache.delete(cacheKey);
-    }
-
     // Beyond 10 days out or in the past: seasonal estimate without any fetch call
     if (deltaDays > MAX_FORECAST_DAYS || deltaDays < 0) {
-      const lat = parsed.isCoords ? parsed.lat! : lookupCityClimate(parsed.cityQuery!).lat;
-      const humid = parsed.isCoords ? false : Boolean(lookupCityClimate(parsed.cityQuery!).humid);
+      const seasonPlace = parsed.builtinHit?.name ?? parsed.displayPlace;
+      const climate = parsed.isCoords
+        ? { lat: parsed.lat!, humid: false }
+        : lookupCityClimate(seasonPlace);
+      const seasonKey = parsed.isCoords
+        ? cacheKeyForGeo(seasonPlace, true, parsed.lat!, parsed.lon!, dateStr)
+        : `city:${normalizePlaceKey(seasonPlace)}|${dateStr}`;
+
+      const hit = getCachedWeather(seasonKey, nowMs, startPerf, parsed.assumedDefault);
+      if (hit) return hit;
+
       const seasonResult = buildSeasonWeather(
-        parsed.displayPlace,
+        seasonPlace,
         parsed.isCoords,
-        lat,
-        humid,
+        climate.lat,
+        Boolean(climate.humid),
         targetYmd,
         deltaDays,
         startPerf,
+        parsed.assumedDefault,
       );
-      weatherCache.set(cacheKey, { storedAt: nowMs, weather: seasonResult });
+      storeCachedWeather(seasonKey, nowMs, seasonResult);
       return seasonResult;
+    }
+
+    // Fast path: cache check when coordinates/place are already known without network
+    if (parsed.isCoords) {
+      const coordKey = cacheKeyForGeo(parsed.displayPlace, true, parsed.lat!, parsed.lon!, dateStr);
+      const hit = getCachedWeather(coordKey, nowMs, startPerf, false);
+      if (hit) return hit;
+    } else if (parsed.builtinHit) {
+      const builtinKey = cacheKeyForGeo(
+        parsed.builtinHit.name,
+        false,
+        parsed.builtinHit.lat,
+        parsed.builtinHit.lon,
+        dateStr,
+      );
+      const hit = getCachedWeather(builtinKey, nowMs, startPerf, parsed.assumedDefault);
+      if (hit) return hit;
+    } else {
+      for (const candidate of parsed.candidates) {
+        const cachedGeo = geocodeCache.get(normalizePlaceKey(candidate));
+        if (cachedGeo) {
+          const geoKey = cacheKeyForGeo(cachedGeo.name, false, cachedGeo.lat, cachedGeo.lon, dateStr);
+          const hit = getCachedWeather(geoKey, nowMs, startPerf, false);
+          if (hit) return hit;
+          break;
+        }
+      }
     }
 
     const fetchFn = opts?.fetch ?? globalThis.fetch;
@@ -774,6 +1068,7 @@ export async function forecast(
       return noneWeather(parsed.displayPlace, dateStr, startPerf);
     }
 
+    const budgetMs = moduleWarm ? WARM_TIME_BUDGET_MS : COLD_TIME_BUDGET_MS;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -781,7 +1076,7 @@ export async function forecast(
       timer = setTimeout(() => {
         controller.abort();
         resolve(null);
-      }, TIME_BUDGET_MS);
+      }, budgetMs);
       timer.unref?.();
     });
 
@@ -789,19 +1084,26 @@ export async function forecast(
       let lat: number;
       let lon: number;
       let placeName = parsed.displayPlace;
+      let assumedPlace = parsed.assumedDefault;
 
       if (parsed.isCoords) {
         lat = parsed.lat!;
         lon = parsed.lon!;
+      } else if (parsed.builtinHit) {
+        lat = parsed.builtinHit.lat;
+        lon = parsed.builtinHit.lon;
+        placeName = parsed.builtinHit.name;
       } else {
-        const cityKey = parsed.cityQuery!.toLowerCase();
-        const cachedGeo = geocodeCache.get(cityKey);
-        if (cachedGeo) {
-          lat = cachedGeo.lat;
-          lon = cachedGeo.lon;
-          placeName = cachedGeo.name;
-        } else {
-          const geoUrl = `${GEOCODE_ENDPOINT}?name=${encodeURIComponent(parsed.cityQuery!)}&count=1&language=en&format=json`;
+        let resolved: GeoInfo | null = null;
+        for (const candidate of parsed.candidates) {
+          const candKey = normalizePlaceKey(candidate);
+          const cachedGeo = geocodeCache.get(candKey);
+          if (cachedGeo) {
+            resolved = cachedGeo;
+            break;
+          }
+
+          const geoUrl = `${GEOCODE_ENDPOINT}?name=${encodeURIComponent(candidate)}&count=1&language=en&format=json`;
           const geoJson = (await fetchJsonWithSignal(
             fetchFn,
             geoUrl,
@@ -811,18 +1113,34 @@ export async function forecast(
           const first = Array.isArray(geoJson?.results) ? geoJson.results[0] : undefined;
           const geoLat = finiteNumber(first?.latitude);
           const geoLon = finiteNumber(first?.longitude);
-          if (!first || geoLat === null || geoLon === null) {
-            return noneWeather(placeName, dateStr, startPerf);
+          if (first && geoLat !== null && geoLon !== null) {
+            const name =
+              typeof first.name === 'string' && first.name.trim().length > 0
+                ? first.name.trim()
+                : candidate;
+            resolved = { name, lat: geoLat, lon: geoLon };
+            geocodeCache.set(candKey, resolved);
+            break;
           }
-
-          lat = geoLat;
-          lon = geoLon;
-          placeName =
-            typeof first.name === 'string' && first.name.trim().length > 0
-              ? first.name.trim()
-              : parsed.displayPlace;
-          geocodeCache.set(cityKey, { name: placeName, lat, lon });
         }
+
+        if (resolved) {
+          lat = resolved.lat;
+          lon = resolved.lon;
+          placeName = resolved.name;
+        } else {
+          // Nothing resolved: fall back to default place (New York) and mark assumed_place.
+          lat = DEFAULT_COORDS.lat;
+          lon = DEFAULT_COORDS.lon;
+          placeName = DEFAULT_COORDS.name;
+          assumedPlace = true;
+        }
+      }
+
+      const resolvedCacheKey = cacheKeyForGeo(placeName, parsed.isCoords, lat, lon, dateStr);
+      const cachedAfterResolve = getCachedWeather(resolvedCacheKey, nowMs, startPerf, assumedPlace);
+      if (cachedAfterResolve) {
+        return cachedAfterResolve;
       }
 
       const forecastParams = new URLSearchParams({
@@ -924,7 +1242,7 @@ export async function forecast(
         rain_chance,
       });
 
-      return {
+      const weather: Weather = {
         ok: true,
         source: 'forecast',
         place: placeName,
@@ -937,7 +1255,11 @@ export async function forecast(
         rain_chance,
         line,
         ms: elapsedMs(startPerf),
+        ...(assumedPlace ? { assumed_place: true } : {}),
       };
+
+      storeCachedWeather(resolvedCacheKey, nowMs, weather);
+      return weather;
     })();
 
     // Prevent unhandled rejection if timeout wins the race before workPromise settles
@@ -956,9 +1278,6 @@ export async function forecast(
       return noneWeather(parsed.displayPlace, dateStr, startPerf);
     }
 
-    if (result.ok) {
-      weatherCache.set(cacheKey, { storedAt: nowMs, weather: result });
-    }
     return result;
   } catch {
     const safeDate = (() => {
