@@ -15,9 +15,12 @@ import {
   DEFAULT_SIZES_FALLBACK_MS,
   DEFAULT_STUDIO_HOLD_MS,
   SCENE_REVEAL_VARIANT_COUNT,
+  STUDIO_REVEAL_VARIANT_COUNT,
   VIDEO_REVEAL_VARIANT_COUNT,
   buildSceneRevealInstruction,
   buildSceneRevealLine,
+  buildStudioRevealInstruction,
+  buildStudioRevealLine,
   buildSwapStudioRevealInstruction,
   buildVideoRevealInstruction,
   buildVideoRevealLine,
@@ -359,6 +362,7 @@ test('sequencer plays studio -> scene (>=5s & after studio line) -> video (>=6s 
 
   const sequencer = createRevealSequencer({
     room: 'r-seq-ready',
+    sendTryOnReady: (payload) => page.send('tryOnReady', payload),
     sendReveal: (payload) => page.send('reveal', payload),
     generateReply: (opts) => replies.push(opts),
     initialAgentState: 'listening',
@@ -396,21 +400,18 @@ test('sequencer plays studio -> scene (>=5s & after studio line) -> video (>=6s 
   await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
   calls.length = 0;
 
-  // Both scene and video land BEFORE show_on_me.
+  // Both scene and video land BEFORE show_on_me — held in memory, NEVER sent to page before studio reveal!
+  capturedOnRender!({ kind: 'video', ok: true, url: 'https://media.local/video-1.mp4', ms: 10_000 });
   capturedOnRender!({ kind: 'scene', ok: true, url: 'https://media.local/scene-1.jpg', ms: 12_000 });
-  capturedOnRender!({ kind: 'video', ok: true, url: 'https://media.local/video-1.mp4', ms: 24_000 });
   await flushMicrotasks();
 
-  // Only tryOnReady sent before studio reveal; zero reveals, zero speech.
-  assert.deepEqual(calls, [
-    { action: 'tryOnReady', payload: { outfit: 1, url: 'https://media.local/scene-1.jpg', kind: 'scene' } },
-    { action: 'tryOnReady', payload: { outfit: 1, url: 'https://media.local/video-1.mp4', kind: 'video' } },
-  ]);
+  assert.deepEqual(calls, [], 'scene and video must NOT be sent to page before studio is revealed');
   assert.equal(replies.length, 0);
 
-  // Beat 1: studio reveal via show_on_me -> tells Alice ONE short line, do NOT ask for sizes yet.
+  // Beat 1: studio reveal via show_on_me -> Mike's studio narration + ONE short line, do NOT ask for sizes yet.
   calls.length = 0;
   const showRes = await tools.show_on_me.execute({ outfit: 1 }, fakeToolOpts('s1'));
+  assert.match(showRes, /Here's what the outfit looks like on you\./);
   assert.match(showRes, /ONE short line/i);
   assert.match(showRes, /do not ask for sizes yet/i);
   assert.equal(sequencer.isActive, true);
@@ -427,12 +428,15 @@ test('sequencer plays studio -> scene (>=5s & after studio line) -> video (>=6s 
   assert.equal(reveals().length, 1, 'Beat 2 must wait until Alice finishes her studio line');
   assert.equal(replies.length, 0);
 
-  // Alice finishes studio line at +6500ms -> Beat 2 (scene) fires immediately!
+  // Alice finishes studio line at +6500ms -> Beat 2 (scene) sends tryOnReady(scene) then reveal(scene)!
   await clock.advance(1_000);
   sequencer.onAgentStateChanged('listening');
   await flushMicrotasks();
 
-  assert.deepEqual(reveals().at(-1), { action: 'reveal', payload: { outfit: 1, kind: 'scene' } });
+  assert.deepEqual(calls.slice(-2), [
+    { action: 'tryOnReady', payload: { outfit: 1, url: 'https://media.local/scene-1.jpg', kind: 'scene' } },
+    { action: 'reveal', payload: { outfit: 1, url: 'https://media.local/scene-1.jpg', kind: 'scene' } },
+  ]);
   assert.equal(replies.length, 1);
   assert.match(replies[0]!.instructions, /beach wedding in Capri/i);
   assert.match(replies[0]!.instructions, /do not ask a question/i);
@@ -449,9 +453,13 @@ test('sequencer plays studio -> scene (>=5s & after studio line) -> video (>=6s 
   assert.equal(reveals().length, 2, 'Beat 3 must respect 6s minimum hold on scene');
   assert.equal(replies.length, 1);
 
-  // At +6000ms after scene reveal: Beat 3 (video) fires!
+  // At +6000ms after scene reveal: Beat 3 (video) sends tryOnReady(video) then reveal(video)!
   await clock.advance(1);
-  assert.deepEqual(reveals().at(-1), { action: 'reveal', payload: { outfit: 1, kind: 'video' } });
+  await flushMicrotasks();
+  assert.deepEqual(calls.slice(-2), [
+    { action: 'tryOnReady', payload: { outfit: 1, url: 'https://media.local/video-1.mp4', kind: 'video' } },
+    { action: 'reveal', payload: { outfit: 1, url: 'https://media.local/video-1.mp4', kind: 'video' } },
+  ]);
   assert.equal(replies.length, 2);
   assert.match(replies[1]!.instructions, /in motion/i);
   assert.match(replies[1]!.instructions, /do not ask a question/i);
@@ -542,7 +550,10 @@ test('late-landing scene waits up to 20s and video landing 0.3s later still hold
 
   const reveals = () => calls.filter((c) => c.action === 'reveal');
   assert.equal(reveals().length, 2);
-  assert.deepEqual(reveals().at(-1), { action: 'reveal', payload: { outfit: 1, kind: 'scene' } });
+  assert.deepEqual(reveals().at(-1), {
+    action: 'reveal',
+    payload: { outfit: 1, url: 'https://media.local/scene-1.jpg', kind: 'scene' },
+  });
   assert.equal(replies.length, 1);
 
   // Video lands just 0.3s later (reproducing the real-call bug!) -> MUST NOT replace scene yet!
@@ -560,7 +571,10 @@ test('late-landing scene waits up to 20s and video landing 0.3s later still hold
 
   await clock.advance(1);
   assert.equal(reveals().length, 3);
-  assert.deepEqual(reveals().at(-1), { action: 'reveal', payload: { outfit: 1, kind: 'video' } });
+  assert.deepEqual(reveals().at(-1), {
+    action: 'reveal',
+    payload: { outfit: 1, url: 'https://media.local/video-1.mp4', kind: 'video' },
+  });
   assert.equal(replies.length, 2);
 
   const beatLogs = logs.filter((l) => l.ev === 'reveal_beat').map((l) => l.data);
@@ -912,9 +926,12 @@ test('shortenSettingPhrase, buildSceneRevealInstruction, and buildVideoRevealIns
   assert.equal(videoInstr.includes('?'), false);
 });
 
-test('scene and video reveal lines have 3 varied <14-word NY lines rotated without repeats in one call', async () => {
+test('studio, scene, and video reveal lines have 3 varied <16-word lines in Alice voice carrying occasion and never repeating in one call', async () => {
   const countWords = (s: string) => s.trim().split(/\s+/).filter(Boolean).length;
 
+  const studioLines = Array.from({ length: STUDIO_REVEAL_VARIANT_COUNT }, (_, i) =>
+    buildStudioRevealLine(i),
+  );
   const sceneLines = Array.from({ length: SCENE_REVEAL_VARIANT_COUNT }, (_, i) =>
     buildSceneRevealLine('a beach wedding in Capri', i),
   );
@@ -922,23 +939,33 @@ test('scene and video reveal lines have 3 varied <14-word NY lines rotated witho
     buildVideoRevealLine('a beach wedding in Capri', i),
   );
 
+  assert.equal(new Set(studioLines).size, 3, 'studio beat must have 3 distinct lines');
   assert.equal(new Set(sceneLines).size, 3, 'scene beat must have 3 distinct lines');
   assert.equal(new Set(videoLines).size, 3, 'video beat must have 3 distinct lines');
 
-  for (const line of [...sceneLines, ...videoLines]) {
-    assert.ok(countWords(line) < 14, `expected <14 words, got ${countWords(line)}: "${line}"`);
-    assert.match(line, /beach wedding in Capri/);
+  assert.equal(studioLines[0], "Here's what the outfit looks like on you.");
+  assert.equal(videoLines[0], "And here's a video of you in the look.");
+  assert.match(buildStudioRevealInstruction(0), /Here's what the outfit looks like on you\./);
+
+  for (const line of [...studioLines, ...sceneLines, ...videoLines]) {
+    assert.ok(countWords(line) < 16, `expected <16 words, got ${countWords(line)}: "${line}"`);
     assert.equal(line.includes('?'), false);
   }
 
+  for (const line of sceneLines) {
+    assert.match(line, /at the beach wedding in Capri/);
+  }
+
+  // When occasion is unknown, drop the occasion clause cleanly.
   for (let i = 0; i < 3; i++) {
     const sFallback = buildSceneRevealLine('', i);
     const vFallback = buildVideoRevealLine('', i);
-    assert.ok(countWords(sFallback) < 14, `fallback scene line too long: "${sFallback}"`);
-    assert.ok(countWords(vFallback) < 14, `fallback video line too long: "${vFallback}"`);
+    assert.ok(countWords(sFallback) < 16, `fallback scene line too long: "${sFallback}"`);
+    assert.ok(countWords(vFallback) < 16, `fallback video line too long: "${vFallback}"`);
+    assert.doesNotMatch(sFallback, /\bat the\b/i, `unknown occasion must drop "at the <occasion>": "${sFallback}"`);
   }
 
-  // Rotation across 3 reveals in a single call never repeats a scene or video line.
+  // Rotation across 3 reveals in a single call never repeats studio, scene, or video lines.
   const clock = createFakeClock(60_000);
   const replies: string[] = [];
   const seq = createRevealSequencer({
@@ -953,24 +980,29 @@ test('scene and video reveal lines have 3 varied <14-word NY lines rotated witho
     clearTimeoutFn: clock.clearTimeoutFn,
   });
 
+  const studioReplies: string[] = [];
   const sceneReplies: string[] = [];
   const videoReplies: string[] = [];
   for (let outfit = 1; outfit <= 3; outfit++) {
     replies.length = 0;
-    seq.startStudio({
+    const studioLine = seq.startStudio({
       outfit,
       setting: 'beach wedding in Capri',
       scene: 'ready',
       video: 'ready',
+      sceneUrl: `https://media.local/scene-${outfit}.jpg`,
+      videoUrl: `https://media.local/video-${outfit}.mp4`,
       sizesAlreadyPrompted: true,
       getSizesInstruction: () => '',
     });
+    studioReplies.push(studioLine);
     await clock.advance(DEFAULT_STUDIO_HOLD_MS);
     sceneReplies.push(replies[0]!);
     await clock.advance(DEFAULT_SCENE_HOLD_MS);
     videoReplies.push(replies[1]!);
   }
 
+  assert.equal(new Set(studioReplies).size, 3, 'studio reveal line must not repeat in one call');
   assert.equal(new Set(sceneReplies).size, 3, 'scene reveal instruction must not repeat in one call');
   assert.equal(new Set(videoReplies).size, 3, 'video reveal instruction must not repeat in one call');
 });
@@ -1195,4 +1227,85 @@ test('prewarmScene runs once per look on try-on ready with brief/weather, swallo
   await flushMicrotasks();
 
   assert.equal(prewarmCalls.length, 3, 'prewarmScene must NOT run after swaps');
+});
+
+test('video arriving before scene after studio reveal never skips ahead of scene; strict order studio -> scene -> video', async () => {
+  const clock = createFakeClock(80_000);
+  const replies: Array<{ instructions: string }> = [];
+  const { page, calls } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-order', log: () => {} });
+
+  const sequencer = createRevealSequencer({
+    room: 'r-order',
+    sendTryOnReady: (payload) => page.send('tryOnReady', payload),
+    sendReveal: (payload) => page.send('reveal', payload),
+    generateReply: (opts) => replies.push(opts),
+    initialAgentState: 'listening',
+    initialUserState: 'listening',
+    log: () => {},
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+  });
+
+  let capturedOnRender: TryOnExtrasOptions['onRender'];
+  const tools = createAgentTools({
+    room: 'r-order',
+    log: () => {},
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+    page,
+    state,
+    revealSequencer: sequencer,
+    deps: makeBaseDeps({
+      prewarmScene: null,
+      async tryOnExtras(_studio, _outfit, opts) {
+        capturedOnRender = opts.onRender;
+        return new Promise<TryOnExtrasResult>(() => {});
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'women' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute(
+    { occasion: 'cocktail party', where: 'SoHo', budget_usd: 300 },
+    fakeToolOpts('b1'),
+  );
+  await flushMicrotasks();
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+  calls.length = 0;
+
+  await tools.show_on_me.execute({ outfit: 1 }, fakeToolOpts('s1'));
+  const mediaCalls = () => calls.filter((c) => c.action === 'tryOnReady' || c.action === 'reveal');
+  assert.deepEqual(mediaCalls(), [
+    { action: 'reveal', payload: { outfit: 1, url: 'https://media.local/studio-1.jpg' } },
+  ]);
+
+  // Video lands at +2s while scene is still pending -> MUST NOT send video to page yet!
+  await clock.advance(2_000);
+  capturedOnRender!({ kind: 'video', ok: true, url: 'https://media.local/video-1.mp4', ms: 2_000 });
+  await flushMicrotasks();
+  assert.equal(mediaCalls().length, 1, 'video must stay in memory while waiting for scene');
+
+  // Even past the 5s studio hold, video still waits for pending scene.
+  await clock.advance(4_000); // +6s
+  assert.equal(mediaCalls().length, 1, 'video must not jump ahead of pending scene');
+
+  // Scene lands at +7s -> scene sent immediately (tryOnReady + reveal), video still held >= 5s!
+  await clock.advance(1_000); // +7s
+  capturedOnRender!({ kind: 'scene', ok: true, url: 'https://media.local/scene-1.jpg', ms: 7_000 });
+  await flushMicrotasks();
+  assert.deepEqual(mediaCalls().slice(1), [
+    { action: 'tryOnReady', payload: { outfit: 1, url: 'https://media.local/scene-1.jpg', kind: 'scene' } },
+    { action: 'reveal', payload: { outfit: 1, url: 'https://media.local/scene-1.jpg', kind: 'scene' } },
+  ]);
+
+  // After scene hold -> video sent (tryOnReady + reveal).
+  await clock.advance(DEFAULT_SCENE_HOLD_MS);
+  await flushMicrotasks();
+  assert.deepEqual(mediaCalls().slice(3), [
+    { action: 'tryOnReady', payload: { outfit: 1, url: 'https://media.local/video-1.mp4', kind: 'video' } },
+    { action: 'reveal', payload: { outfit: 1, url: 'https://media.local/video-1.mp4', kind: 'video' } },
+  ]);
 });

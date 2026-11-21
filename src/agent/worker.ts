@@ -54,6 +54,7 @@ import {
 } from './tavus.ts';
 import { createAgentTools, resolveTryOnExtras } from './tools.ts';
 import { createVisionController } from './vision.ts';
+import { createWalkthroughController, isExpressModeState } from './walkthrough.ts';
 
 const { Behavior, FunctionResponseScheduling } = google.realtime;
 
@@ -600,11 +601,23 @@ export default defineAgent({
 
     const revealSequencer = createRevealSequencer({
       room: roomName,
+      sendTryOnReady: (payload) => page.send('tryOnReady', payload),
       sendReveal: (payload) => page.send('reveal', payload),
       generateReply: (opts) => {
         silenceCheckInRef?.onExternalReply();
         return sessionRef?.generateReply(opts);
       },
+      log: calllog,
+    });
+
+    const walkthrough = createWalkthroughController({
+      room: roomName,
+      page,
+      generateReply: (opts) => {
+        silenceCheckInRef?.onExternalReply();
+        return sessionRef?.generateReply(opts);
+      },
+      isExpress: () => isExpressModeState(callState.get()),
       log: calllog,
     });
 
@@ -630,7 +643,10 @@ export default defineAgent({
       room: roomName,
       generateReply: (opts) => sessionRef?.generateReply(opts),
       isSuppressed: () =>
-        resultNudger.hasPending || toolFiller.isRunning || revealSequencer.isActive,
+        resultNudger.hasPending ||
+        toolFiller.isRunning ||
+        revealSequencer.isActive ||
+        walkthrough.isActive,
       isExpress: () => callState.get().express,
       log: calllog,
     });
@@ -660,6 +676,7 @@ export default defineAgent({
       purchaseMaxUsd: config.purchaseMaxUsd,
       orderController,
       revealSequencer,
+      walkthrough,
       sendWorkingNote: (params) => sendInterimToolNote(activeRealtimeSession, params),
       onToolStart: (ev) => {
         silenceCheckIn.onToolStart(ev.callId);
@@ -704,6 +721,7 @@ export default defineAgent({
       appContext.setAgentState(ev.newState);
       resultNudger.onAgentStateChanged(ev.newState);
       revealSequencer.onAgentStateChanged(ev.newState);
+      walkthrough.onAgentStateChanged(ev.newState);
       toolFiller.onAgentStateChanged(ev.newState);
       silenceCheckIn.onAgentStateChanged(ev.newState);
       calllog(roomName, 'agent_state', { old: ev.oldState, state: ev.newState });
@@ -712,6 +730,7 @@ export default defineAgent({
     session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
       resultNudger.onUserStateChanged(ev.newState);
       revealSequencer.onUserStateChanged(ev.newState);
+      walkthrough.onUserStateChanged(ev.newState);
       toolFiller.onUserStateChanged(ev.newState);
       silenceCheckIn.onUserStateChanged(ev.newState);
       calllog(roomName, 'user_state', { old: ev.oldState, state: ev.newState });
@@ -722,6 +741,7 @@ export default defineAgent({
         callState.recordShopperTurn(ev.transcript, ev.itemId);
         silenceCheckIn.onShopperActivity();
         revealSequencer.onShopperSpoke();
+        walkthrough.onShopperSpoke();
         if (ev.itemId) {
           loggedUserItemIds.add(ev.itemId);
         }
@@ -743,6 +763,7 @@ export default defineAgent({
           callState.recordShopperTurn(text, ev.item.id);
           silenceCheckIn.onShopperActivity();
           revealSequencer.onShopperSpoke();
+          walkthrough.onShopperSpoke();
           if (!ev.item.id || !loggedUserItemIds.has(ev.item.id)) {
             if (ev.item.id) {
               loggedUserItemIds.add(ev.item.id);
@@ -804,6 +825,7 @@ export default defineAgent({
       toolAbort.abort();
       resultNudger.dispose();
       revealSequencer.dispose();
+      walkthrough.dispose();
       toolFiller.dispose();
       silenceCheckIn.dispose();
       cleanupTavusWatcher?.();
@@ -818,6 +840,7 @@ export default defineAgent({
       toolAbort.abort();
       resultNudger.dispose();
       revealSequencer.dispose();
+      walkthrough.dispose();
       toolFiller.dispose();
       silenceCheckIn.dispose();
       cleanupCameraWatcher?.();

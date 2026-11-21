@@ -22,13 +22,24 @@ export interface StartRevealSequenceParams {
   setting: string;
   scene: ExtraAssetStatus;
   video: ExtraAssetStatus;
+  sceneUrl?: string;
+  videoUrl?: string;
   sizesAlreadyPrompted?: boolean;
   getSizesInstruction: () => string;
 }
 
 export interface RevealSequencerOptions {
   room: string;
-  sendReveal: (payload: { outfit: number; kind: TryOnExtraKind }) => Promise<unknown> | unknown;
+  sendReveal: (payload: {
+    outfit: number;
+    url?: string;
+    kind: TryOnExtraKind;
+  }) => Promise<unknown> | unknown;
+  sendTryOnReady?: (payload: {
+    outfit: number;
+    url: string;
+    kind: TryOnExtraKind;
+  }) => Promise<unknown> | unknown;
   generateReply: (opts: { instructions: string }) => unknown;
   studioHoldMs?: number;
   sceneHoldMs?: number;
@@ -49,12 +60,12 @@ export interface SwapStudioRevealParams {
 }
 
 export interface RevealSequencer {
-  startStudio(params: StartRevealSequenceParams): void;
+  startStudio(params: StartRevealSequenceParams): string;
   announceSwapStudioReady?(params: SwapStudioRevealParams): void;
   onExtraReady(
     outfit: number,
     kind: TryOnExtraKind,
-    opts?: { version?: number; setting?: string },
+    opts?: { version?: number; setting?: string; url?: string },
   ): void;
   onExtraFailed(
     outfit: number,
@@ -78,6 +89,8 @@ interface ActiveSequence {
   setting: string;
   scene: ExtraAssetStatus;
   video: ExtraAssetStatus;
+  sceneUrl?: string;
+  videoUrl?: string;
   sceneRevealed: boolean;
   videoRevealed: boolean;
   lastBeatKind: RevealBeatKind;
@@ -132,53 +145,71 @@ export function shortenSettingPhrase(raw: string | null | undefined): string {
   return clipped.join(' ').replace(/[,;:]+$/, '');
 }
 
+export const STUDIO_REVEAL_VARIANT_COUNT = 3;
 export const SCENE_REVEAL_VARIANT_COUNT = 3;
 export const VIDEO_REVEAL_VARIANT_COUNT = 3;
 
 /**
- * Returns one of three short (<14 words), varied scene-beat lines in Alice's
- * New York friend voice, naming the occasion/place when known.
+ * Returns one of three short (<16 words), varied studio-beat lines in Alice's voice.
+ */
+export function buildStudioRevealLine(variantIndex = 0): string {
+  const idx =
+    ((Math.trunc(variantIndex) % STUDIO_REVEAL_VARIANT_COUNT) + STUDIO_REVEAL_VARIANT_COUNT) %
+    STUDIO_REVEAL_VARIANT_COUNT;
+  const lines = [
+    "Here's what the outfit looks like on you.",
+    "Okay, take a look—here's the outfit on you.",
+    "Alright, moment of truth—here's the look on you.",
+  ];
+  return lines[idx]!;
+}
+
+/**
+ * Builds the one-line spoken instruction for Beat 1 (studio still).
+ */
+export function buildStudioRevealInstruction(variantIndex = 0): string {
+  const line = buildStudioRevealLine(variantIndex);
+  return `The studio try-on shot of them in this look just came up on screen. Say in your voice as Alice: "${line}" You may follow with one short reaction line. Do not invent any visual details and do not ask a question.`;
+}
+
+/**
+ * Returns one of three short (<16 words), varied scene-beat lines in Alice's
+ * voice, naming the occasion/place when known and dropping the clause when unknown.
  */
 export function buildSceneRevealLine(setting: string, variantIndex = 0): string {
   const shortSetting = shortenSettingPhrase(setting);
-  const idx = ((Math.trunc(variantIndex) % SCENE_REVEAL_VARIANT_COUNT) + SCENE_REVEAL_VARIANT_COUNT) % SCENE_REVEAL_VARIANT_COUNT;
+  const idx =
+    ((Math.trunc(variantIndex) % SCENE_REVEAL_VARIANT_COUNT) + SCENE_REVEAL_VARIANT_COUNT) %
+    SCENE_REVEAL_VARIANT_COUNT;
   if (shortSetting) {
     const lines = [
-      `Now picture it: you, walking into that ${shortSetting}.`,
-      `Okay wait, you at that ${shortSetting} is iconic.`,
-      `Hold on—this is literally your moment at that ${shortSetting}.`,
+      `And for a better feel at the ${shortSetting}, here's you there.`,
+      `Now, the real test: here's you at the ${shortSetting}.`,
+      `Okay, picture the room—here's you at the ${shortSetting}.`,
     ];
     return lines[idx]!;
   }
   const fallbackLines = [
-    'Now picture it: you, walking right into the room.',
-    'Okay wait, you stepping into that room is iconic.',
-    'Hold on—this is literally your main-character arrival.',
+    "And if you want a better feel for it, here's you there.",
+    "Now, the real test: here's you in the real setting.",
+    "Okay, picture the room—here's you stepping right in.",
   ];
   return fallbackLines[idx]!;
 }
 
 /**
- * Returns one of three short (<14 words), varied video-beat lines in Alice's
- * New York friend voice, naming the occasion/place when known.
+ * Returns one of three short (<16 words), varied video-beat lines in Alice's voice.
  */
-export function buildVideoRevealLine(setting?: string, variantIndex = 0): string {
-  const shortSetting = shortenSettingPhrase(setting);
-  const idx = ((Math.trunc(variantIndex) % VIDEO_REVEAL_VARIANT_COUNT) + VIDEO_REVEAL_VARIANT_COUNT) % VIDEO_REVEAL_VARIANT_COUNT;
-  if (shortSetting) {
-    const lines = [
-      `Stop. Look at you move at that ${shortSetting}.`,
-      `Oh, I cannot—watch that walk at the ${shortSetting}.`,
-      `No, because look at you owning that ${shortSetting} in motion.`,
-    ];
-    return lines[idx]!;
-  }
-  const fallbackLines = [
-    'Stop. Look at you move.',
-    'Oh, I cannot—watch that walk in motion.',
-    'No, because look at you owning the whole room.',
+export function buildVideoRevealLine(_setting?: string, variantIndex = 0): string {
+  const idx =
+    ((Math.trunc(variantIndex) % VIDEO_REVEAL_VARIANT_COUNT) + VIDEO_REVEAL_VARIANT_COUNT) %
+    VIDEO_REVEAL_VARIANT_COUNT;
+  const lines = [
+    "And here's a video of you in the look.",
+    'And here it is in motion.',
+    'Now watch the whole look move on you.',
   ];
-  return fallbackLines[idx]!;
+  return lines[idx]!;
 }
 
 /**
@@ -187,20 +218,16 @@ export function buildVideoRevealLine(setting?: string, variantIndex = 0): string
 export function buildSceneRevealInstruction(setting: string, variantIndex = 0): string {
   const shortSetting = shortenSettingPhrase(setting);
   const line = buildSceneRevealLine(setting, variantIndex);
-  const settingPart = shortSetting
-    ? `naming "${shortSetting}"`
-    : 'naming the event from the occasion';
-  return `The on-location shot of them in this look just came up on screen. Give ONE short line in your voice as Alice (${settingPart}), like "${line}" Do not invent any visual details and do not ask a question.`;
+  const settingPart = shortSetting ? ` (${shortSetting})` : '';
+  return `The on-location shot of them in this look just came up on screen${settingPart}. Say ONE short line in your voice as Alice: "${line}" Do not invent any visual details and do not ask a question.`;
 }
 
 /**
  * Builds the one-line spoken instruction for Beat 3 (short motion video).
  */
 export function buildVideoRevealInstruction(setting?: string, variantIndex = 0): string {
-  const shortSetting = shortenSettingPhrase(setting);
   const line = buildVideoRevealLine(setting, variantIndex);
-  const eventPart = shortSetting ? ` at the ${shortSetting}` : ' at the event';
-  return `The short video of them in this look just came up on screen. Give ONE short line in your voice as Alice for them in motion${eventPart}, like "${line}" Do not invent any visual details and do not ask a question.`;
+  return `The short video of them in this look just came up on screen. Say ONE short line in your voice as Alice for them in motion: "${line}" Do not invent any visual details and do not ask a question.`;
 }
 
 /**
@@ -248,6 +275,7 @@ export function createRevealSequencer(options: RevealSequencerOptions): RevealSe
   let active: ActiveSequence | null = null;
   let pendingSwapAnnouncement: SwapStudioRevealParams | null = null;
   let syntheticToolCounter = 0;
+  let studioVariantCursor = 0;
   let sceneVariantCursor = 0;
   let videoVariantCursor = 0;
 
@@ -374,12 +402,36 @@ export function createRevealSequencer(options: RevealSequencerOptions): RevealSe
         seq.lastBeatAt = now;
         seq.sizesReadySince = null;
 
-        try {
-          void Promise.resolve(options.sendReveal({ outfit: seq.outfit, kind: target })).catch(
-            () => {},
-          );
-        } catch {
-          // Ignore synchronous send errors so sequencing does not stall.
+        const beatUrl = target === 'scene' ? seq.sceneUrl : seq.videoUrl;
+        const revealPayload: { outfit: number; url?: string; kind: TryOnExtraKind } = {
+          outfit: seq.outfit,
+          ...(beatUrl ? { url: beatUrl } : {}),
+          kind: target,
+        };
+
+        if (beatUrl && options.sendTryOnReady) {
+          try {
+            void Promise.resolve(
+              options.sendTryOnReady({ outfit: seq.outfit, url: beatUrl, kind: target }),
+            )
+              .catch(() => {})
+              .then(() => {
+                if (disposed) return;
+                return Promise.resolve(options.sendReveal(revealPayload)).catch(() => {});
+              });
+          } catch {
+            try {
+              void Promise.resolve(options.sendReveal(revealPayload)).catch(() => {});
+            } catch {
+              // Ignore synchronous send errors so sequencing does not stall.
+            }
+          }
+        } else {
+          try {
+            void Promise.resolve(options.sendReveal(revealPayload)).catch(() => {});
+          } catch {
+            // Ignore synchronous send errors so sequencing does not stall.
+          }
         }
 
         let spoken = false;
@@ -457,8 +509,9 @@ export function createRevealSequencer(options: RevealSequencerOptions): RevealSe
       return active !== null;
     },
 
-    startStudio(params: StartRevealSequenceParams): void {
-      if (disposed) return;
+    startStudio(params: StartRevealSequenceParams): string {
+      const studioLine = buildStudioRevealLine(studioVariantCursor++);
+      if (disposed) return studioLine;
       cancelTimer();
       pendingSwapAnnouncement = null;
 
@@ -471,6 +524,8 @@ export function createRevealSequencer(options: RevealSequencerOptions): RevealSe
         setting: params.setting,
         scene: params.scene,
         video: params.video,
+        ...(params.sceneUrl ? { sceneUrl: params.sceneUrl } : {}),
+        ...(params.videoUrl ? { videoUrl: params.videoUrl } : {}),
         sceneRevealed: false,
         videoRevealed: false,
         lastBeatKind: 'studio',
@@ -491,12 +546,13 @@ export function createRevealSequencer(options: RevealSequencerOptions): RevealSe
       });
 
       evaluate();
+      return studioLine;
     },
 
     onExtraReady(
       outfit: number,
       kind: TryOnExtraKind,
-      opts?: { version?: number; setting?: string },
+      opts?: { version?: number; setting?: string; url?: string },
     ): void {
       if (disposed || !active) return;
       if (active.outfit !== outfit) return;
@@ -514,8 +570,14 @@ export function createRevealSequencer(options: RevealSequencerOptions): RevealSe
 
       if (kind === 'scene' && !active.sceneRevealed) {
         active.scene = 'ready';
+        if (opts?.url && opts.url.trim().length > 0) {
+          active.sceneUrl = opts.url.trim();
+        }
       } else if (kind === 'video' && !active.videoRevealed) {
         active.video = 'ready';
+        if (opts?.url && opts.url.trim().length > 0) {
+          active.videoUrl = opts.url.trim();
+        }
       }
 
       evaluate();
