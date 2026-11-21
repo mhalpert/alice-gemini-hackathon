@@ -11,6 +11,27 @@ const NAV_ITEMS = [
 
 const COUNT_WORDS = ['Zero', 'One', 'Two', 'Three', 'Four', 'Five', 'Six'];
 
+const RENDER_KINDS = ['studio', 'scene', 'video'];
+const RENDER_PRIORITY = ['video', 'scene', 'studio'];
+
+const RENDER_CAPTIONS = {
+  studio: 'On you',
+  scene: 'On you, on location',
+  video: 'On you, in motion',
+};
+
+const RENDER_LABELS = {
+  studio: 'Studio',
+  scene: 'On location',
+  video: 'In motion',
+};
+
+function normalizeRenderKind(raw) {
+  if (typeof raw !== 'string') return 'studio';
+  const trimmed = raw.trim().toLowerCase();
+  return RENDER_KINDS.includes(trimmed) ? trimmed : 'studio';
+}
+
 // Shared Shopify image sizing helper — always use this for store CDN URLs
 function sized(url, width) {
   if (!url || typeof url !== 'string') return '';
@@ -355,7 +376,7 @@ export function mountStore(root, { onTalk } = {}) {
   const state = {
     view: 'boutique', // 'empty' | 'boutique' | 'looks' | 'picked' | 'search'
     outfits: new Map(), // look number -> Outfit
-    media: new Map(), // look number -> { tryOnStatus, tryOnUrl, collageUrl, collageBoxes, revealed, stageSwapped, preloads }
+    media: new Map(), // look number -> { tryOnStatus, tryOnUrl, renders, activeRender, userPickedRender, autoAdvancedKinds, newRenderTags, videoPreload, videoFailed, failedUrls, collageUrl, collageBoxes, revealed, stageSwapped, preloads }
     subtitleMeta: { raw: '', cleanSubtitle: '', occasion: '', budget: null },
     pickedOutfit: null,
     highlightedSlot: null,
@@ -406,6 +427,14 @@ export function mountStore(root, { onTalk } = {}) {
       state.media.set(num, {
         tryOnStatus: null,
         tryOnUrl: null,
+        renders: { studio: null, scene: null, video: null },
+        activeRender: null,
+        userPickedRender: false,
+        autoAdvancedKinds: new Set(),
+        newRenderTags: new Map(),
+        videoPreload: null,
+        videoFailed: false,
+        failedUrls: new Set(),
         collageUrl: null,
         collageBoxes: null,
         revealed: false,
@@ -416,6 +445,29 @@ export function mountStore(root, { onTalk } = {}) {
     return state.media.get(num);
   }
 
+  function hasAnyRender(media) {
+    return Boolean(media && (media.renders.studio || media.renders.scene || media.renders.video));
+  }
+
+  function availableRenderKinds(media) {
+    if (!media) return [];
+    return RENDER_KINDS.filter(
+      (kind) => Boolean(media.renders[kind]) && !(kind === 'video' && media.videoFailed)
+    );
+  }
+
+  function pickRenderKind(media, preferredKind = null, { exclude = null } = {}) {
+    if (!media) return null;
+    const isUsable = (kind) =>
+      Boolean(kind && kind !== exclude && media.renders[kind]) &&
+      !(kind === 'video' && media.videoFailed);
+    if (isUsable(preferredKind)) return preferredKind;
+    for (const kind of RENDER_PRIORITY) {
+      if (isUsable(kind)) return kind;
+    }
+    return null;
+  }
+
   function preloadImage(media, url) {
     if (!url) return;
     const img = new Image();
@@ -423,6 +475,82 @@ export function mountStore(root, { onTalk } = {}) {
     img.src = url;
     media.preloads.push(img);
     if (media.preloads.length > 4) media.preloads.shift();
+  }
+
+  // Pause and clear a <video> element so it stops decoding and drops buffered data
+  function releaseVideoElement(videoEl) {
+    if (!videoEl) return;
+    videoEl.dataset.activeSrc = '';
+    videoEl.dataset.preloadUrl = '';
+    try {
+      videoEl.pause();
+    } catch {
+      // Ignore pause errors on detached or unloaded elements
+    }
+    videoEl.removeAttribute('src');
+    try {
+      videoEl.load();
+    } catch {
+      // Ignore load errors when media playback is unavailable
+    }
+  }
+
+  // Preload a clip in a detached muted video element so playback can start right away on reveal
+  function preloadVideo(media, url) {
+    if (!url) return;
+    if (media.videoPreload) {
+      if (media.videoPreload.dataset.preloadUrl === url) return;
+      releaseVideoElement(media.videoPreload);
+      media.videoPreload = null;
+    }
+    const video = document.createElement('video');
+    video.preload = 'auto';
+    video.muted = true;
+    video.defaultMuted = true;
+    video.playsInline = true;
+    video.setAttribute('preload', 'auto');
+    video.setAttribute('muted', '');
+    video.setAttribute('playsinline', '');
+    video.dataset.preloadUrl = url;
+    video.src = url;
+    try {
+      video.load();
+    } catch {
+      // Ignore environments without media preloading
+    }
+    media.videoPreload = video;
+  }
+
+  function clearLookRenders(media) {
+    if (!media) return;
+    media.tryOnUrl = null;
+    media.renders = { studio: null, scene: null, video: null };
+    media.activeRender = null;
+    media.userPickedRender = false;
+    media.autoAdvancedKinds.clear();
+    media.videoFailed = false;
+    media.failedUrls.clear();
+    for (const timerId of media.newRenderTags.values()) {
+      clearTimeout(timerId);
+    }
+    media.newRenderTags.clear();
+    if (media.videoPreload) {
+      releaseVideoElement(media.videoPreload);
+      media.videoPreload = null;
+    }
+    media.preloads = [];
+  }
+
+  function markRenderNew(outfitNumber, media, kind) {
+    const existingTimer = media.newRenderTags.get(kind);
+    if (existingTimer) clearTimeout(existingTimer);
+    const timerId = setTimeout(() => {
+      media.newRenderTags.delete(kind);
+      if (state.view === 'picked' && activePickedRefs && activePickedRefs.outfit === outfitNumber) {
+        syncRenderStrip(activePickedRefs, media);
+      }
+    }, 4000);
+    media.newRenderTags.set(kind, timerId);
   }
 
   function setHasProducts() {
@@ -810,6 +938,9 @@ export function mountStore(root, { onTalk } = {}) {
   window.addEventListener('resize', syncHeaderHeight, { passive: true });
 
   function updateNavActive() {
+    if (state.view !== 'picked') {
+      releaseStageVideo();
+    }
     const looksLink = navLinks.get('Looks by Alice');
     if (looksLink) {
       const active = state.view === 'looks' || state.view === 'picked';
@@ -1016,6 +1147,7 @@ export function mountStore(root, { onTalk } = {}) {
   }
 
   function renderEmptyView() {
+    releaseStageVideo();
     boutiqueRefs = null;
     mainEl.replaceChildren(
       el(
@@ -1764,6 +1896,7 @@ export function mountStore(root, { onTalk } = {}) {
   }
 
   function renderLooksView() {
+    releaseStageVideo();
     boutiqueRefs = null;
     const looks = sortedOutfits();
     if (looks.length === 0) {
@@ -1985,13 +2118,250 @@ export function mountStore(root, { onTalk } = {}) {
     ring.setAttribute('aria-hidden', 'false');
   }
 
-  function applyStageState(panelRefs, media, { deferReveal = false } = {}) {
+  function syncVideoPlayButton(panelRefs) {
+    if (!panelRefs || !panelRefs.stageVideo || !panelRefs.videoPlayBtn) return;
+    const playing = !panelRefs.stageVideo.paused && !panelRefs.stageVideo.ended;
+    panelRefs.videoPlayBtn.classList.toggle('is-playing', playing);
+    panelRefs.videoPlayBtn.setAttribute('aria-pressed', playing ? 'true' : 'false');
+    panelRefs.videoPlayBtn.setAttribute('aria-label', playing ? 'Pause video' : 'Play video');
+    if (panelRefs.videoPlayLabel) {
+      panelRefs.videoPlayLabel.textContent = playing ? 'Pause' : 'Play';
+    }
+  }
+
+  function releaseStageVideo(panelRefs = null) {
+    const target = panelRefs && panelRefs.stageVideo ? panelRefs.stageVideo : null;
+    if (target) {
+      releaseVideoElement(target);
+      if (target === activeStageVideo) activeStageVideo = null;
+    }
+    if (activeStageVideo && activeStageVideo !== target) {
+      releaseVideoElement(activeStageVideo);
+      activeStageVideo = null;
+    }
+    if (panelRefs && panelRefs.videoPlayBtn) {
+      panelRefs.videoPlayBtn.hidden = true;
+      panelRefs.videoPlayBtn.classList.remove('is-playing');
+      panelRefs.videoPlayBtn.setAttribute('aria-pressed', 'false');
+    }
+  }
+
+  function triggerMediaFade(mediaEl, panelRefs) {
+    if (!mediaEl || prefersReducedMotion()) return;
+    mediaEl.classList.add('is-media-entering');
+    void mediaEl.offsetWidth;
+    requestAnimationFrame(() => {
+      if (state.view === 'picked' && activePickedRefs === panelRefs) {
+        mediaEl.classList.remove('is-media-entering');
+      }
+    });
+  }
+
+  function handleVideoFailure(panelRefs, media, failedUrl) {
+    if (!media || media.renders.video !== failedUrl) return;
+    media.videoFailed = true;
+    releaseStageVideo(panelRefs);
+    const fallbackKind = pickRenderKind(media, null, { exclude: 'video' });
+    media.activeRender = fallbackKind;
+    media.tryOnUrl = fallbackKind ? media.renders[fallbackKind] : null;
+    if (state.view === 'picked' && activePickedRefs === panelRefs) {
+      applyStageState(panelRefs, media);
+    }
+  }
+
+  function mountStageVideo(panelRefs, media, videoUrl, { fade = false } = {}) {
+    const { stageVideo, videoPlayBtn } = panelRefs;
+    const reduced = prefersReducedMotion();
+    const srcChanged = stageVideo.dataset.activeSrc !== videoUrl;
+
+    stageVideo.muted = true;
+    stageVideo.defaultMuted = true;
+    stageVideo.playsInline = true;
+    stageVideo.loop = true;
+    stageVideo.controls = false;
+    stageVideo.hidden = false;
+
+    if (reduced) {
+      stageVideo.autoplay = false;
+      stageVideo.removeAttribute('autoplay');
+      if (srcChanged) {
+        stageVideo.dataset.activeSrc = videoUrl;
+        stageVideo.src = videoUrl;
+        try {
+          stageVideo.load();
+        } catch {
+          // Ignore load errors when media playback is unavailable
+        }
+        try {
+          stageVideo.pause();
+        } catch {
+          // Ignore pause errors
+        }
+      }
+      activeStageVideo = stageVideo;
+      videoPlayBtn.hidden = false;
+      syncVideoPlayButton(panelRefs);
+    } else {
+      stageVideo.autoplay = true;
+      stageVideo.setAttribute('autoplay', '');
+      videoPlayBtn.hidden = true;
+      if (srcChanged) {
+        stageVideo.dataset.activeSrc = videoUrl;
+        stageVideo.src = videoUrl;
+      }
+      activeStageVideo = stageVideo;
+      if (srcChanged || stageVideo.paused) {
+        try {
+          const playPromise = stageVideo.play();
+          if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch((err) => {
+              if (err && err.name === 'AbortError') return;
+              if (activePickedRefs !== panelRefs || stageVideo.dataset.activeSrc !== videoUrl) return;
+              handleVideoFailure(panelRefs, media, videoUrl);
+            });
+          }
+        } catch {
+          handleVideoFailure(panelRefs, media, videoUrl);
+          return;
+        }
+      }
+    }
+
+    if (fade) {
+      triggerMediaFade(stageVideo, panelRefs);
+    } else {
+      stageVideo.classList.remove('is-media-entering');
+    }
+  }
+
+  function createRenderTile(panelRefs, kind) {
+    const tileImg = el('img', {
+      className: 'render-tile-img',
+      alt: '',
+      decoding: 'async',
+      hidden: true,
+      onError: () => {
+        tileImg.hidden = true;
+      },
+    });
+    const playIcon =
+      kind === 'video' ? el('span', { className: 'render-tile-play', 'aria-hidden': 'true' }) : null;
+    const newTag = el('span', { className: 'render-tile-new', hidden: true }, 'New');
+    const mediaBox = el('span', { className: 'render-tile-media' }, tileImg, playIcon, newTag);
+    const labelEl = el('span', { className: 'render-tile-label' }, RENDER_LABELS[kind]);
+    const btn = el(
+      'button',
+      {
+        type: 'button',
+        className: `render-tile render-tile--${kind}`,
+        dataset: { renderKind: kind },
+        'aria-pressed': 'false',
+        onClick: () => {
+          const currentMedia = getMedia(panelRefs.outfit);
+          if (!currentMedia.revealed || !currentMedia.renders[kind]) return;
+          if (kind === 'video' && currentMedia.videoFailed) return;
+          const wasSwapped = currentMedia.stageSwapped;
+          const prevKind = currentMedia.activeRender;
+          currentMedia.userPickedRender = true;
+          currentMedia.stageSwapped = false;
+          currentMedia.activeRender = kind;
+          currentMedia.tryOnUrl = currentMedia.renders[kind];
+          const timerId = currentMedia.newRenderTags.get(kind);
+          if (timerId) {
+            clearTimeout(timerId);
+            currentMedia.newRenderTags.delete(kind);
+          }
+          if (state.view === 'picked' && activePickedRefs === panelRefs) {
+            applyStageState(panelRefs, currentMedia, {
+              fadeRender: !wasSwapped && prevKind !== kind,
+            });
+          }
+        },
+      },
+      mediaBox,
+      labelEl
+    );
+    return { btn, tileImg, newTag };
+  }
+
+  // Show labelled render tiles under the stage once revealed and more than one render exists
+  function syncRenderStrip(panelRefs, media, { newlyArrivedKind = null } = {}) {
+    const { renderStrip, renderTiles } = panelRefs;
+    if (!renderStrip || !renderTiles) return;
+
+    const visibleKinds = availableRenderKinds(media);
+    if (!media.revealed || visibleKinds.length <= 1) {
+      renderStrip.hidden = true;
+      return;
+    }
+
+    renderStrip.hidden = false;
+
+    for (const [kind, entry] of renderTiles.entries()) {
+      if (!visibleKinds.includes(kind)) {
+        entry.btn.remove();
+        renderTiles.delete(kind);
+      }
+    }
+
+    let cursor = 0;
+    for (const kind of visibleKinds) {
+      let entry = renderTiles.get(kind);
+      if (!entry) {
+        entry = createRenderTile(panelRefs, kind);
+        renderTiles.set(kind, entry);
+      }
+
+      const thumbUrl =
+        kind === 'video' ? media.renders.studio || media.renders.scene : media.renders[kind];
+      if (thumbUrl) {
+        const nextSrc = stageUrl(thumbUrl, 320);
+        if (entry.tileImg.getAttribute('src') !== nextSrc) {
+          entry.tileImg.hidden = false;
+          entry.tileImg.setAttribute('src', nextSrc);
+        }
+      } else {
+        entry.tileImg.removeAttribute('src');
+        entry.tileImg.hidden = true;
+      }
+
+      const isSelected = !media.stageSwapped && media.activeRender === kind;
+      entry.btn.classList.toggle('is-selected', isSelected);
+      entry.btn.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+      entry.newTag.hidden = !media.newRenderTags.has(kind);
+
+      const currentChild = renderStrip.children[cursor];
+      if (currentChild !== entry.btn) {
+        renderStrip.insertBefore(entry.btn, currentChild || null);
+      }
+      cursor += 1;
+
+      if (newlyArrivedKind === kind && !prefersReducedMotion()) {
+        entry.btn.classList.add('is-tile-entering');
+        void entry.btn.offsetWidth;
+        requestAnimationFrame(() => {
+          if (state.view === 'picked' && activePickedRefs === panelRefs) {
+            entry.btn.classList.remove('is-tile-entering');
+          }
+        });
+      }
+    }
+  }
+
+  function applyStageState(
+    panelRefs,
+    media,
+    { deferReveal = false, fadeRender = false, newlyArrivedKind = null } = {}
+  ) {
     const {
       stagePanel,
       boardLayer,
       boardFrame,
       collageImg,
       tryOnImg,
+      stageVideo,
+      videoPlayBtn,
+      lookLabel,
       stageCaption,
       thumbBtn,
       thumbImg,
@@ -2018,19 +2388,60 @@ export function mountStore(root, { onTalk } = {}) {
       resetBoardFrameAspect(boardFrame);
     }
 
+    // Resolve which render is active once revealed; fall back cleanly if a render is unavailable
+    let activeKind = null;
+    if (media.revealed) {
+      if (
+        media.activeRender &&
+        media.renders[media.activeRender] &&
+        !(media.activeRender === 'video' && media.videoFailed)
+      ) {
+        activeKind = media.activeRender;
+      } else {
+        activeKind = pickRenderKind(media);
+        media.activeRender = activeKind;
+      }
+    }
+
     // Try-on stays hidden until reveal; on reveal it takes the main stage unless swapped
-    const hasReveal = Boolean(media.revealed && media.tryOnUrl);
+    const hasReveal = Boolean(media.revealed && activeKind);
     const showingTryOn = hasReveal && !media.stageSwapped;
 
-    if (hasReveal) {
-      const nextTryOn = stageUrl(media.tryOnUrl, 900);
-      tryOnImg.hidden = false;
+    if (!hasReveal) {
+      tryOnImg.removeAttribute('src');
+      tryOnImg.hidden = true;
+      tryOnImg.classList.remove('is-media-entering');
+      releaseStageVideo(panelRefs);
+      stageVideo.hidden = true;
+    } else if (activeKind === 'video') {
+      tryOnImg.removeAttribute('src');
+      tryOnImg.hidden = true;
+      tryOnImg.classList.remove('is-media-entering');
+      if (showingTryOn) {
+        mountStageVideo(panelRefs, media, media.renders.video, { fade: fadeRender });
+      } else {
+        try {
+          stageVideo.pause();
+        } catch {
+          // Ignore pause errors when swapped to flat lay
+        }
+        videoPlayBtn.hidden = true;
+      }
+    } else {
+      releaseStageVideo(panelRefs);
+      stageVideo.hidden = true;
+      const nextTryOn = stageUrl(media.renders[activeKind], 900);
+      tryOnImg.hidden = media.failedUrls.has(nextTryOn);
+      tryOnImg.alt =
+        activeKind === 'scene' ? `${lookLabel} on location` : `${lookLabel} try-on`;
       if (tryOnImg.getAttribute('src') !== nextTryOn) {
         tryOnImg.setAttribute('src', nextTryOn);
       }
-    } else {
-      tryOnImg.removeAttribute('src');
-      tryOnImg.hidden = true;
+      if (showingTryOn && fadeRender) {
+        triggerMediaFade(tryOnImg, panelRefs);
+      } else {
+        tryOnImg.classList.remove('is-media-entering');
+      }
     }
 
     if (showingTryOn) {
@@ -2054,14 +2465,16 @@ export function mountStore(root, { onTalk } = {}) {
       stagePanel.classList.remove('is-showing-tryon');
     }
 
-    stageCaption.textContent = showingTryOn ? 'On you' : 'The flat lay';
+    stageCaption.textContent = showingTryOn
+      ? RENDER_CAPTIONS[activeKind] || 'On you'
+      : 'The flat lay';
 
     // Corner swap thumbnail appears once revealed so the shopper can toggle between try-on and flat lay
     if (hasReveal) {
       thumbBtn.hidden = false;
       if (showingTryOn) {
         thumbBtn.classList.add('is-thumb-collage');
-        thumbBtn.classList.remove('is-thumb-tryon');
+        thumbBtn.classList.remove('is-thumb-tryon', 'is-thumb-video');
         thumbBtn.setAttribute('aria-label', 'Show the flat lay');
         thumbLabel.textContent = 'Flat lay';
         if (media.collageUrl) {
@@ -2075,14 +2488,25 @@ export function mountStore(root, { onTalk } = {}) {
           thumbImg.hidden = true;
         }
       } else {
+        const isVideo = activeKind === 'video';
         thumbBtn.classList.add('is-thumb-tryon');
         thumbBtn.classList.remove('is-thumb-collage');
-        thumbBtn.setAttribute('aria-label', 'Show on you');
-        thumbLabel.textContent = 'On you';
-        const thumbSrc = stageUrl(media.tryOnUrl, 900);
-        thumbImg.hidden = false;
-        if (thumbImg.getAttribute('src') !== thumbSrc) {
-          thumbImg.setAttribute('src', thumbSrc);
+        thumbBtn.classList.toggle('is-thumb-video', isVideo);
+        const captionText = RENDER_CAPTIONS[activeKind] || 'On you';
+        thumbBtn.setAttribute('aria-label', `Show ${captionText.toLowerCase()}`);
+        thumbLabel.textContent = activeKind === 'studio' ? 'On you' : RENDER_LABELS[activeKind];
+        const previewUrl = isVideo
+          ? media.renders.studio || media.renders.scene
+          : media.renders[activeKind];
+        if (previewUrl) {
+          const thumbSrc = stageUrl(previewUrl, 900);
+          thumbImg.hidden = false;
+          if (thumbImg.getAttribute('src') !== thumbSrc) {
+            thumbImg.setAttribute('src', thumbSrc);
+          }
+        } else {
+          thumbImg.removeAttribute('src');
+          thumbImg.hidden = true;
         }
       }
       requestAnimationFrame(() => {
@@ -2091,18 +2515,20 @@ export function mountStore(root, { onTalk } = {}) {
         }
       });
     } else {
-      thumbBtn.classList.remove('is-thumb-visible', 'is-thumb-collage', 'is-thumb-tryon');
+      thumbBtn.classList.remove('is-thumb-visible', 'is-thumb-collage', 'is-thumb-tryon', 'is-thumb-video');
       thumbBtn.hidden = true;
       thumbImg.removeAttribute('src');
       thumbImg.hidden = true;
     }
+
+    syncRenderStrip(panelRefs, media, { newlyArrivedKind });
 
     // One-line try-on status below the bag control (nothing when failed or already revealed)
     tryOnStatusEl.classList.remove('is-rendering', 'is-ready');
     if (hasReveal) {
       tryOnStatusEl.textContent = '';
       tryOnStatusEl.hidden = true;
-    } else if (media.tryOnStatus === 'ready' && media.tryOnUrl) {
+    } else if (!media.revealed && media.tryOnStatus === 'ready' && hasAnyRender(media)) {
       tryOnStatusEl.textContent = "Try-on ready: say 'show me'";
       tryOnStatusEl.classList.add('is-ready');
       tryOnStatusEl.hidden = false;
@@ -2127,8 +2553,10 @@ export function mountStore(root, { onTalk } = {}) {
   }
 
   let activePickedRefs = null;
+  let activeStageVideo = null;
 
   function renderPickedView({ deferReveal = false } = {}) {
+    releaseStageVideo();
     boutiqueRefs = null;
     const look = state.outfits.get(state.pickedOutfit);
     if (!look) {
@@ -2200,10 +2628,111 @@ export function mountStore(root, { onTalk } = {}) {
       decoding: 'async',
       hidden: true,
       onError: () => {
+        const brokenSrc = tryOnImg.getAttribute('src');
+        if (!brokenSrc) return;
+        media.failedUrls.add(brokenSrc);
         tryOnImg.hidden = true;
+        const altKind =
+          media.activeRender === 'scene'
+            ? 'studio'
+            : media.activeRender === 'studio'
+              ? 'scene'
+              : null;
+        if (
+          altKind &&
+          media.renders[altKind] &&
+          !media.failedUrls.has(stageUrl(media.renders[altKind], 900)) &&
+          state.view === 'picked' &&
+          activePickedRefs &&
+          activePickedRefs.outfit === look.number
+        ) {
+          media.activeRender = altKind;
+          media.tryOnUrl = media.renders[altKind];
+          applyStageState(activePickedRefs, media);
+        }
       },
     });
-    const tryOnLayer = el('div', { className: 'stage-tryon-layer' }, tryOnImg);
+
+    const stageVideo = el('video', {
+      className: 'stage-tryon-video',
+      muted: true,
+      loop: true,
+      playsinline: true,
+      preload: 'auto',
+      hidden: true,
+      'aria-label': `${lookLabel} in motion`,
+      onPlay: () => {
+        if (activePickedRefs && activePickedRefs.outfit === look.number) {
+          syncVideoPlayButton(activePickedRefs);
+        }
+      },
+      onPause: () => {
+        if (activePickedRefs && activePickedRefs.outfit === look.number) {
+          syncVideoPlayButton(activePickedRefs);
+        }
+      },
+      onError: () => {
+        const failedUrl = stageVideo.dataset.activeSrc;
+        if (!failedUrl) return;
+        if (activePickedRefs && activePickedRefs.outfit === look.number) {
+          handleVideoFailure(activePickedRefs, media, failedUrl);
+        }
+      },
+    });
+    stageVideo.muted = true;
+    stageVideo.defaultMuted = true;
+    stageVideo.playsInline = true;
+    stageVideo.loop = true;
+    stageVideo.controls = false;
+
+    const videoPlayLabel = el('span', null, 'Play');
+    const videoPlayBtn = el(
+      'button',
+      {
+        type: 'button',
+        className: 'stage-video-play-btn',
+        hidden: true,
+        'aria-label': 'Play video',
+        'aria-pressed': 'false',
+        onClick: () => {
+          const activeUrl = stageVideo.dataset.activeSrc;
+          if (!activeUrl) return;
+          if (stageVideo.paused) {
+            try {
+              const p = stageVideo.play();
+              if (p && typeof p.catch === 'function') {
+                p.catch((err) => {
+                  if (err && err.name === 'AbortError') return;
+                  if (activePickedRefs && activePickedRefs.outfit === look.number) {
+                    handleVideoFailure(activePickedRefs, media, activeUrl);
+                  }
+                });
+              }
+            } catch {
+              if (activePickedRefs && activePickedRefs.outfit === look.number) {
+                handleVideoFailure(activePickedRefs, media, activeUrl);
+              }
+            }
+          } else {
+            try {
+              stageVideo.pause();
+            } catch {
+              // Ignore pause errors
+            }
+          }
+        },
+      },
+      el('span', { className: 'stage-video-play-icon', 'aria-hidden': 'true' }),
+      videoPlayLabel
+    );
+
+    const tryOnLayer = el(
+      'div',
+      { className: 'stage-tryon-layer' },
+      tryOnImg,
+      stageVideo,
+      videoPlayBtn
+    );
 
     const thumbImg = el('img', {
       className: 'stage-thumb-img',
@@ -2214,6 +2743,7 @@ export function mountStore(root, { onTalk } = {}) {
         thumbImg.hidden = true;
       },
     });
+    const thumbPlay = el('span', { className: 'stage-thumb-play', 'aria-hidden': 'true' });
     const thumbLabel = el('span', { className: 'stage-thumb-label' }, 'Flat lay');
     const thumbBtn = el(
       'button',
@@ -2223,7 +2753,7 @@ export function mountStore(root, { onTalk } = {}) {
         hidden: true,
         'aria-label': 'Show the flat lay',
         onClick: () => {
-          if (!media.revealed || !media.tryOnUrl) return;
+          if (!media.revealed || !pickRenderKind(media)) return;
           media.stageSwapped = !media.stageSwapped;
           if (activePickedRefs && activePickedRefs.outfit === look.number) {
             applyStageState(activePickedRefs, media);
@@ -2231,6 +2761,7 @@ export function mountStore(root, { onTalk } = {}) {
         },
       },
       thumbImg,
+      thumbPlay,
       thumbLabel
     );
 
@@ -2249,10 +2780,17 @@ export function mountStore(root, { onTalk } = {}) {
     );
 
     const stageCaption = el('figcaption', { className: 'stage-caption' }, 'The flat lay');
+    const renderStrip = el('div', {
+      className: 'stage-render-strip',
+      role: 'group',
+      'aria-label': 'Look renders',
+      hidden: true,
+    });
     const visualCol = el(
       'div',
       { className: 'stage-visual-col' },
-      el('figure', { className: 'stage-figure' }, stagePanel, stageCaption)
+      el('figure', { className: 'stage-figure' }, stagePanel, stageCaption),
+      renderStrip
     );
 
     let hasActiveRow = false;
@@ -2359,13 +2897,19 @@ export function mountStore(root, { onTalk } = {}) {
 
     activePickedRefs = {
       outfit: look.number,
+      lookLabel,
       stagePanel,
       boardLayer,
       boardFrame,
       collageImg,
       pointerRing,
       tryOnImg,
+      stageVideo,
+      videoPlayBtn,
+      videoPlayLabel,
       stageCaption,
+      renderStrip,
+      renderTiles: new Map(),
       thumbBtn,
       thumbImg,
       thumbLabel,
@@ -2421,7 +2965,10 @@ export function mountStore(root, { onTalk } = {}) {
     }
   }
 
-  function syncMediaInCurrentView(outfitNumber, { deferReveal = false } = {}) {
+  function syncMediaInCurrentView(
+    outfitNumber,
+    { deferReveal = false, fadeRender = false, newlyArrivedKind = null } = {}
+  ) {
     const media = getMedia(outfitNumber);
     if (state.view === 'looks') {
       const escaped = CSS.escape(String(outfitNumber));
@@ -2434,7 +2981,7 @@ export function mountStore(root, { onTalk } = {}) {
         applyLookCardCollage(visualEl, boardLayer, boardImg, media.collageUrl);
       }
     } else if (state.view === 'picked' && activePickedRefs && activePickedRefs.outfit === outfitNumber) {
-      applyStageState(activePickedRefs, media, { deferReveal });
+      applyStageState(activePickedRefs, media, { deferReveal, fadeRender, newlyArrivedKind });
     }
   }
 
@@ -3486,6 +4033,10 @@ export function mountStore(root, { onTalk } = {}) {
       leaveSearchView();
 
       if (payload.replace === true) {
+        releaseStageVideo();
+        for (const media of state.media.values()) {
+          clearLookRenders(media);
+        }
         state.outfits.clear();
         state.media.clear();
         state.pickedOutfit = null;
@@ -3576,10 +4127,13 @@ export function mountStore(root, { onTalk } = {}) {
       const updated = normalizeOutfit({ ...payload.data, number: payload.outfit }, payload.outfit);
       state.outfits.set(payload.outfit, updated);
 
-      // Reset try-on to rendering and clear flat-lay, boxes, ring and reveal until a fresh collageReady arrives
+      // Reset try-on to rendering and clear all renders, flat-lay, boxes, ring and reveal
       const media = getMedia(payload.outfit);
+      if (activePickedRefs && activePickedRefs.outfit === payload.outfit) {
+        releaseStageVideo(activePickedRefs);
+      }
+      clearLookRenders(media);
       media.tryOnStatus = 'rendering';
-      media.tryOnUrl = null;
       media.revealed = false;
       media.stageSwapped = false;
       media.collageUrl = null;
@@ -3634,12 +4188,52 @@ export function mountStore(root, { onTalk } = {}) {
         return { ok: false, error: 'tryOnReady requires numeric outfit and image url' };
       }
 
+      const url = payload.url.trim();
+      const kind = normalizeRenderKind(payload.kind);
       const media = getMedia(payload.outfit);
-      media.tryOnStatus = 'ready';
-      media.tryOnUrl = payload.url.trim();
-      preloadImage(media, stageUrl(media.tryOnUrl, 900));
+      const isNewArrival = media.renders[kind] !== url;
 
-      syncMediaInCurrentView(payload.outfit);
+      media.tryOnStatus = 'ready';
+      media.renders[kind] = url;
+      if (kind === 'video' && isNewArrival) {
+        media.videoFailed = false;
+      }
+      if (!media.tryOnUrl || kind === 'studio') {
+        media.tryOnUrl = url;
+      }
+
+      if (kind === 'video') {
+        preloadVideo(media, url);
+      } else {
+        preloadImage(media, stageUrl(url, 900));
+      }
+
+      let newlyArrivedKind = null;
+      let fadeRender = false;
+      if (media.revealed && isNewArrival) {
+        newlyArrivedKind = kind;
+        markRenderNew(payload.outfit, media, kind);
+
+        // Promote scene or video once automatically while the shopper is still on the initial studio still
+        if (
+          !media.stageSwapped &&
+          media.activeRender === 'studio' &&
+          !media.userPickedRender &&
+          (kind === 'scene' || kind === 'video') &&
+          !media.autoAdvancedKinds.has(kind)
+        ) {
+          media.autoAdvancedKinds.add(kind);
+          media.activeRender = kind;
+          media.tryOnUrl = url;
+          fadeRender = true;
+        } else if (!media.activeRender) {
+          media.activeRender = kind;
+          media.tryOnUrl = url;
+          fadeRender = !media.stageSwapped;
+        }
+      }
+
+      syncMediaInCurrentView(payload.outfit, { newlyArrivedKind, fadeRender });
       return { ok: true };
     }),
 
@@ -3664,6 +4258,7 @@ export function mountStore(root, { onTalk } = {}) {
     }),
 
     showAll: safeHandler(() => {
+      releaseStageVideo();
       closeProductPanel();
       leaveSearchView();
       state.pickedOutfit = null;
@@ -3688,20 +4283,40 @@ export function mountStore(root, { onTalk } = {}) {
       }
 
       const media = getMedia(payload.outfit);
+      const hasKind = typeof payload.kind === 'string' && payload.kind.trim().length > 0;
+      const requestedKind = hasKind ? normalizeRenderKind(payload.kind) : null;
+
       if (typeof payload.url === 'string' && payload.url.trim()) {
-        media.tryOnUrl = payload.url.trim();
+        const url = payload.url.trim();
+        const storeKind = requestedKind || 'studio';
+        const isNewUrl = media.renders[storeKind] !== url;
+        media.renders[storeKind] = url;
+        if (storeKind === 'video' && isNewUrl) {
+          media.videoFailed = false;
+        }
+        if (storeKind === 'video') {
+          preloadVideo(media, url);
+        } else {
+          preloadImage(media, stageUrl(url, 900));
+        }
       }
-      if (!media.tryOnUrl) {
+
+      const chosenKind = pickRenderKind(media, requestedKind);
+      if (!chosenKind) {
         return { ok: false, error: `No try-on image ready for outfit ${payload.outfit}` };
       }
 
       leaveSearchView();
       media.tryOnStatus = 'ready';
       const wasAlreadyShowingTryOn = media.revealed && !media.stageSwapped;
+      const prevKind = media.activeRender;
       media.revealed = true;
       media.stageSwapped = false;
+      media.activeRender = chosenKind;
+      media.tryOnUrl = media.renders[chosenKind];
       setHasProducts();
 
+      const renderChanged = wasAlreadyShowingTryOn && prevKind !== chosenKind;
       const needsPick = state.view !== 'picked' || state.pickedOutfit !== payload.outfit;
       if (needsPick) {
         state.view = 'picked';
@@ -3710,7 +4325,10 @@ export function mountStore(root, { onTalk } = {}) {
         renderPickedView({ deferReveal: !wasAlreadyShowingTryOn });
         window.scrollTo({ top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
       } else {
-        syncMediaInCurrentView(payload.outfit, { deferReveal: !wasAlreadyShowingTryOn });
+        syncMediaInCurrentView(payload.outfit, {
+          deferReveal: !wasAlreadyShowingTryOn,
+          fadeRender: renderChanged,
+        });
         if (activePickedRefs && activePickedRefs.stagePanel && !isElementInView(activePickedRefs.stagePanel)) {
           const rect = activePickedRefs.stagePanel.getBoundingClientRect();
           const headerH = headerEl.offsetHeight || 0;

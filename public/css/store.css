@@ -138,6 +138,8 @@ img {
 .boutique-collage-cell:focus-visible,
 .look-board-layer:focus-visible,
 .stage-thumb-btn:focus-visible,
+.stage-video-play-btn:focus-visible,
+.render-tile:focus-visible,
 .header-search-input:focus-visible,
 .header-search-close:focus-visible,
 .order-undo-btn:focus-visible {
@@ -1140,15 +1142,103 @@ img {
   opacity: 1;
 }
 
-.stage-tryon-img {
+.stage-tryon-img,
+.stage-tryon-video {
   width: 100%;
   height: 100%;
   object-fit: cover;
   object-position: center top;
+  opacity: 1;
+  transition: opacity 600ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.stage-tryon-img[hidden] {
+.stage-tryon-video {
+  display: block;
+  background: var(--board);
+}
+
+.stage-tryon-img.is-media-entering,
+.stage-tryon-video.is-media-entering {
+  opacity: 0;
+  transition: none;
+}
+
+.stage-tryon-img[hidden],
+.stage-tryon-video[hidden] {
   display: none;
+}
+
+.stage-video-play-btn {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  border: 1px solid rgba(250, 247, 242, 0.35);
+  background: rgba(26, 23, 20, 0.78);
+  color: var(--ivory);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  line-height: 1;
+  cursor: pointer;
+  pointer-events: none;
+  transition: background-color 180ms ease, border-color 180ms ease;
+}
+
+.stage-panel.is-showing-tryon .stage-video-play-btn {
+  pointer-events: auto;
+}
+
+.stage-video-play-btn:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.stage-video-play-btn[hidden] {
+  display: none;
+}
+
+.stage-video-play-icon {
+  position: relative;
+  width: 8px;
+  height: 9px;
+  flex-shrink: 0;
+}
+
+.stage-video-play-icon::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 1px;
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 4.5px 0 4.5px 7px;
+  border-color: transparent transparent transparent currentColor;
+}
+
+.stage-video-play-btn.is-playing .stage-video-play-icon::before {
+  top: 0.5px;
+  left: 0;
+  width: 2.5px;
+  height: 8px;
+  border: none;
+  background: currentColor;
+}
+
+.stage-video-play-btn.is-playing .stage-video-play-icon::after {
+  content: '';
+  position: absolute;
+  top: 0.5px;
+  right: 0;
+  width: 2.5px;
+  height: 8px;
+  background: currentColor;
 }
 
 .stage-thumb-btn {
@@ -1206,6 +1296,37 @@ img {
   display: none;
 }
 
+.stage-thumb-play {
+  display: none;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -62%);
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(26, 23, 20, 0.72);
+  border: 1px solid rgba(250, 247, 242, 0.7);
+  pointer-events: none;
+}
+
+.stage-thumb-play::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-38%, -50%);
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 4.5px 0 4.5px 7.5px;
+  border-color: transparent transparent transparent var(--ivory);
+}
+
+.stage-thumb-btn.is-thumb-video .stage-thumb-play {
+  display: block;
+}
+
 .stage-thumb-label {
   position: absolute;
   left: 0;
@@ -1230,6 +1351,139 @@ img {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+/* Render strip under the stage once revealed with multiple renders */
+
+.stage-render-strip {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  scroll-margin-bottom: 96px;
+}
+
+.stage-render-strip[hidden] {
+  display: none;
+}
+
+.render-tile {
+  min-width: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  opacity: 1;
+  transition: border-color 180ms ease, box-shadow 180ms ease, opacity 320ms ease;
+}
+
+.render-tile.is-tile-entering {
+  opacity: 0;
+  transition: none;
+}
+
+.render-tile:hover {
+  border-color: var(--line-strong);
+}
+
+.render-tile.is-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.render-tile-media {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background: var(--board);
+  overflow: hidden;
+}
+
+.render-tile-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center top;
+}
+
+.render-tile-img[hidden] {
+  display: none;
+}
+
+.render-tile-play {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(26, 23, 20, 0.72);
+  border: 1px solid rgba(250, 247, 242, 0.7);
+  pointer-events: none;
+}
+
+.render-tile-play::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-38%, -50%);
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 4.5px 0 4.5px 7.5px;
+  border-color: transparent transparent transparent var(--ivory);
+}
+
+.render-tile-new {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  padding: 2px 5px;
+  background: var(--accent);
+  color: var(--ivory);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  line-height: 1.2;
+  pointer-events: none;
+}
+
+.render-tile-new[hidden] {
+  display: none;
+}
+
+.render-tile-label {
+  display: block;
+  width: 100%;
+  padding: 6px 4px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  line-height: 1.2;
+  color: var(--ink-muted);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-top: 1px solid var(--line);
+  background: var(--ivory);
+}
+
+.render-tile.is-selected .render-tile-label {
+  color: var(--ink);
+  background: var(--accent-tint);
+  border-top-color: rgba(181, 83, 47, 0.25);
 }
 
 /* Alice's notes column beside the board */
@@ -3160,6 +3414,23 @@ body.has-boutique #call .call-start__status:empty {
     max-height: 40dvh;
   }
 
+  .stage-render-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 10px;
+  }
+
+  .render-tile-label {
+    padding: 6px 4px;
+    font-size: 9.5px;
+    letter-spacing: 0.06em;
+  }
+
+  .stage-video-play-btn {
+    left: 10px;
+    bottom: 10px;
+  }
+
   body.has-boutique .store-footer-inner {
     padding-bottom: 88px;
   }
@@ -3226,7 +3497,11 @@ body.has-boutique #call .call-start__status:empty {
   .stage-placeholder,
   .stage-board-layer,
   .stage-tryon-layer,
+  .stage-tryon-img,
+  .stage-tryon-video,
+  .stage-video-play-btn,
   .stage-thumb-btn,
+  .render-tile,
   .board-pointer-ring,
   .piece-note-item,
   .order-undo-btn {
