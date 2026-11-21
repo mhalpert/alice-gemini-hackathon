@@ -2597,8 +2597,8 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
     add_to_bag: llm.tool({
       description: orderController.purchaseReady
-        ? 'Add a look (defaults to the picked look) to the shopping bag straight away as soon as the shopper gives sizes and asks to bag, passing every known size. Never hold back the whole bag over one unavailable or missing size—baggable pieces go in and unavailable or unknown-size pieces are reported as not added.'
-        : 'Add a look (defaults to the picked look) to the shopping bag straight away as soon as the shopper gives sizes and asks to bag, passing every known size. Never hold back the whole bag over one unavailable or missing size—baggable pieces go in and unavailable or unknown-size pieces are reported as not added. Carts only, never checkout or payment.',
+        ? 'Add a look (defaults to the picked look) to the shopping bag straight away as soon as the shopper gives sizes and asks to bag, passing every known size. Never hold back the whole bag over one unavailable or missing size—baggable pieces go in and unavailable or unknown-size pieces are reported as not added. After the one short sizes clause, STOP and say nothing else until the tool result arrives; never state what is in the bag, never state a total, and never read out anything that looks like a tool call or tool output before the result. What is in the bag and the total come only from the result text. When the shopper gives a missing size after PARTLY DONE or NOT DONE, call add_to_bag again immediately with all known sizes, no question first.'
+        : 'Add a look (defaults to the picked look) to the shopping bag straight away as soon as the shopper gives sizes and asks to bag, passing every known size. Never hold back the whole bag over one unavailable or missing size—baggable pieces go in and unavailable or unknown-size pieces are reported as not added. After the one short sizes clause, STOP and say nothing else until the tool result arrives; never state what is in the bag, never state a total, and never read out anything that looks like a tool call or tool output before the result. What is in the bag and the total come only from the result text. When the shopper gives a missing size after PARTLY DONE or NOT DONE, call add_to_bag again immediately with all known sizes, no question first. Carts only, never checkout or payment.',
       parameters: z.object({
         outfit: outfitNumberSchema.optional(),
         sizes: z
@@ -3056,13 +3056,21 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           (na) => `${na.title} at ${na.store} (${na.reason.replace(/\.$/, '')})`,
         );
 
+        const addedTitles = bagPayload.stores.flatMap((s) => s.added.map((line) => line.title));
+
         const lines: string[] = [];
         const pieceWord = addedCount === 1 ? 'piece' : 'pieces';
         const addedDetails = storeSummaries.length > 0 ? ` — ${storeSummaries.join(' | ')}` : '';
         const addedSentence = `Added ${addedCount} ${pieceWord}, total ${formatPrice(bagPayload.total)} for Look ${lookNum} (${outfit.name})${addedDetails}.`;
 
         if (skippedSummaries.length > 0) {
-          lines.push(`PARTLY DONE: NOT ADDED (${notAdded.length}): ${skippedSummaries.join('; ')}.`);
+          const sayOnly =
+            addedTitles.length > 0
+              ? ` Say only these are in the bag: ${addedTitles.join(', ')}.`
+              : '';
+          lines.push(
+            `PARTLY DONE: NOT ADDED (${notAdded.length}): ${skippedSummaries.join('; ')}.${sayOnly}`,
+          );
           lines.push(addedSentence);
         } else {
           lines.push(addedSentence);

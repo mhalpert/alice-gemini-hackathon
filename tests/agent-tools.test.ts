@@ -1506,12 +1506,16 @@ test('add_to_bag partial result starts with PARTLY DONE, lists NOT ADDED first w
   const partlyIdx = res.indexOf('PARTLY DONE: NOT ADDED (2):');
   const sandalIdx = res.indexOf('Strappy Sandal at Fashion Nova (Size 8 is out of stock)');
   const clutchIdx = res.indexOf('Mini Clutch at Fashion Nova (Size could not be selected)');
+  const sayOnlyIdx = res.indexOf(
+    'Say only these are in the bag: Satin Shirt, Wide-Leg Trouser, Cropped Blazer.',
+  );
   const addedIdx = res.indexOf('Added 3 pieces, total $155');
   const linkIdx = res.indexOf('Checkout link is on the page (Fashion Nova)');
 
   assert.equal(partlyIdx, 0, `expected result to start with PARTLY DONE and NOT ADDED, got: ${res}`);
   assert.ok(sandalIdx > partlyIdx && clutchIdx > partlyIdx, 'each not-added piece and reason must be listed first');
-  assert.ok(addedIdx > clutchIdx, 'added pieces and total must follow NOT ADDED section');
+  assert.ok(sayOnlyIdx > clutchIdx, 'Say only these are in the bag instruction must immediately follow NOT ADDED list');
+  assert.ok(addedIdx > sayOnlyIdx, 'added pieces and total must follow Say only these are in the bag instruction');
   assert.ok(linkIdx > addedIdx, 'checkout link location must follow added pieces');
   assert.match(res, /say exactly which pieces are not in the bag/i);
   assert.match(res, /offer a swap or another size/i);
@@ -3068,6 +3072,14 @@ test('add_to_bag bags what can be bagged immediately when shopper gives large to
 
   assert.match(tools.add_to_bag.description, /straight away/i);
   assert.match(tools.add_to_bag.description, /never hold back the whole bag/i);
+  assert.match(tools.add_to_bag.description, /STOP and say nothing else until the tool result arrives/);
+  assert.match(tools.add_to_bag.description, /never state what is in the bag, never state a total/i);
+  assert.match(tools.add_to_bag.description, /never read out anything that looks like a tool call or tool output before the result/i);
+  assert.match(tools.add_to_bag.description, /what is in the bag and the total come only from the result text/i);
+  assert.match(
+    tools.add_to_bag.description,
+    /when the shopper gives a missing size after PARTLY DONE or NOT DONE, call add_to_bag again immediately with all known sizes, no question first/i,
+  );
 
   await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
   await tools.build_outfits.execute({ occasion: 'concert', budget_usd: 300 }, fakeToolOpts('b1'));
@@ -3086,6 +3098,9 @@ test('add_to_bag bags what can be bagged immediately when shopper gives large to
   assert.equal(res.startsWith('PARTLY DONE: NOT ADDED (2):'), true);
   assert.match(res, /Chelsea Boot - Black at Steve Madden \(11 isn't in stock \(sizes left: 8, 9, 10\)\)/);
   assert.match(res, /Relaxed Wool Trouser at Everlane \(no bottom size given \(sizes: 30, 32, 34\)\)/);
+  const sayOnlyIdx = res.indexOf('Say only these are in the bag: Heavyweight Overshirt.');
+  const addedIdx = res.indexOf('Added 1 piece, total $75');
+  assert.ok(sayOnlyIdx > 0 && sayOnlyIdx < addedIdx, `expected Say only instruction before Added sentence, got: ${res}`);
   assert.match(res, /Added 1 piece, total \$75/);
   assert.match(res, /Heavyweight Overshirt \(size large\)/);
   assert.match(res, /offer a swap or another size/i);
