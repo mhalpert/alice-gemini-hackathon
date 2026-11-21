@@ -1059,3 +1059,232 @@ test('serve score threshold: scores 8, 6, 6 serve 3 outfits while 8, 5, 4 return
   const demoResAt7 = await serveLibrary({ gender: 'women', occasion: 'rooftop birthday', budget_usd: 150 });
   assert.equal(demoResAt7, null);
 });
+
+test('serveLibrary on a 5-look graded set returns top 3 by score, promotes 4th on stock drop, and checks at most 3 + 2 spares', async () => {
+  const outfits = [
+    makeOutfit('Look Seven', 'men', [30, 30, 30]),
+    makeOutfit('Look Nine', 'men', [30, 30, 30]),
+    makeOutfit('Look Six', 'men', [30, 30, 30]),
+    makeOutfit('Look Ten', 'men', [30, 30, 30]),
+    makeOutfit('Look Eight', 'men', [30, 30, 30]),
+    makeOutfit('Look Six Extra', 'men', [30, 30, 30]),
+  ];
+  const setsPath = createTempLibrary({
+    version: 1,
+    built_at: new Date().toISOString(),
+    sets: [
+      {
+        key: 'rooftop-birthday',
+        gender: 'men',
+        occasion: "a friend's rooftop birthday party",
+        budget_usd: 150,
+        outfits,
+        vectors: [[1, 0, 0]],
+        built_ms: 500,
+      },
+    ],
+  });
+  writeFileSync(
+    path.join(path.dirname(setsPath), 'grades.json'),
+    JSON.stringify({
+      version: 1,
+      graded_at: new Date().toISOString(),
+      grades: {
+        'rooftop-birthday|men': {
+          graded_at: new Date().toISOString(),
+          set_built_at: 500,
+          outfits: [
+            { name: 'Look Seven', score: 7, presentable: true, issues: [], weak_piece: null },
+            { name: 'Look Nine', score: 9, presentable: true, issues: [], weak_piece: null },
+            { name: 'Look Six', score: 6, presentable: true, issues: [], weak_piece: null },
+            { name: 'Look Ten', score: 10, presentable: true, issues: [], weak_piece: null },
+            { name: 'Look Eight', score: 8, presentable: true, issues: [], weak_piece: null },
+            { name: 'Look Six Extra', score: 6, presentable: true, issues: [], weak_piece: null },
+          ],
+          min: 6,
+          avg: 7.67,
+          presentable_count: 6,
+          pass: true,
+        },
+      },
+    }),
+    'utf8',
+  );
+
+  const stock = allAvailableLookup(outfits);
+  let lastLookupIds: string[] = [];
+  _setDeps({
+    embed: async (texts) => texts.map(() => [1, 0, 0]),
+    lookup: async (ids) => {
+      lastLookupIds = ids;
+      return stock;
+    },
+    swap: async () => {
+      throw new Error('swap should not be called when top 3 are in stock');
+    },
+  });
+
+  const brief: Brief = { gender: 'men', occasion: 'rooftop birthday', budget_usd: 150 };
+  const top3 = await serveLibrary(brief);
+  assert.ok(top3);
+  assert.deepEqual(
+    top3.outfits.map((o) => [o.number, o.name]),
+    [
+      [1, 'Look Ten'],
+      [2, 'Look Nine'],
+      [3, 'Look Eight'],
+    ],
+  );
+  // Lookup must cover only top 3 + 2 spares (5 looks = 15 items), excluding 6th look ('Look Six Extra').
+  const sixthIds = new Set(outfits[5].pieces.map((p) => p.item.variant_id));
+  assert.equal(lastLookupIds.length, 15);
+  assert.ok(lastLookupIds.every((id) => !sixthIds.has(id)));
+
+  // Mark Look Nine's shoes sold out (with swap failing) and also mark 5th look's shoes sold out:
+  // Look Nine drops -> 4th look (Look Seven) promotes; swap is NOT called on unused 5th look (Look Six).
+  const lookNineShoe = outfits[1].pieces.find((p) => p.slot === 'shoes')!;
+  stock.set(lookNineShoe.item.variant_id, { item: null, available: false, price: null });
+  const lookSixShoe = outfits[2].pieces.find((p) => p.slot === 'shoes')!;
+  stock.set(lookSixShoe.item.variant_id, { item: null, available: false, price: null });
+
+  const swappedOutfits: string[] = [];
+  _setDeps({
+    embed: async (texts) => texts.map(() => [1, 0, 0]),
+    lookup: async () => stock,
+    swap: async (outfit, slot) => {
+      swappedOutfits.push(outfit.name);
+      const piece = outfit.pieces.find((p) => p.slot === slot)!;
+      return {
+        outfit,
+        piece,
+        note: `No different ${slot} in stock right now; kept the ${piece.item.title}.`,
+      };
+    },
+  });
+
+  const promoted = await serveLibrary(brief);
+  assert.ok(promoted);
+  assert.deepEqual(
+    promoted.outfits.map((o) => [o.number, o.name]),
+    [
+      [1, 'Look Ten'],
+      [2, 'Look Eight'],
+      [3, 'Look Seven'],
+    ],
+  );
+  assert.deepEqual(swappedOutfits, ['Look Nine']);
+});
+
+test('ungraded set with more than 3 outfits serves the first 3', async () => {
+  const outfits = [
+    makeOutfit('First 1', 'men', [30, 30, 30]),
+    makeOutfit('First 2', 'men', [30, 30, 30]),
+    makeOutfit('First 3', 'men', [30, 30, 30]),
+    makeOutfit('Spare 4', 'men', [30, 30, 30]),
+    makeOutfit('Spare 5', 'men', [30, 30, 30]),
+  ];
+  createTempLibrary({
+    version: 1,
+    built_at: new Date().toISOString(),
+    sets: [
+      {
+        key: 'rooftop-birthday',
+        gender: 'men',
+        occasion: "a friend's rooftop birthday party",
+        budget_usd: 150,
+        outfits,
+        vectors: [[1, 0, 0]],
+        built_ms: 500,
+      },
+    ],
+  });
+
+  const stock = allAvailableLookup(outfits);
+  _setDeps({
+    embed: async (texts) => texts.map(() => [1, 0, 0]),
+    lookup: async () => stock,
+  });
+
+  const res = await serveLibrary({ gender: 'men', occasion: 'rooftop birthday', budget_usd: 150 });
+  assert.ok(res);
+  assert.deepEqual(
+    res.outfits.map((o) => [o.number, o.name]),
+    [
+      [1, 'First 1'],
+      [2, 'First 2'],
+      [3, 'First 3'],
+    ],
+  );
+});
+
+test('libraryLooks with occasion on a 5-look graded set returns all 5 servable looks best first', async () => {
+  const outfits = [
+    makeOutfit('Occ Seven', 'women', [30, 30, 30]),
+    makeOutfit('Occ Nine', 'women', [30, 30, 30]),
+    makeOutfit('Occ Six', 'women', [30, 30, 30]),
+    makeOutfit('Occ Ten', 'women', [30, 30, 30]),
+    makeOutfit('Occ Eight', 'women', [30, 30, 30]),
+  ];
+  const setsPath = createTempLibrary({
+    version: 1,
+    built_at: new Date().toISOString(),
+    sets: [
+      {
+        key: 'brunch',
+        gender: 'women',
+        occasion: 'Sunday brunch with friends',
+        budget_usd: 120,
+        outfits,
+        vectors: [[1, 0, 0]],
+        built_ms: 500,
+      },
+    ],
+  });
+  writeFileSync(
+    path.join(path.dirname(setsPath), 'grades.json'),
+    JSON.stringify({
+      version: 1,
+      graded_at: new Date().toISOString(),
+      grades: {
+        'brunch|women': {
+          graded_at: new Date().toISOString(),
+          set_built_at: 500,
+          outfits: [
+            { name: 'Occ Seven', score: 7, presentable: true, issues: [], weak_piece: null },
+            { name: 'Occ Nine', score: 9, presentable: true, issues: [], weak_piece: null },
+            { name: 'Occ Six', score: 6, presentable: true, issues: [], weak_piece: null },
+            { name: 'Occ Ten', score: 10, presentable: true, issues: [], weak_piece: null },
+            { name: 'Occ Eight', score: 8, presentable: true, issues: [], weak_piece: null },
+          ],
+          min: 6,
+          avg: 8,
+          presentable_count: 5,
+          pass: true,
+        },
+      },
+    }),
+    'utf8',
+  );
+
+  const stock = allAvailableLookup(outfits);
+  _setDeps({
+    embed: async (texts) => texts.map(() => [1, 0, 0]),
+    lookup: async () => stock,
+    swap: async () => {
+      throw new Error('libraryLooks must never swap');
+    },
+  });
+
+  const looks = await libraryLooks('women', { occasion: 'brunch' });
+  assert.equal(looks.length, 5);
+  assert.deepEqual(
+    looks.map((o) => [o.number, o.name]),
+    [
+      [1, 'Occ Ten'],
+      [2, 'Occ Nine'],
+      [3, 'Occ Eight'],
+      [4, 'Occ Seven'],
+      [5, 'Occ Six'],
+    ],
+  );
+});

@@ -107,24 +107,47 @@ afterEach(() => {
   }
 });
 
-test('parseArgs parses --only, --gender, --regrade, --improve, and --max-attempts', () => {
+test('parseArgs parses --only, --gender, --regrade, --improve, --max-attempts, --keep, and --all', () => {
   assert.deepEqual(parseArgs([]), {
     only: null,
     genders: ['men', 'women'],
     regrade: false,
     improve: false,
     maxAttempts: 3,
+    keep: 3,
+    all: false,
   });
-  const parsed = parseArgs(['--only', 'gala,interview-bank', '--gender', 'men', '--regrade', '--improve', '--max-attempts', '5']);
+  const parsed = parseArgs([
+    '--only', 'gala,interview-bank',
+    '--gender', 'men',
+    '--regrade',
+    '--improve',
+    '--max-attempts', '5',
+    '--keep', '5',
+    '--all',
+  ]);
   assert.deepEqual([...parsed.only!], ['gala', 'interview-bank']);
   assert.deepEqual(parsed.genders, ['men']);
   assert.equal(parsed.regrade, true);
   assert.equal(parsed.improve, true);
   assert.equal(parsed.maxAttempts, 5);
-  const eq = parseArgs(['--only=rooftop-birthday', '--gender=women', '--max-attempts=2']);
+  assert.equal(parsed.keep, 5);
+  assert.equal(parsed.all, true);
+
+  const eq = parseArgs(['--only=rooftop-birthday', '--gender=women', '--max-attempts=2', '--keep=6']);
   assert.deepEqual([...eq.only!], ['rooftop-birthday']);
   assert.deepEqual(eq.genders, ['women']);
   assert.equal(eq.maxAttempts, 2);
+  assert.equal(eq.keep, 6);
+  assert.equal(eq.all, false);
+
+  assert.equal(parseArgs(['--keep', '3']).keep, 3);
+  assert.throws(() => parseArgs(['--keep', '2']), /Invalid --keep/);
+  assert.throws(() => parseArgs(['--keep', '7']), /Invalid --keep/);
+  assert.throws(() => parseArgs(['--keep=4.5']), /Invalid --keep/);
+  assert.throws(() => parseArgs(['--keep=abc']), /Invalid --keep/);
+  assert.throws(() => parseArgs(['--keep']), /Invalid --keep/);
+  assert.throws(() => parseArgs(['--keep=']), /Invalid --keep/);
 });
 
 test('evaluateSetCritiques applies breaksDressCode and pass rule', () => {
@@ -626,4 +649,199 @@ test('runImprove respects ALICE_LIBRARY_MAX_PAID spend cap and store rate_limite
   );
   assert.equal(rlCalls, 1);
   assert.equal(rlRes.stopReason, 'rate_limited');
+});
+
+test('poolBestOutfits keeps up to 5 outfits numbered 1..5 when limit=5', () => {
+  const existing = [
+    makeBasicOutfit('Old 1', 'men'),
+    makeBasicOutfit('Old 2', 'men'),
+    makeBasicOutfit('Old 3', 'men'),
+  ];
+  const incoming = [
+    makeBasicOutfit('New 1', 'men'),
+    makeBasicOutfit('New 2', 'men'),
+    makeBasicOutfit('New 3', 'men'),
+  ];
+  const pooled = poolBestOutfits(
+    [
+      { outfit: existing[0], grade: { name: 'Old 1', score: 8, presentable: true, issues: [], weak_piece: null } },
+      { outfit: existing[1], grade: { name: 'Old 2', score: 6, presentable: true, issues: ['minor'], weak_piece: null } },
+      { outfit: existing[2], grade: { name: 'Old 3', score: 5, presentable: false, issues: ['weak'], weak_piece: null } },
+    ],
+    [
+      { outfit: incoming[0], grade: { name: 'New 1', score: 9, presentable: true, issues: [], weak_piece: null } },
+      { outfit: incoming[1], grade: { name: 'New 2', score: 7, presentable: true, issues: [], weak_piece: null } },
+      { outfit: incoming[2], grade: { name: 'New 3', score: 8, presentable: true, issues: ['small'], weak_piece: null } },
+    ],
+    5,
+    { occasion: 'rooftop birthday', gender: 'men' },
+  );
+
+  assert.equal(pooled.length, 5);
+  assert.deepEqual(
+    pooled.map((p) => [p.outfit.number, p.outfit.name, p.grade.score]),
+    [
+      [1, 'New 1', 9],
+      [2, 'Old 1', 8],
+      [3, 'New 3', 8],
+      [4, 'New 2', 7],
+      [5, 'Old 2', 6],
+    ],
+  );
+});
+
+test('runImprove with --all and --keep 5 gives a passing 3-look set one improve attempt, keeps 5, and skips passing sets already at 5', async () => {
+  const roofSet: LibrarySet = {
+    key: 'rooftop-birthday',
+    gender: 'men',
+    occasion: "a friend's rooftop birthday party",
+    budget_usd: 150,
+    outfits: [
+      makeBasicOutfit('Roof 1', 'men'),
+      makeBasicOutfit('Roof 2', 'men'),
+      makeBasicOutfit('Roof 3', 'men'),
+    ],
+    vectors: [[1, 0, 0]],
+    built_ms: 1000,
+  };
+  const brunchSet: LibrarySet = {
+    key: 'brunch',
+    gender: 'men',
+    occasion: 'Sunday brunch with friends',
+    budget_usd: 120,
+    outfits: [
+      makeBasicOutfit('Brunch 1', 'men'),
+      makeBasicOutfit('Brunch 2', 'men'),
+      makeBasicOutfit('Brunch 3', 'men'),
+      makeBasicOutfit('Brunch 4', 'men'),
+      makeBasicOutfit('Brunch 5', 'men'),
+    ],
+    vectors: [[0, 1, 0]],
+    built_ms: 2000,
+  };
+
+  const { setsPath, gradesPath } = createTempSets([roofSet, brunchSet]);
+  process.env.ALICE_LIBRARY_STOP_AT = 'off';
+
+  writeFileSync(
+    gradesPath,
+    JSON.stringify({
+      version: 1,
+      graded_at: '2026-11-21T12:00:00.000Z',
+      grades: {
+        'rooftop-birthday|men': {
+          graded_at: '2026-11-21T12:00:00.000Z',
+          set_built_at: 1000,
+          outfits: [
+            { name: 'Roof 1', score: 8, presentable: true, issues: [], weak_piece: null },
+            { name: 'Roof 2', score: 7, presentable: true, issues: [], weak_piece: null },
+            { name: 'Roof 3', score: 7, presentable: true, issues: [], weak_piece: null },
+          ],
+          min: 7,
+          avg: 7.33,
+          presentable_count: 3,
+          pass: true,
+        },
+        'brunch|men': {
+          graded_at: '2026-11-21T12:00:00.000Z',
+          set_built_at: 2000,
+          outfits: [
+            { name: 'Brunch 1', score: 9, presentable: true, issues: [], weak_piece: null },
+            { name: 'Brunch 2', score: 8, presentable: true, issues: [], weak_piece: null },
+            { name: 'Brunch 3', score: 8, presentable: true, issues: [], weak_piece: null },
+            { name: 'Brunch 4', score: 7, presentable: true, issues: [], weak_piece: null },
+            { name: 'Brunch 5', score: 7, presentable: true, issues: [], weak_piece: null },
+          ],
+          min: 7,
+          avg: 7.8,
+          presentable_count: 5,
+          pass: true,
+        },
+      },
+    }),
+    'utf8',
+  );
+
+  // Without --all, both passing sets are skipped even when keep=5.
+  let withoutAllCalls = 0;
+  const skippedRes = await runImprove(
+    { only: null, genders: ['men'], maxAttempts: 3, keep: 5, all: false },
+    {
+      buildLive: async () => {
+        withoutAllCalls += 1;
+        throw new Error('should not build passing sets without --all');
+      },
+      log: () => {},
+    },
+  );
+  assert.equal(withoutAllCalls, 0);
+  assert.equal(skippedRes.skipped, 2);
+  assert.equal(skippedRes.improved, 0);
+
+  // With --all and keep=5, rooftop-birthday (3 looks) gets 1 improve attempt and stops once it holds 5 looks;
+  // brunch (already 5 passing looks) is skipped.
+  let buildCalls = 0;
+  const allRes = await runImprove(
+    { only: null, genders: ['men'], maxAttempts: 3, keep: 5, all: true },
+    {
+      buildLive: async (brief) => {
+        buildCalls += 1;
+        assert.equal(brief.occasion, roofSet.occasion);
+        return {
+          outfits: [
+            makeBasicOutfit('Roof New A', 'men'),
+            makeBasicOutfit('Roof New B', 'men'),
+            makeBasicOutfit('Roof New C', 'men'),
+          ],
+          source: 'live',
+          timing: { first_outfit_ms: 5, total_ms: 10 },
+          problems: [],
+        };
+      },
+      critiqueAll: async (outfits) =>
+        outfits.map((o) => {
+          if (o.name === 'Roof New A') return makeCritique(9, true);
+          if (o.name === 'Roof New B') return makeCritique(8, true);
+          return makeCritique(6, true);
+        }),
+      log: () => {},
+    },
+  );
+
+  assert.equal(buildCalls, 1);
+  assert.equal(allRes.attempts, 1);
+  assert.equal(allRes.improved, 1);
+  assert.equal(allRes.skipped, 1);
+  assert.equal(allRes.passed, 2);
+  assert.equal(allRes.failed, 0);
+
+  const updatedLib = JSON.parse(readFileSync(setsPath, 'utf8')) as LibraryFile;
+  const updatedRoof = updatedLib.sets.find((s) => s.key === 'rooftop-birthday' && s.gender === 'men')!;
+  assert.equal(updatedRoof.outfits.length, 5);
+  assert.deepEqual(
+    updatedRoof.outfits.map((o) => [o.number, o.name]),
+    [
+      [1, 'Roof New A'],
+      [2, 'Roof 1'],
+      [3, 'Roof New B'],
+      [4, 'Roof 2'],
+      [5, 'Roof 3'],
+    ],
+  );
+
+  const updatedGrades = JSON.parse(readFileSync(gradesPath, 'utf8')) as GradesFile;
+  const roofGrade = updatedGrades.grades['rooftop-birthday|men'];
+  assert.equal(roofGrade.pass, true);
+  assert.equal(roofGrade.outfits.length, 5);
+  assert.equal(roofGrade.presentable_count, 5);
+  assert.deepEqual(
+    roofGrade.outfits.map((o) => [o.name, o.score]),
+    [
+      ['Roof New A', 9],
+      ['Roof 1', 8],
+      ['Roof New B', 8],
+      ['Roof 2', 7],
+      ['Roof 3', 7],
+    ],
+  );
 });

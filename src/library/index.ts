@@ -61,6 +61,8 @@ export interface ServeLibraryOptions {
 
 const DEFAULT_THRESHOLD = 0.78;
 const DEFAULT_MIN_SCORE = 6;
+const SERVE_MAX_OUTFITS = 3;
+const SERVE_MAX_SPARES = 2;
 const DEFAULT_SETS_PATH = path.resolve(import.meta.dirname, 'sets.json');
 const DROP_ON_MISSING_SLOTS = new Set(['shoes', 'bottom', 'dress']);
 const OPTIONAL_SLOTS = new Set(['accessory', 'bag', 'jewelry', 'layer']);
@@ -349,15 +351,17 @@ export async function serveLibrary(
       ms: matchMs,
     });
 
-    const cloned = selected.outfits;
-    const stock = await deps.lookup(collectIds(cloned));
+    const candidates = selected.outfits.slice(0, SERVE_MAX_OUTFITS + SERVE_MAX_SPARES);
+    const stock = await deps.lookup(collectIds(candidates));
     const problems: string[] = [
       `library: matched ${match.key} (similarity ${match.similarity.toFixed(3)})`,
     ];
 
+    const enforceBudget = brief.budget_usd < set.budget_usd * 0.85;
     const surviving: Outfit[] = [];
 
-    for (const rawOutfit of cloned) {
+    for (const rawOutfit of candidates) {
+      if (surviving.length >= SERVE_MAX_OUTFITS) break;
       let outfit = rawOutfit;
       const unavailable: Piece[] = [];
 
@@ -412,13 +416,11 @@ export async function serveLibrary(
 
       if (dropped) continue;
       outfit.total = sumPieces(outfit.pieces);
+      if (enforceBudget && outfit.total > brief.budget_usd) continue;
       surviving.push(outfit);
     }
 
-    let finalOutfits = surviving;
-    if (brief.budget_usd < set.budget_usd * 0.85) {
-      finalOutfits = finalOutfits.filter((o) => o.total <= brief.budget_usd);
-    }
+    const finalOutfits = surviving;
 
     if (finalOutfits.length < minOutfits) return null;
 
