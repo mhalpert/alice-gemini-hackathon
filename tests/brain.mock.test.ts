@@ -78,3 +78,20 @@ test('swapPiece never mutates the outfit it was given', async () => {
   await swapPiece(outfits[0], 'shoes', 'brown', brief);
   assert.deepEqual(outfits[0], snapshot);
 });
+
+test('with a room, build and swap events land in the shared call log', async () => {
+  const { mkdtempSync, readFileSync: read } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { getCallLogPath } = await import('../src/calllog.ts');
+  process.env.ALICE_LOG_DIR = mkdtempSync(join(tmpdir(), 'alice-log-'));
+  try {
+    const room = 'test-brain-room';
+    const { outfits } = await buildOutfits(brief, { room });
+    await swapPiece(outfits[0], 'shoes', 'brown', brief, { room });
+    const events = read(getCallLogPath(room), 'utf8').trim().split('\n').map((l) => JSON.parse(l).ev);
+    assert.deepEqual(events, ['build_start', 'build_outfit', 'build_outfit', 'build_outfit', 'build_done', 'swap_start', 'swap_done']);
+  } finally {
+    delete process.env.ALICE_LOG_DIR;
+  }
+});
