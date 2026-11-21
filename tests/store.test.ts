@@ -1450,7 +1450,7 @@ describe('searchByPhoto and searchLike', () => {
     assert.equal(seenInits[1].redirect, undefined);
   });
 
-  it('redactSecrets handles a 3 MB secret string quickly via literal split/join and skips empty strings', () => {
+  it('redactSecrets handles a 3 MB secret string quickly via literal split/join, skips strings under 6 chars, and masks >= 6 chars', () => {
     const bigSecret = 'B'.repeat(3_000_000);
     const input = `prefix ${bigSecret} suffix`;
     const t0 = Date.now();
@@ -1459,5 +1459,160 @@ describe('searchByPhoto and searchLike', () => {
 
     assert.equal(out, 'prefix [REDACTED] suffix');
     assert.ok(elapsedMs < 1000, `expected fast redaction on 3 MB secret, took ${elapsedMs}ms`);
+
+    // Minimum length 6: 3-char value is NOT masked; 6-char value IS masked
+    assert.equal(redactSecrets('error abc and abcdef here', ['abc', 'abcdef']), 'error abc and [REDACTED] here');
+    assert.equal(redactSecrets('error x here', ['x']), 'error x here');
+  });
+});
+
+describe('saved store LRU bounds, key cap, and write coalescing', () => {
+  const sampleItem = {
+    id: 'gid://shopify/p/sample',
+    variant_id: 'gid://shopify/ProductVariant/1',
+    title: 'Sample Shirt',
+    price: 29,
+    url: 'https://www.everlane.com/products/sample',
+    image: 'https://cdn.shopify.com/sample.jpg',
+    store: 'Everlane',
+    store_domain: 'm34kzg-ke.myshopify.com',
+    rating: null,
+    rating_count: null,
+    sizes: ['M'],
+    variants_by_size: { M: 'gid://shopify/ProductVariant/1' },
+    description: 'Sample',
+    department: 'men' as const,
+  };
+
+  it('evicts the least recently used entry on the 401st distinct key, and a read protects an entry from eviction', () => {
+    let clock = 1_000;
+    const store = createSavedStore({
+      dir: makeTempDir(),
+      now: () => (clock += 1),
+      schedule: () => 1,
+      clearSchedule: () => {},
+    });
+
+    for (let i = 1; i <= 400; i += 1) {
+      store.putSaved(`key-${i}`, `query ${i}`, 'men', [sampleItem]);
+    }
+    assert.ok(store.getSaved('key-1')); // read promotes key-1 to MRU; key-2 is now oldest
+
+    store.putSaved('key-401', 'query 401', 'men', [sampleItem]);
+
+    assert.ok(store.getSaved('key-1'), 'recently read key-1 must survive eviction');
+    assert.equal(store.getSaved('key-2'), undefined, 'oldest unread key-2 must be evicted');
+    assert.ok(store.getSaved('key-401'));
+
+    // Adding key-402 evicts key-3 (next oldest)
+    store.putSaved('key-402', 'query 402', 'men', [sampleItem]);
+    assert.equal(store.getSaved('key-3'), undefined);
+    assert.ok(store.getSaved('key-402'));
+  });
+
+  it('keeps only the newest 400 entries when loading a larger existing file and respects ALICE_SAVED_MAX', () => {
+    const dir = makeTempDir();
+    const bulk = Array.from({ length: 420 }, (_, i) => ({
+      key: `disk-key-${i + 1}`,
+      query: `query ${i + 1}`,
+      gender: 'men',
+      t: 10_000 + i + 1,
+      items: [sampleItem],
+    }));
+    fs.writeFileSync(path.join(dir, 'saved-searches.json'), JSON.stringify(bulk), 'utf8');
+
+    const loaded = createSavedStore({ dir, schedule: () => 1, clearSchedule: () => {} });
+    assert.equal(loaded.getSaved('disk-key-1'), undefined);
+    assert.equal(loaded.getSaved('disk-key-20'), undefined);
+    assert.ok(loaded.getSaved('disk-key-21'));
+    assert.ok(loaded.getSaved('disk-key-420'));
+
+    const origEnv = process.env.ALICE_SAVED_MAX;
+    process.env.ALICE_SAVED_MAX = '5';
+    try {
+      const capped = createSavedStore({ dir, schedule: () => 1, clearSchedule: () => {} });
+      assert.equal(capped.getSaved('disk-key-415'), undefined);
+      assert.ok(capped.getSaved('disk-key-416'));
+      assert.ok(capped.getSaved('disk-key-420'));
+    } finally {
+      if (origEnv === undefined) delete process.env.ALICE_SAVED_MAX;
+      else process.env.ALICE_SAVED_MAX = origEnv;
+    }
+  });
+
+  it('skips storing keys longer than 160 characters without writing or failing', async () => {
+    let writes = 0;
+    const store = createSavedStore({
+      dir: makeTempDir(),
+      schedule: (fn) => {
+        fn();
+        return 1;
+      },
+      clearSchedule: () => {},
+      writeFile: async () => {
+        writes += 1;
+      },
+    });
+
+    const longKey = 'k'.repeat(161);
+    const returned = store.putSaved(longKey, 'very long query', 'men', [sampleItem]);
+    assert.equal(returned.key, longKey);
+    assert.equal(store.getSaved(longKey), undefined);
+    assert.equal(writes, 0);
+
+    const okKey = 'k'.repeat(160);
+    store.putSaved(okKey, 'exact 160', 'men', [sampleItem]);
+    assert.ok(store.getSaved(okKey));
+    assert.equal(writes, 1);
+  });
+
+  it('coalesces a burst of saves into a single disk write at the 2-second interval', async () => {
+    let clock = 50_000;
+    const scheduled: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
+    const writtenPayloads: string[] = [];
+
+    const store = createSavedStore({
+      dir: makeTempDir(),
+      now: () => clock,
+      schedule: (fn, ms) => {
+        const entry = { fn, ms, cleared: false };
+        scheduled.push(entry);
+        return entry;
+      },
+      clearSchedule: (h: any) => {
+        if (h) h.cleared = true;
+      },
+      writeFile: async (_p, payload) => {
+        writtenPayloads.push(payload);
+      },
+    });
+
+    for (let i = 0; i < 25; i += 1) {
+      clock += 10;
+      store.putSaved(`burst-${i}`, `burst query ${i}`, 'men', [sampleItem]);
+    }
+
+    // All 25 saves in the burst scheduled exactly ONE 2000ms timer and 0 immediate writes
+    assert.equal(scheduled.length, 1);
+    assert.equal(scheduled[0].ms, 2000);
+    assert.equal(writtenPayloads.length, 0);
+
+    // Timer fires -> 1 write containing all 25 entries
+    clock += 2000;
+    scheduled[0].fn();
+    await new Promise((r) => setImmediate(r));
+    assert.equal(writtenPayloads.length, 1);
+    assert.equal(JSON.parse(writtenPayloads[0]).length, 25);
+
+    // Another burst schedules a second coalesced write
+    store.putSaved('burst-25', 'burst query 25', 'men', [sampleItem]);
+    store.putSaved('burst-26', 'burst query 26', 'men', [sampleItem]);
+    assert.equal(scheduled.length, 2);
+    assert.equal(scheduled[1].ms, 2000);
+    clock += 2000;
+    scheduled[1].fn();
+    await new Promise((r) => setImmediate(r));
+    assert.equal(writtenPayloads.length, 2);
+    assert.equal(JSON.parse(writtenPayloads[1]).length, 27);
   });
 });

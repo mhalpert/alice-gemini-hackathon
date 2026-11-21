@@ -21,6 +21,11 @@ export interface SavedStoreOptions {
   dir?: string;
   now?: () => number;
   debounceMs?: number;
+  writeIntervalMs?: number;
+  maxEntries?: number;
+  schedule?: (fn: () => void, ms: number) => unknown;
+  clearSchedule?: (handle: unknown) => void;
+  writeFile?: (filePath: string, payload: string) => Promise<void>;
 }
 
 export interface SavedStore {
@@ -30,8 +35,24 @@ export interface SavedStore {
   flush(): Promise<void>;
 }
 
-const DEFAULT_DEBOUNCE_MS = 500;
+export const DEFAULT_SAVED_MAX = 400;
+export const MAX_SAVED_KEY_LENGTH = 160;
+const DEFAULT_WRITE_INTERVAL_MS = 2000;
 const FILENAME = 'saved-searches.json';
+
+function resolveMaxEntries(explicit?: number): number {
+  if (typeof explicit === 'number' && Number.isFinite(explicit) && explicit >= 1) {
+    return Math.floor(explicit);
+  }
+  const raw = process.env.ALICE_SAVED_MAX;
+  if (typeof raw === 'string' && raw.trim()) {
+    const parsed = Number(raw.trim());
+    if (Number.isFinite(parsed) && parsed >= 1) {
+      return Math.floor(parsed);
+    }
+  }
+  return DEFAULT_SAVED_MAX;
+}
 
 export function savedKey(query: string, gender: Gender, opts?: SavedKeyOpts): string {
   const q = query.trim().toLowerCase();
@@ -72,12 +93,49 @@ export function createSavedStore(opts?: SavedStoreOptions): SavedStore {
   const dir = opts?.dir ?? process.env.ALICE_SAVED_DIR ?? 'data/store';
   const filePath = path.join(dir, FILENAME);
   const now = opts?.now ?? (() => Date.now());
-  const debounceMs = opts?.debounceMs ?? DEFAULT_DEBOUNCE_MS;
+  const writeIntervalMs = Math.max(
+    0,
+    opts?.writeIntervalMs ?? opts?.debounceMs ?? DEFAULT_WRITE_INTERVAL_MS,
+  );
+  const maxEntries = resolveMaxEntries(opts?.maxEntries);
+  const scheduleFn =
+    opts?.schedule ??
+    ((fn: () => void, ms: number) => {
+      const t = setTimeout(fn, ms);
+      if (typeof (t as { unref?: () => void }).unref === 'function') {
+        (t as { unref: () => void }).unref();
+      }
+      return t;
+    });
+  const clearScheduleFn =
+    opts?.clearSchedule ??
+    ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+  const writeFileFn =
+    opts?.writeFile ??
+    (async (targetPath: string, payload: string) => {
+      await fsp.mkdir(dir, { recursive: true });
+      await fsp.writeFile(targetPath, payload, 'utf8');
+    });
 
+  // Insertion-ordered LRU map: oldest (least recently used) first, newest last.
   const entries = new Map<string, SavedEntry>();
   let loaded = false;
-  let timer: ReturnType<typeof setTimeout> | null = null;
+  let timer: unknown = null;
   let dirty = false;
+  let lastWriteAtMs = -Infinity;
+
+  function touch(entry: SavedEntry): void {
+    entries.delete(entry.key);
+    entries.set(entry.key, entry);
+  }
+
+  function evictOverflow(): void {
+    while (entries.size > maxEntries) {
+      const oldestKey = entries.keys().next().value;
+      if (oldestKey === undefined) break;
+      entries.delete(oldestKey);
+    }
+  }
 
   function ensureLoaded(): void {
     if (loaded) return;
@@ -93,19 +151,31 @@ export function createSavedStore(opts?: SavedStoreOptions): SavedStore {
             ? Object.values(parsed)
             : [];
 
+      const byKey = new Map<string, SavedEntry>();
       for (const item of list) {
         if (
           item &&
           typeof item === 'object' &&
           typeof (item as SavedEntry).key === 'string' &&
+          (item as SavedEntry).key.length <= MAX_SAVED_KEY_LENGTH &&
           typeof (item as SavedEntry).query === 'string' &&
           ((item as SavedEntry).gender === 'men' || (item as SavedEntry).gender === 'women') &&
           typeof (item as SavedEntry).t === 'number' &&
           Array.isArray((item as SavedEntry).items)
         ) {
           const entry = item as SavedEntry;
-          entries.set(entry.key, entry);
+          const prev = byKey.get(entry.key);
+          if (!prev || entry.t >= prev.t) {
+            byKey.set(entry.key, entry);
+          }
         }
+      }
+
+      // Keep only the newest maxEntries (oldest first in Map for LRU order).
+      const ordered = Array.from(byKey.values()).sort((a, b) => a.t - b.t);
+      const kept = ordered.length > maxEntries ? ordered.slice(-maxEntries) : ordered;
+      for (const entry of kept) {
+        entries.set(entry.key, entry);
       }
     } catch {
       // Swallow disk/parse errors (e.g. ENOENT on first run)
@@ -115,10 +185,10 @@ export function createSavedStore(opts?: SavedStoreOptions): SavedStore {
   async function writeDisk(): Promise<void> {
     if (!dirty) return;
     dirty = false;
+    lastWriteAtMs = now();
     try {
-      await fsp.mkdir(dir, { recursive: true });
       const payload = JSON.stringify(Array.from(entries.values()), null, 2);
-      await fsp.writeFile(filePath, payload, 'utf8');
+      await writeFileFn(filePath, payload);
     } catch {
       // Swallow every disk error
     }
@@ -126,21 +196,28 @@ export function createSavedStore(opts?: SavedStoreOptions): SavedStore {
 
   function scheduleWrite(): void {
     dirty = true;
-    if (timer) {
-      clearTimeout(timer);
+    // Coalesce: if a write timer is already scheduled, let it flush all pending saves together.
+    if (timer !== null) {
+      return;
     }
-    timer = setTimeout(() => {
+    const elapsedSinceLast = now() - lastWriteAtMs;
+    const waitMs =
+      lastWriteAtMs === -Infinity
+        ? writeIntervalMs
+        : Math.max(writeIntervalMs - Math.max(0, elapsedSinceLast), writeIntervalMs);
+    timer = scheduleFn(() => {
       timer = null;
       void writeDisk();
-    }, debounceMs);
-    if (typeof timer.unref === 'function') {
-      timer.unref();
-    }
+    }, waitMs);
   }
 
   function getSaved(key: string): SavedEntry | undefined {
     ensureLoaded();
-    return entries.get(key);
+    const found = entries.get(key);
+    if (found) {
+      touch(found);
+    }
+    return found;
   }
 
   function putSaved(key: string, query: string, gender: Gender, items: Item[]): SavedEntry {
@@ -152,7 +229,11 @@ export function createSavedStore(opts?: SavedStoreOptions): SavedStore {
       t: now(),
       items,
     };
-    entries.set(key, entry);
+    if (key.length > MAX_SAVED_KEY_LENGTH) {
+      return entry;
+    }
+    touch(entry);
+    evictOverflow();
     scheduleWrite();
     return entry;
   }
@@ -185,12 +266,15 @@ export function createSavedStore(opts?: SavedStoreOptions): SavedStore {
       }
     }
 
+    if (best) {
+      touch(best);
+    }
     return best;
   }
 
   async function flush(): Promise<void> {
-    if (timer) {
-      clearTimeout(timer);
+    if (timer !== null) {
+      clearScheduleFn(timer);
       timer = null;
     }
     await writeDisk();
