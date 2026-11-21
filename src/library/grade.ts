@@ -3,7 +3,7 @@
 // Also supports `--improve` to rebuild and pool failing sets into sets.json + grades.json.
 // Usage:
 //   node --env-file-if-exists=.env.local src/library/grade.ts [--only key1,key2] [--gender men|women] [--regrade]
-//   node --env-file-if-exists=.env.local src/library/grade.ts --improve [--only key1,key2] [--gender men|women] [--max-attempts 3]
+//   node --env-file-if-exists=.env.local src/library/grade.ts --improve [--only key1,key2] [--gender men|women] [--max-attempts 3] [--keep 3..6] [--all]
 import { readFileSync, writeFileSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,6 +44,8 @@ export interface ParsedArgs {
   regrade: boolean;
   improve: boolean;
   maxAttempts: number;
+  keep: number;
+  all: boolean;
 }
 
 export interface GradeDeps {
@@ -88,6 +90,9 @@ const COST_PER_IMPROVE_ATTEMPT_USD = 0.12;
 const DEFAULT_IMPROVE_MAX_PAID_USD = 15;
 const DEFAULT_IMPROVE_STOP_AT_NY = '15:50';
 const DEFAULT_MAX_ATTEMPTS = 3;
+const DEFAULT_KEEP = 3;
+const MIN_KEEP = 3;
+const MAX_KEEP = 6;
 const DEFAULT_SETS_PATH = path.resolve(import.meta.dirname, 'sets.json');
 
 let writeSeq = 0;
@@ -123,6 +128,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let regrade = false;
   let improve = false;
   let maxAttempts = DEFAULT_MAX_ATTEMPTS;
+  let keep = DEFAULT_KEEP;
+  let all = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -150,9 +157,25 @@ export function parseArgs(argv: string[]): ParsedArgs {
       const n = Number(arg.slice('--max-attempts='.length));
       if (!Number.isInteger(n) || n < 1) throw new Error(`Invalid --max-attempts: ${n}`);
       maxAttempts = n;
+    } else if (arg === '--keep') {
+      const raw = argv[++i];
+      const n = Number(raw);
+      if (!raw || !Number.isInteger(n) || n < MIN_KEEP || n > MAX_KEEP) {
+        throw new Error(`Invalid --keep: ${raw ?? ''} (expected ${MIN_KEEP}-${MAX_KEEP})`);
+      }
+      keep = n;
+    } else if (arg.startsWith('--keep=')) {
+      const raw = arg.slice('--keep='.length);
+      const n = Number(raw);
+      if (!raw || !Number.isInteger(n) || n < MIN_KEEP || n > MAX_KEEP) {
+        throw new Error(`Invalid --keep: ${raw} (expected ${MIN_KEEP}-${MAX_KEEP})`);
+      }
+      keep = n;
+    } else if (arg === '--all') {
+      all = true;
     }
   }
-  return { only, genders, regrade, improve, maxAttempts };
+  return { only, genders, regrade, improve, maxAttempts, keep, all };
 }
 
 export function resolveSetsPath(): string {
@@ -586,9 +609,17 @@ export async function runGrading(
 }
 
 export async function runImprove(
-  args: Pick<ParsedArgs, 'only' | 'genders' | 'maxAttempts'>,
+  args: Pick<ParsedArgs, 'only' | 'genders' | 'maxAttempts'> & Partial<Pick<ParsedArgs, 'keep' | 'all'>>,
   deps: Partial<GradeDeps> = {},
 ): Promise<ImproveRunSummary> {
+  const keep = args.keep ?? DEFAULT_KEEP;
+  if (!Number.isInteger(keep) || keep < MIN_KEEP || keep > MAX_KEEP) {
+    throw new Error(`Invalid --keep: ${keep} (expected ${MIN_KEEP}-${MAX_KEEP})`);
+  }
+  const includeAll = Boolean(args.all);
+  const isSetDone = (grade: SetGrade, outfitCount: number): boolean =>
+    grade.pass && (!includeAll || outfitCount >= keep);
+
   const critiqueAllFn = deps.critiqueAll ?? moduleDeps.critiqueAll;
   const buildLiveFn = deps.buildLive ?? moduleDeps.buildLive;
   const logFn = deps.log ?? moduleDeps.log;
@@ -638,7 +669,7 @@ export async function runImprove(
     for (const set of selected) {
       const id = gradeKey(set.key, set.gender);
       const existing = grades[id];
-      if (!needsGrading(set, existing, false) && existing.pass) {
+      if (!needsGrading(set, existing, false) && isSetDone(existing, set.outfits.length)) {
         skipped += 1;
         passed += 1;
         continue;
@@ -685,7 +716,7 @@ export async function runImprove(
             pool.map((p) => p.grade),
             typeof set.built_ms === 'number' ? set.built_ms : library.built_at,
           );
-          if (initGrade.pass) {
+          if (isSetDone(initGrade, pool.length)) {
             mergeAndWriteGrade(gradesFilePath, id, initGrade);
             passed += 1;
             const afterScores = initGrade.outfits.map((o) => o.score);
@@ -731,14 +762,14 @@ export async function runImprove(
           continue;
         }
 
-        pool = poolBestOutfits(pool, evaluated.graded, 3, brief);
+        pool = poolBestOutfits(pool, evaluated.graded, keep, brief);
         const builtMs = Math.max(1, Math.round(performance.now() - setStarted));
         currentGrade = buildSetGrade(
           pool.map((p) => p.grade),
           builtMs,
         );
 
-        if (currentGrade.pass) {
+        if (isSetDone(currentGrade, pool.length)) {
           break;
         }
       }
