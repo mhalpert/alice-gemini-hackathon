@@ -78,7 +78,7 @@ async function buildMock(brief: Brief, opts: BuildOptions = {}): Promise<BuildRe
     }
     outfits.push(outfit);
     if (index === 0) firstMs = Math.round(performance.now() - started);
-    log(opts.room, 'build_outfit', { index, number: outfit.number, name: outfit.name, total: outfit.total, ms: Math.round(performance.now() - started) });
+    log(opts.room, 'build_outfit', { index, number: outfit.number, name: outfit.name, total: outfit.total, build_ms: Math.round(performance.now() - started) });
     try {
       opts.onOutfit?.(clone(outfit), index);
     } catch (err) {
@@ -136,7 +136,7 @@ export async function swapPiece(outfit: Outfit, slot: string, request: string, b
   const result = await swapInner(outfit, slot, request, brief);
   log(opts.room, 'swap_done', {
     outfit: result.outfit.number, slot, request, piece: result.piece?.item?.title,
-    total: result.outfit.total, note: result.note, ms: Math.round(performance.now() - started),
+    total: result.outfit.total, note: result.note, swap_ms: Math.round(performance.now() - started),
   });
   return result;
 }

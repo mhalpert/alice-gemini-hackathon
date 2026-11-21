@@ -32,7 +32,7 @@ function todayInNewYork(): string {
 // Prompt
 // ---------------------------------------------------------------------------
 
-const DRESS_CODE = `DRESS CODE (hard rules; getting formality wrong is the most common way a look fails)
+export const DRESS_CODE = `DRESS CODE (hard rules; getting formality wrong is the most common way a look fails)
 - All four outfits sit at exactly the dressiness the occasion calls for. Never make one look "more casual" or "edgier" to create variety.
 - Black tie / black tie optional. Men: a dark suit or tuxedo jacket (layer) with its matching trousers (bottom), a white or black dress shirt, a solid dark silk tie (no prints, logos or novelty; the stores carry no bow ties), leather dress shoes, no patent in daytime. Women: a floor-length or elegant midi gown or a dressy jumpsuit, heels or dressy flats, an evening bag.
 - Job interviews are polished and conservative: closed-toe shoes only (no sandals, mules, open toes), nothing sheer, cropped, backless or lace, no graphic prints, no ripped denim, no flashy or iced-out jewelry. A bank is more formal than a creative agency.

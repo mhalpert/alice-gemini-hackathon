@@ -3,6 +3,8 @@
 // Default is the demo occasion. Costs about one plan call (~1 cent); store search is free.
 import type { Brief, Outfit } from '../src/types.ts';
 import { buildLive } from '../src/brain/build.ts';
+import { readFileSync, rmSync } from 'node:fs';
+import { getCallLogPath } from '../src/calllog.ts';
 
 const [g, b, ...occ] = process.argv.slice(2);
 const brief: Brief = {
@@ -19,7 +21,8 @@ const show = (o: Outfit) => {
 };
 
 console.log(`Building: ${brief.gender} · ${brief.occasion} · $${brief.budget_usd}`);
-const result = await buildLive(brief, { onOutfit: show });
+const room = `build-check-${Date.now()}`;
+const result = await buildLive(brief, { onOutfit: show, room });
 
 const issues: string[] = [];
 const ids = result.outfits.flatMap((o) => o.pieces.map((p) => p.item.id));
@@ -33,6 +36,17 @@ for (const o of result.outfits) {
   if (o.pieces.some((p) => p.item.department !== brief.gender)) issues.push(`look ${o.number}: wrong department`);
 }
 
+// Stage timings from the call log: when the plan, each pick and each gate finished.
+try {
+  const path = getCallLogPath(room);
+  console.log('\nstages (ms since start):');
+  for (const line of readFileSync(path, 'utf8').trim().split('\n')) {
+    const e = JSON.parse(line);
+    if (e.ev === 'build_plan') console.log(`  ${String(e.ms).padStart(6)}  plan   ${e.model} (${e.plan_ms} ms)`);
+    if (e.ev === 'build_gate') console.log(`  ${String(e.ms).padStart(6)}  gated  ${e.name}: fits ${e.fits}, cohesion ${e.cohesion}, gate ${e.gate_ms} ms, pick ${e.picker}`);
+  }
+  rmSync(path, { force: true });
+} catch { /* timings are a nice-to-have */ }
 console.log(`\nfirst look ${result.timing.first_outfit_ms} ms, all ${result.timing.total_ms} ms, source ${result.source}`);
 for (const p of result.problems) console.log(`  note: ${p}`);
 for (const i of issues) console.log(`  !! ${i}`);
