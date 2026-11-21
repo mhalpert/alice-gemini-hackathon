@@ -147,7 +147,7 @@ function extractImageDataSecrets(args: Record<string, unknown>): string[] {
   const out: string[] = [];
   for (const entry of like) {
     const data = (entry as { image?: { data?: unknown } } | null)?.image?.data;
-    if (typeof data === 'string' && data.length > 0) {
+    if (typeof data === 'string' && data.length >= 6) {
       out.push(data);
     }
   }

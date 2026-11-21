@@ -67,7 +67,7 @@ export function redactSecrets(
 
   if (extraSecrets) {
     for (const secret of extraSecrets) {
-      if (typeof secret === 'string' && secret.length > 0) {
+      if (typeof secret === 'string' && secret.length >= 6) {
         out = out.split(secret).join('[REDACTED]');
       }
     }
