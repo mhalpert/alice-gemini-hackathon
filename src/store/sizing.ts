@@ -55,6 +55,25 @@ const NUMBER_WORDS: Record<string, number> = {
   twenty: 20,
 };
 
+const TENS_WORDS: Record<string, number> = {
+  twenty: 20,
+  thirty: 30,
+  forty: 40,
+  fifty: 50,
+};
+
+const ONES_WORDS: Record<string, number> = {
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+};
+
 const WORD_TO_LETTER: Record<string, string> = {
   'double extra small': 'XXS',
   'extra extra small': 'XXS',
@@ -86,6 +105,7 @@ const WORD_TO_LETTER: Record<string, string> = {
   'double xl': 'XXL',
   'xx-large': 'XXL',
   'xx large': 'XXL',
+  '2 xl': 'XXL',
   '2xl': 'XXL',
   xxl: 'XXL',
   '2x': '2X',
@@ -93,6 +113,7 @@ const WORD_TO_LETTER: Record<string, string> = {
   'triple xl': 'XXXL',
   'xxx-large': 'XXXL',
   'xxx large': 'XXXL',
+  '3 xl': 'XXXL',
   '3xl': 'XXXL',
   xxxl: 'XXXL',
   '3x': '3X',
@@ -183,43 +204,166 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function parseWordOrInt(token: string): number | null {
-  const lower = token.trim().toLowerCase();
-  if (lower in NUMBER_WORDS) return NUMBER_WORDS[lower];
-  if (/^\d+$/.test(lower)) return Number(lower);
-  return null;
+function replaceNumberWords(text: string): string {
+  if (/^one[\s-]+size\b/i.test(text)) return text;
+
+  let s = text.replace(
+    /\b(twenty|thirty|forty|fifty)[\s-]+(one|two|three|four|five|six|seven|eight|nine)\b/gi,
+    (_, tens: string, ones: string) =>
+      String(TENS_WORDS[tens.toLowerCase()] + ONES_WORDS[ones.toLowerCase()]),
+  );
+
+  s = s.replace(
+    /\b(zero|one(?!\s*-?\s*size\b)|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty)\b/gi,
+    (word: string) => {
+      const key = word.toLowerCase();
+      if (key in NUMBER_WORDS) return String(NUMBER_WORDS[key]);
+      if (key in TENS_WORDS) return String(TENS_WORDS[key]);
+      return word;
+    },
+  );
+
+  return s;
+}
+
+function stripLeadingArticlesAndSize(raw: string): string {
+  let s = raw.trim();
+  s = s.replace(/^an?\s+(?=\S)/i, '').trim();
+  s = s.replace(/^size\b[\s:.-]*/i, '').trim();
+  s = s.replace(/^an?\s+(?=\S)/i, '').trim();
+  return s;
+}
+
+function stripSingleWaistDecorations(s: string): string {
+  // "34 waist", "34 inch waist", "34 inches waist", "34 in waist", "34\" waist", "34-inch waist"
+  let m = s.match(
+    /^(\d+(?:\.\d+)?)\s*(?:(?:(?:-| )?(?:inch(?:es)?|in\.?))|["″])?\s*waist$/i,
+  );
+  if (m) return m[1];
+
+  // "waist 34", "waist: 34", "waist 34 in", "waist 34\"", "waist 34 inches"
+  m = s.match(
+    /^waist\s*(?::\s*)?(\d+(?:\.\d+)?)\s*(?:(?:inch(?:es)?|in\.?)|["″])?$/i,
+  );
+  if (m) return m[1];
+
+  // "34 in", "34 in.", "34 inch", "34 inches", "34\"", "34″"
+  m = s.match(/^(\d+(?:\.\d+)?)\s*(?:(?:-| )?(?:inch(?:es)?|in\.?)|["″])$/i);
+  if (m) return m[1];
+
+  // "W34", "W 34" (waist >= 20 so women's shoe "W 8" is never stripped)
+  m = s.match(/^W\s*(\d+(?:\.\d+)?)$/i);
+  if (m && Number(m[1]) >= 20) return m[1];
+
+  // "34W", "34 W" (waist >= 20 so shoe wide width "8.5W" / "10W" is never stripped)
+  m = s.match(/^(\d+(?:\.\d+)?)\s*W$/i);
+  if (m && Number(m[1]) >= 20) return m[1];
+
+  return s;
 }
 
 export function normalizeSpokenSize(raw: string): string {
-  let s = raw.trim();
-  s = s.replace(/^size\b[\s:.-]*/i, '').trim();
+  let s = stripLeadingArticlesAndSize(raw);
   if (!s) return '';
 
-  // "ten and a half", "10 and a half", "10 and half", "10 half" (optionally followed by width word)
-  const halfWord = s.match(/^([a-z]+|\d+)\s+(?:and\s+(?:a\s+)?)?half(?:\s+(.+))?$/i);
+  s = replaceNumberWords(s);
+
+  // "ten and a half", "eleven and a half", "10 and a half", "10 half" (optionally followed by trailing words)
+  const halfWord = s.match(/^(\d+)\s+(?:and\s+(?:a\s+)?)?half(?:\s+(.+))?$/i);
   if (halfWord) {
-    const base = parseWordOrInt(halfWord[1]);
-    if (base !== null) {
-      return halfWord[2] ? `${base}.5 ${halfWord[2].trim()}` : `${base}.5`;
+    s = halfWord[2] ? `${halfWord[1]}.5 ${halfWord[2].trim()}` : `${halfWord[1]}.5`;
+  } else {
+    // "10 1/2", "10-1/2", "ten 1/2", "10½" (optionally followed by trailing words)
+    const halfFrac = s.match(/^(\d+)(?:[\s-]+1\/2|\s*½)(?:\s+(.+))?$/i);
+    if (halfFrac) {
+      s = halfFrac[2] ? `${halfFrac[1]}.5 ${halfFrac[2].trim()}` : `${halfFrac[1]}.5`;
     }
   }
 
-  // "10 1/2", "10-1/2", "ten 1/2", "10½" (optionally followed by width word)
-  const halfFrac = s.match(/^([a-z]+|\d+)(?:[\s-]+1\/2|\s*½)(?:\s+(.+))?$/i);
-  if (halfFrac) {
-    const base = parseWordOrInt(halfFrac[1]);
-    if (base !== null) {
-      return halfFrac[2] ? `${base}.5 ${halfFrac[2].trim()}` : `${base}.5`;
-    }
-  }
-
-  // Standalone number word like "ten"
-  const lower = s.toLowerCase();
-  if (lower in NUMBER_WORDS) {
-    return String(NUMBER_WORDS[lower]);
-  }
+  s = stripSingleWaistDecorations(s);
 
   return trimTrailingZero(s);
+}
+
+export function formatSizeForMessage(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  const wx = parseWaistInseam(trimmed);
+  if (wx) return `${wx.waistStr}x${wx.inseamStr}`;
+  const norm = normalizeSpokenSize(trimmed);
+  if (!norm) return trimmed;
+  const letter = toCanonicalLetter(norm);
+  if (letter) {
+    const upper = norm.toUpperCase();
+    if (ALL_LETTER_CODES.has(upper)) return upper;
+    return letter;
+  }
+  return norm;
+}
+
+function isExplicitWaistInput(raw: string): boolean {
+  const stripped = stripLeadingArticlesAndSize(raw);
+  if (!stripped) return false;
+  const withNums = replaceNumberWords(stripped);
+
+  if (/\b(?:waist|inseam|length)\b/i.test(withNums)) return true;
+  if (/\b\d+(?:\.\d+)?\s*(?:(?:-| )?(?:inch(?:es)?|in\.?)|["″])(?=\s|$)/i.test(withNums)) {
+    return true;
+  }
+
+  const leadingW = withNums.match(/^W\s*(\d+(?:\.\d+)?)$/i);
+  if (leadingW && Number(leadingW[1]) >= 20) return true;
+
+  const trailingW = withNums.match(/^(\d+(?:\.\d+)?)\s*W$/i);
+  if (trailingW && Number(trailingW[1]) >= 20) return true;
+
+  if (parseWaistInseam(raw) !== null) return true;
+
+  return false;
+}
+
+function looksLikeShoeOnlyLabels(labels: readonly string[]): boolean {
+  if (labels.length === 0) return false;
+
+  const hasExplicitShoeSystem = labels.some((l) => /\b(?:EU|UK|US)\b/i.test(l));
+  if (hasExplicitShoeSystem) return true;
+
+  const hasShoeGenderPrefix = labels.some((l) =>
+    /^(?:US\s+)?(?:MEN'?S?|WOMEN'?S?|M|W)\s+\d+(?:\.\d+)?\b/i.test(l.trim()),
+  );
+  if (hasShoeGenderPrefix) return true;
+
+  const hasShoeWidthSuffix = labels.some((l) => {
+    const t = l.trim();
+    if (/\d+(?:\.\d+)?\s*(?:EXTRA\s*WIDE|XX?-?WIDE|WIDE|NARROW|EE|2E|4E|EW|XW)\b/i.test(t)) {
+      return true;
+    }
+    const shortW = t.match(/^(?:(?:US|EU|UK)\s+)?(\d+(?:\.\d+)?)\s*(?:W|D|E|N|M)\b/i);
+    return Boolean(shortW && Number(shortW[1]) <= 17);
+  });
+  if (hasShoeWidthSuffix) return true;
+
+  const parsedNums = labels
+    .map((l) => parsePlainNumber(l))
+    .filter((n): n is number => n !== null);
+  if (parsedNums.length === labels.length) {
+    const halfCount = parsedNums.filter((n) => Math.abs(n % 1 - 0.5) < 1e-6).length;
+    if (halfCount >= 2) return true;
+
+    // Pure US shoe / small numeric run (all 3..17): never a waist list
+    if (parsedNums.length >= 2 && parsedNums.every((n) => n >= 3 && n <= 17)) return true;
+
+    // Pure EU shoe run (all 34..50 with odd integers >= 35 such as 35, 37, 39, 41)
+    if (
+      parsedNums.length >= 3 &&
+      parsedNums.every((n) => n >= 34 && n <= 50) &&
+      parsedNums.some((n) => n >= 35 && n % 2 === 1)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 export function parseShoeWidth(raw: string, allowShortWidth = true): ParsedShoeWidth {
@@ -264,8 +408,10 @@ export function parseWaistInseam(text: string): ParsedWaistInseam | null {
   const cleaned = trimTrailingZero(normalizeSpokenSize(text));
   if (!cleaned) return null;
 
-  // "30x34", "30 x 34", "30×34", "30/34", "30W x 34L", "30W/34L"
-  let m = cleaned.match(/^(\d+(?:\.\d+)?)\s*W?\s*[x×/]\s*(\d+(?:\.\d+)?)\s*L?$/i);
+  // "30x34", "30 x 34", "30×34", "30/34", "30W x 34L", "30W/34L", "30\" x 34\""
+  let m = cleaned.match(
+    /^(\d+(?:\.\d+)?)\s*(?:W|["″]|in\.?|inch(?:es)?)?\s*[x×/]\s*(\d+(?:\.\d+)?)\s*(?:L|["″]|in\.?|inch(?:es)?)?$/i,
+  );
   if (m) {
     return { waist: Number(m[1]), inseam: Number(m[2]), waistStr: m[1], inseamStr: m[2] };
   }
@@ -282,15 +428,17 @@ export function parseWaistInseam(text: string): ParsedWaistInseam | null {
     return { waist: Number(m[1]), inseam: Number(m[2]), waistStr: m[1], inseamStr: m[2] };
   }
 
-  // "30 by 34"
-  m = cleaned.match(/^(\d+(?:\.\d+)?)\s+by\s+(\d+(?:\.\d+)?)$/i);
+  // "30 by 34", "30 waist by 34 length"
+  m = cleaned.match(
+    /^(\d+(?:\.\d+)?)\s*(?:(?:(?:-| )?(?:inch(?:es)?|in\.?)|["″])?\s*waist)?\s+by\s+(\d+(?:\.\d+)?)\s*(?:(?:(?:-| )?(?:inch(?:es)?|in\.?)|["″])?\s*(?:inseam|length))?$/i,
+  );
   if (m) {
     return { waist: Number(m[1]), inseam: Number(m[2]), waistStr: m[1], inseamStr: m[2] };
   }
 
-  // "30 waist 34 inseam", "30 waist, 34 inseam", "30 waist 34 length"
+  // "30 waist 34 inseam", "30 waist, 34 inseam", "30 waist 34 length", "30 inch waist 34 inch length"
   m = cleaned.match(
-    /^(\d+(?:\.\d+)?)\s*waist[\s,]+(\d+(?:\.\d+)?)\s*(?:inseam|length|in)?$/i,
+    /^(\d+(?:\.\d+)?)\s*(?:(?:-| )?(?:inch(?:es)?|in\.?)|["″])?\s*waist[\s,]+(?:(?:and|with)\s+)?(\d+(?:\.\d+)?)\s*(?:(?:-| )?(?:inch(?:es)?|in\.?)|["″])?\s*(?:inseam|length|in\.?)?$/i,
   );
   if (m) {
     return { waist: Number(m[1]), inseam: Number(m[2]), waistStr: m[1], inseamStr: m[2] };
@@ -298,7 +446,7 @@ export function parseWaistInseam(text: string): ParsedWaistInseam | null {
 
   // "waist 30, inseam 34", "waist 30 length 34"
   m = cleaned.match(
-    /^waist\s*(\d+(?:\.\d+)?)[\s,]+(?:inseam|length)\s*(\d+(?:\.\d+)?)$/i,
+    /^waist\s*(\d+(?:\.\d+)?)\s*(?:(?:inch(?:es)?|in\.?)|["″])?[\s,]+(?:(?:and|with)\s+)?(?:inseam|length)\s*(\d+(?:\.\d+)?)\s*(?:(?:inch(?:es)?|in\.?)|["″])?$/i,
   );
   if (m) {
     return { waist: Number(m[1]), inseam: Number(m[2]), waistStr: m[1], inseamStr: m[2] };
@@ -619,6 +767,12 @@ export function matchSizeDetail(
 
   const slotLower = (opts?.slot ?? '').trim().toLowerCase();
   const isShoes = slotLower === 'shoes' || slotLower === 'shoe';
+
+  // A waist measurement must never match a shoe size list
+  if (isExplicitWaistInput(raw) && (isShoes || (slotLower !== 'bottom' && looksLikeShoeOnlyLabels(labels)))) {
+    return { label: null };
+  }
+
   const availSet = opts?.available
     ? new Set(Array.from(opts.available, (l) => compact(l)))
     : null;

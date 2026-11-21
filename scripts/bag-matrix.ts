@@ -1,10 +1,11 @@
-import type { Gender } from '../src/types.ts';
+import type { Gender, Outfit } from '../src/types.ts';
 import {
   STORES,
   search,
   getProduct,
   sizeVariant,
   matchSizeLabel,
+  addToBag,
 } from '../src/store/index.ts';
 
 interface SlotSpec {
@@ -212,9 +213,77 @@ async function main(): Promise<void> {
       );
     }
   }
+
+  await runSpokenJeansCheck();
 }
 
-main().catch((err) => {
+async function runSpokenJeansCheck(): Promise<void> {
+  const cases = ['34 waist', 'thirty four', 'a 34'];
+  console.log('\n=== FASHION NOVA MEN\'S JEANS SPOKEN WAIST CART CHECK ===');
+
+  const searchRes = await search("men's jeans", 'men', {
+    shops: ['fnova.myshopify.com'],
+    limit: 12,
+  });
+
+  let pickedItem = null;
+  let pickedSizes: string[] = [];
+  for (const candidate of searchRes.items) {
+    const detail = await getProduct(candidate.variant_id);
+    if (!detail) continue;
+    const sizeOpt =
+      detail.options.find((o) => /size/i.test(o.name)) ??
+      detail.options.find((o) => /waist/i.test(o.name));
+    if (!sizeOpt) continue;
+    const avail34 = sizeOpt.values.some(
+      (v) => v.available && v.label.trim() === '34',
+    );
+    if (avail34) {
+      pickedItem = candidate;
+      pickedSizes = sizeOpt.values.filter((v) => v.available).map((v) => v.label.trim());
+      break;
+    }
+  }
+
+  if (!pickedItem) {
+    throw new Error('Could not find an in-stock Fashion Nova men\'s jeans product with size 34');
+  }
+
+  console.log(
+    `Product: "${pickedItem.title}" (${pickedItem.store}, $${pickedItem.price.toFixed(2)})`,
+  );
+  console.log(`Available sizes: [${pickedSizes.join(', ')}]`);
+
+  const outfit: Outfit = {
+    name: 'Spoken Jeans Check',
+    difference: 'Check',
+    story: 'Check',
+    total: pickedItem.price,
+    pieces: [{ slot: 'bottom', why: 'jeans', item: pickedItem }],
+  };
+
+  let allOk = true;
+  for (const asked of cases) {
+    const bag = await addToBag(outfit, { bottom: asked }, 'men');
+    const cart = bag.carts[0];
+    const line = cart?.added[0];
+    const ok = Boolean(cart && cart.cart_id && line && line.size === '34');
+    if (!ok) allOk = false;
+    console.log(
+      `asked=${JSON.stringify(asked).padEnd(14)} | ok=${String(ok).padEnd(5)} | size=${String(line?.size ?? null).padEnd(4)} | converted=${String(Boolean(line?.size_converted)).padEnd(5)} | variant=${line?.variant_id ?? 'null'} | cart_id=${cart?.cart_id ?? 'null'} | total=$${cart?.total_usd?.toFixed(2) ?? '0.00'} | url=${cart?.continue_url ?? 'null'}`,
+    );
+    if (!ok) {
+      console.log('  not_added:', JSON.stringify(cart?.not_added ?? bag.carts));
+    }
+  }
+
+  if (!allOk) {
+    process.exitCode = 1;
+  }
+}
+
+const runner = process.argv.includes('--jeans-spoken') ? runSpokenJeansCheck : main;
+runner().catch((err) => {
   console.error('[bag:matrix] fatal:', err);
   process.exitCode = 1;
 });

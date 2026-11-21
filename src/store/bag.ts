@@ -6,9 +6,11 @@ import { createCart } from './cart.ts';
 import { storeNameForDomain } from './stores.ts';
 import { logEvent } from './log.ts';
 import {
+  formatSizeForMessage,
   isSizeConverted,
   matchSizeDetail,
   matchSizeLabel,
+  normalizeSpokenSize,
   parseWaistInseam,
 } from './sizing.ts';
 import type { MatchSizeOptions } from './sizing.ts';
@@ -296,9 +298,14 @@ export function createBag(deps?: Partial<BagStoreDeps>): {
     const parsedWxL = rawSize && slot.trim().toLowerCase() === 'bottom'
       ? parseWaistInseam(rawSize)
       : null;
+    const normalizedExplicitInseam = explicitInseam
+      ? normalizeSpokenSize(explicitInseam) || explicitInseam
+      : undefined;
     const effectiveRawForMatching =
-      rawSize && explicitInseam && !parsedWxL ? `${rawSize}x${explicitInseam}` : rawSize;
-    const wantedInseam = parsedWxL?.inseamStr ?? explicitInseam;
+      rawSize && normalizedExplicitInseam && !parsedWxL
+        ? `${normalizeSpokenSize(rawSize) || rawSize}x${normalizedExplicitInseam}`
+        : rawSize;
+    const wantedInseam = parsedWxL?.inseamStr ?? normalizedExplicitInseam;
     const asked_size = effectiveRawForMatching ?? null;
 
     const detail = await getProductFn(item.variant_id);
@@ -389,7 +396,7 @@ export function createBag(deps?: Partial<BagStoreDeps>): {
           asked_size,
           reason:
             matchedDetail.soldOutReason ??
-            `${rawSize} isn't in stock (sizes left: ${preview})`,
+            `${formatSizeForMessage(effectiveRawForMatching!)} isn't in stock (sizes left: ${preview})`,
         },
       };
     }
