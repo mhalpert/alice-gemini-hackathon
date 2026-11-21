@@ -32,6 +32,8 @@ export interface AliceStoreDeps {
 export type LibraryLoaderFn = () => Promise<{
   libraryLooks?: unknown;
   libraryOccasions?: unknown;
+  occasionMenu?: unknown;
+  matchOccasionWords?: unknown;
 } | null>;
 
 export interface AliceBudgetOptions {
@@ -476,6 +478,17 @@ interface OccasionChoice {
   label: string;
 }
 
+interface OccasionMenuItem {
+  key: string;
+  keyword: string;
+}
+
+interface OccasionWordMatch {
+  key: string;
+  label: string;
+  score: number;
+}
+
 interface SetsOccasionEntry extends OccasionChoice {
   rawKey?: string;
 }
@@ -507,6 +520,31 @@ function normalizeOccasionChoices(raw: unknown): OccasionChoice[] | null {
     }
   }
   return out;
+}
+
+function normalizeOccasionMenu(raw: unknown): OccasionMenuItem[] {
+  if (!Array.isArray(raw)) return [];
+  const out: OccasionMenuItem[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const obj = entry as { key?: unknown; keyword?: unknown };
+    const key = typeof obj.key === 'string' ? obj.key.trim() : '';
+    const keyword = typeof obj.keyword === 'string' ? obj.keyword.trim() : '';
+    if (key && keyword) {
+      out.push({ key, keyword });
+    }
+  }
+  return out;
+}
+
+function normalizeOccasionWordMatch(raw: unknown): OccasionWordMatch | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const obj = raw as { key?: unknown; label?: unknown; score?: unknown };
+  const key = typeof obj.key === 'string' ? obj.key.trim() : '';
+  const label = typeof obj.label === 'string' ? obj.label.trim() : '';
+  const score = typeof obj.score === 'number' && Number.isFinite(obj.score) ? obj.score : NaN;
+  if (!key || !label || !Number.isFinite(score)) return null;
+  return { key, label, score };
 }
 
 interface MemoizedSetsOccasions {
@@ -585,6 +623,8 @@ async function readLibraryOccasionsFromSets(
 function defaultLoadLibrary(): Promise<{
   libraryLooks?: unknown;
   libraryOccasions?: unknown;
+  occasionMenu?: unknown;
+  matchOccasionWords?: unknown;
 } | null> {
   return import('./src/library/index.ts').catch(() => null);
 }
@@ -890,7 +930,8 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         rawPathname === '/api/product' ||
         rawPathname === '/api/search' ||
         rawPathname === '/api/looks' ||
-        rawPathname === '/api/occasions'
+        rawPathname === '/api/occasions' ||
+        rawPathname === '/api/occasions/match'
       ) {
         if (method !== 'GET') {
           sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'GET' });
@@ -1127,31 +1168,47 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         // GET /api/occasions?department=men|women
         if (rawPathname === '/api/occasions') {
           const department = parseDepartment(parsedUrl.searchParams.get('department'));
-          let occasions: OccasionChoice[] | null = null;
-          try {
-            const runOccasions = async (): Promise<OccasionChoice[] | null> => {
-              const mod = await loadLibraryFn();
-              if (mod && typeof mod.libraryOccasions === 'function') {
-                const fn = mod.libraryOccasions as (g: Gender) => Promise<unknown> | unknown;
-                const list = await fn(department);
-                return normalizeOccasionChoices(list);
-              }
-              return null;
-            };
-            const raced = await raceWithBudget(runOccasions(), looksBudgetMs);
-            if (!raced.timedOut && raced.value !== null) {
-              occasions = raced.value;
+          const modPromise = Promise.resolve()
+            .then(() => loadLibraryFn())
+            .catch(() => null);
+
+          const occasionsPromise = (async (): Promise<OccasionChoice[] | null> => {
+            const mod = await modPromise;
+            if (mod && typeof mod.libraryOccasions === 'function') {
+              const fn = mod.libraryOccasions as (g: Gender) => Promise<unknown> | unknown;
+              const list = await fn(department);
+              return normalizeOccasionChoices(list);
             }
-          } catch {
-            occasions = null;
-          }
+            return null;
+          })().catch(() => null);
+
+          const menuPromise = (async (): Promise<OccasionMenuItem[]> => {
+            const mod = await modPromise;
+            if (mod && typeof mod.occasionMenu === 'function') {
+              const fn = mod.occasionMenu as (g: Gender) => Promise<unknown> | unknown;
+              const list = await fn(department);
+              return normalizeOccasionMenu(list);
+            }
+            return [];
+          })().catch(() => []);
+
+          const [occasionsRaced, menuRaced] = await Promise.all([
+            raceWithBudget(occasionsPromise, looksBudgetMs),
+            raceWithBudget(menuPromise, looksBudgetMs),
+          ]);
+
+          const occasions =
+            !occasionsRaced.timedOut && occasionsRaced.value !== null
+              ? occasionsRaced.value
+              : null;
+          const menu = !menuRaced.timedOut ? menuRaced.value : [];
 
           if (occasions !== null) {
-            logExtra = `dept=${department} source=library n=${occasions.length}`;
+            logExtra = `dept=${department} source=library n=${occasions.length} menu=${menu.length}`;
             sendJson(
               res,
               200,
-              { department, occasions, source: 'library' },
+              { department, occasions, menu, source: 'library' },
               { 'Cache-Control': 'no-store' },
             );
             return;
@@ -1162,23 +1219,65 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
             const fallbackOccasions: OccasionChoice[] = setsEntries.map(
               ({ key, occasion, label }) => ({ key, occasion, label }),
             );
-            logExtra = `dept=${department} source=sets n=${fallbackOccasions.length}`;
+            logExtra = `dept=${department} source=sets n=${fallbackOccasions.length} menu=${menu.length}`;
             sendJson(
               res,
               200,
-              { department, occasions: fallbackOccasions, source: 'sets' },
+              { department, occasions: fallbackOccasions, menu, source: 'sets' },
               { 'Cache-Control': 'no-store' },
             );
             return;
           }
 
-          logExtra = `dept=${department} source=none n=0`;
+          logExtra = `dept=${department} source=none n=0 menu=${menu.length}`;
           sendJson(
             res,
             200,
-            { department, occasions: [], source: 'none' },
+            { department, occasions: [], menu, source: 'none' },
             { 'Cache-Control': 'no-store' },
           );
+          return;
+        }
+
+        // GET /api/occasions/match?department=men|women&q=<text>
+        if (rawPathname === '/api/occasions/match') {
+          const rawDept = parsedUrl.searchParams.get('department')?.trim().toLowerCase();
+          if (rawDept !== 'men' && rawDept !== 'women') {
+            sendJson(res, 400, { error: 'bad_department' }, { 'Cache-Control': 'no-store' });
+            return;
+          }
+          const department: Gender = rawDept;
+          const query = (parsedUrl.searchParams.get('q') ?? '').trim().slice(0, OCCASION_MAX_LEN);
+          if (query.length === 0) {
+            logExtra = `dept=${department} match=none`;
+            sendJson(res, 200, { match: null }, { 'Cache-Control': 'no-store' });
+            return;
+          }
+
+          let match: OccasionWordMatch | null = null;
+          try {
+            const runMatch = async (): Promise<OccasionWordMatch | null> => {
+              const mod = await loadLibraryFn();
+              if (mod && typeof mod.matchOccasionWords === 'function') {
+                const fn = mod.matchOccasionWords as (
+                  g: Gender,
+                  text: string,
+                ) => Promise<unknown> | unknown;
+                const found = await fn(department, query);
+                return normalizeOccasionWordMatch(found);
+              }
+              return null;
+            };
+            const raced = await raceWithBudget(runMatch(), looksBudgetMs);
+            if (!raced.timedOut) {
+              match = raced.value;
+            }
+          } catch {
+            match = null;
+          }
+
+          logExtra = `dept=${department} match=${match ? match.key : 'none'}`;
+          sendJson(res, 200, { match }, { 'Cache-Control': 'no-store' });
           return;
         }
       }
