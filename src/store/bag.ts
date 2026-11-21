@@ -1,5 +1,5 @@
 import type { BagOut, CartResult, Gender, Outfit, Piece } from '../types.ts';
-import type { ProductDetail, SizeVariantResult } from './catalog.ts';
+import type { ProductDetail, SizeVariantOpts, SizeVariantResult } from './catalog.ts';
 import type { CartLineInput, StoreCartResponse } from './cart.ts';
 import { getProduct, sizeVariant } from './catalog.ts';
 import { createCart } from './cart.ts';
@@ -10,6 +10,8 @@ export interface BagLineAdded {
   variant_id: string;
   title?: string;
   size?: string | null;
+  asked_size?: string | null;
+  size_converted?: boolean;
   slot: string;
   image: string;
   price: number;
@@ -20,6 +22,8 @@ export interface BagLineNotAdded {
   variant_id: string;
   title?: string;
   size?: string | null;
+  asked_size?: string | null;
+  size_converted?: boolean;
   reason: string;
   slot: string;
   image: string;
@@ -35,7 +39,7 @@ export interface MatchSizeOptions {
 
 export interface BagStoreDeps {
   getProduct(id: string): Promise<ProductDetail | null>;
-  sizeVariant(variantId: string, size: string): Promise<SizeVariantResult>;
+  sizeVariant(variantId: string, size: string, opts?: SizeVariantOpts): Promise<SizeVariantResult>;
   createCart(storeDomain: string, lines: CartLineInput[]): Promise<StoreCartResponse>;
   now?: () => number;
 }
@@ -228,6 +232,19 @@ function parsePlainNumber(text: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+const ONE_SIZE_LABEL_RE =
+  /^(?:one\s*size(?:\s*fits\s*(?:all|most))?|o\.?\/?s\.?|osfa|osfm|free\s*size|uni(?:sex)?|standard|default(?:\s*title)?)$/i;
+
+function isOneSizeOption(
+  sizeOption: { name: string; values: { label: string }[] } | undefined,
+): boolean {
+  if (!sizeOption || sizeOption.values.length === 0) return true;
+  if (sizeOption.values.length === 1) {
+    return ONE_SIZE_LABEL_RE.test(sizeOption.values[0].label.trim());
+  }
+  return false;
+}
+
 function womenNumberToLetter(n: number): string | null {
   if (n >= 0 && n <= 2) return 'XS';
   if (n >= 4 && n <= 6) return 'S';
@@ -235,6 +252,110 @@ function womenNumberToLetter(n: number): string | null {
   if (n >= 12 && n <= 14) return 'L';
   if (n === 16) return 'XL';
   return null;
+}
+
+function womenLetterToUsNumbers(letter: string): string[] {
+  switch (letter) {
+    case 'XXS':
+      return ['00', '0'];
+    case 'XS':
+      return ['0', '2'];
+    case 'S':
+      return ['4', '6'];
+    case 'M':
+      return ['8', '6', '10'];
+    case 'L':
+      return ['12', '10', '14'];
+    case 'XL':
+    case '1X':
+      return ['16', '14'];
+    case 'XXL':
+    case '2X':
+      return ['18', '20'];
+    default:
+      return [];
+  }
+}
+
+function womenDressToDenimWaist(n: number): number | null {
+  const map: Record<number, number> = {
+    0: 24,
+    2: 26,
+    4: 27,
+    6: 28,
+    8: 29,
+    10: 30,
+    12: 31,
+    14: 32,
+    16: 33,
+  };
+  return map[n] ?? null;
+}
+
+function womenToJuniorsOdd(n: number): number | null {
+  // Misses even size -> Juniors odd size
+  const evenMap: Record<number, number> = {
+    0: 1,
+    2: 3,
+    4: 5,
+    6: 7,
+    8: 9,
+    10: 11,
+    12: 13,
+    14: 15,
+  };
+  if (n in evenMap) return evenMap[n];
+  // Denim waist (24..33) -> Juniors odd size
+  const waistMap: Record<number, number> = {
+    24: 1,
+    25: 3,
+    26: 3,
+    27: 5,
+    28: 7,
+    29: 9,
+    30: 11,
+    31: 13,
+    32: 15,
+    33: 15,
+  };
+  return waistMap[n] ?? null;
+}
+
+function menWaistToLetter(n: number): string | null {
+  if (n >= 28 && n <= 29) return 'XS';
+  if (n >= 30 && n <= 31) return 'S';
+  if (n >= 32 && n <= 33) return 'M';
+  if (n >= 34 && n <= 35) return 'L';
+  if (n >= 36 && n <= 38) return 'XL';
+  if (n >= 39 && n <= 42) return 'XXL';
+  return null;
+}
+
+function extractLeadingNumber(label: string): number | null {
+  if (labelLetterCode(label) !== null) return null;
+  const norm = trimTrailingZero(label.trim());
+  const m = norm.match(/^(?:(?:US|UK|EU|M|W)\s+)?(\d+(?:\.\d+)?)(?!\d|\.\d)(?=$|\s|[^0-9.])/i);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function matchSlashLetterLabel(
+  canonicalLetter: string,
+  labels: readonly string[],
+  isAvailable: (l: string) => boolean,
+): string | null {
+  const aliases = new Set(LETTER_ALIASES[canonicalLetter] ?? [canonicalLetter]);
+  const matches: string[] = [];
+  for (const label of labels) {
+    const parts = label.split(/\s*[/–-]\s*/).map((p) => toCanonicalLetter(p));
+    if (parts.length >= 2 && parts.every((p) => p !== null) && parts.some((p) => p !== null && aliases.has(p))) {
+      matches.push(label);
+    }
+  }
+  if (matches.length === 0) return null;
+  const avail = matches.find((m) => isAvailable(m));
+  return avail ?? matches[0];
 }
 
 export function matchSizeLabel(
@@ -265,7 +386,7 @@ export function matchSizeLabel(
     }
   }
 
-  // Exact waist x inseam match when shopper gave both waist and inseam (e.g. "32x30")
+  // Exact waist x inseam match when shopper gave both waist and inseam (e.g. "32x30", "W34 L32", "34/32")
   const reqWxL = parseWaistInseam(cleaned);
   if (reqWxL) {
     for (const label of labels) {
@@ -276,19 +397,18 @@ export function matchSizeLabel(
     }
   }
 
-  // 2. Canonical letter match (handles "Large (L)", "Medium", "2X" <-> "XXL", "1X" <-> "XL")
+  // 2. Canonical letter match (handles "Large (L)", "Medium", "8 (M)", "2X" <-> "XXL", "1X" <-> "XL", "M/L")
   if (canonicalLetter) {
     const aliases = LETTER_ALIASES[canonicalLetter] ?? [canonicalLetter];
     for (const alias of aliases) {
-      const match = labels.find((label) => {
-        const code = labelLetterCode(label);
-        return code === alias;
-      });
+      const match = labels.find((label) => labelLetterCode(label) === alias);
       if (match) return match;
     }
+    const slashMatch = matchSlashLetterLabel(canonicalLetter, labels, isAvailable);
+    if (slashMatch) return slashMatch;
   }
 
-  // 3. Waist-only shopper input against waist x inseam labels (e.g. "32" or "32W")
+  // 3. Waist-only shopper input against waist x inseam labels (e.g. "32" or "32W" against "32x32", "W34 L32", "34/32")
   const waistOnlyMatch = cleaned.match(/^(\d+(?:\.\d+)?)\s*W?$/i);
   if (waistOnlyMatch) {
     const waistNum = Number(waistOnlyMatch[1]);
@@ -317,17 +437,31 @@ export function matchSizeLabel(
     }
   }
 
-  // 4. Prefix match: label starts with value followed by a non-digit (and not .<digit>)
-  // Prefer labels containing "US" over "EU"/"UK".
+  // 4. Prefix / region-prefixed match:
+  //    - labels that START with value followed by non-digit (e.g. "34 US", "34W", "11 M", "8 (M)")
+  //    - labels prefixed by US / M / W (e.g. "US 11", "M 11", "W 8"), respecting gender when M/W is used
+  //    Prefer US over EU/UK, standard width (M/D) over W/N, and available over unavailable.
   const prefixCandidates: string[] = [];
   const isLetterOnly = /^[A-Z]+$/i.test(effective);
   const prefixRe = isLetterOnly
     ? new RegExp(`^${escapeRegExp(effective)}(?=$|[^a-z0-9])`, 'i')
     : new RegExp(`^${escapeRegExp(effective)}(?!\\d|\\.\\d)(?=$|[^0-9.])`, 'i');
 
+  const regionPrefixRe = !isLetterOnly
+    ? new RegExp(
+        `^(?:US\\s+(?:[MW]\\s+)?|(?:MEN'?S?|M)\\s+|(?:WOMEN'?S?|W)\\s+)${escapeRegExp(effective)}(?!\\d|\\.\\d)(?=$|\\s|[^0-9.])`,
+        'i',
+      )
+    : null;
+
   for (const label of labels) {
     const normLabel = trimTrailingZero(label.trim());
     if (prefixRe.test(normLabel)) {
+      prefixCandidates.push(label);
+    } else if (regionPrefixRe && regionPrefixRe.test(normLabel)) {
+      // Avoid matching W-prefixed shoe/size for men or M-prefixed for women
+      if (opts?.gender === 'men' && /^(?:US\s+)?(?:WOMEN'?S?|W)\s+/i.test(normLabel)) continue;
+      if (opts?.gender === 'women' && /^(?:US\s+)?(?:MEN'?S?|M)\s+/i.test(normLabel)) continue;
       prefixCandidates.push(label);
     }
   }
@@ -338,25 +472,55 @@ export function matchSizeLabel(
       if (/\b(?:EU|UK)\b/i.test(label)) return 2;
       return 1;
     };
+    const scoreWidth = (label: string): number => {
+      if (/\b(?:M|D|R|STD|REGULAR)\b/i.test(label)) return 0;
+      if (/\b(?:W|EE|2E|N|XW)\b/i.test(label)) return 2;
+      return 1;
+    };
 
     prefixCandidates.sort((a, b) => {
       const regionDiff = scoreRegion(a) - scoreRegion(b);
       if (regionDiff !== 0) return regionDiff;
       const availDiff = (isAvailable(a) ? 0 : 1) - (isAvailable(b) ? 0 : 1);
-      return availDiff;
+      if (availDiff !== 0) return availDiff;
+      return scoreWidth(a) - scoreWidth(b);
     });
 
     return prefixCandidates[0];
   }
 
-  // 5. Women-only numeric -> letter mapping when labels are letters
+  const slotLower = (opts?.slot ?? '').trim().toLowerCase();
   const plainNum = parsePlainNumber(cleaned);
+
+  // 5. Women's letter -> US numeric dress sizes (e.g. "Medium" -> "8 US" on Everlane dresses)
+  if (
+    canonicalLetter &&
+    opts?.gender === 'women' &&
+    slotLower !== 'shoes' &&
+    slotLower !== 'shoe'
+  ) {
+    const labelNums = labels
+      .map((l) => extractLeadingNumber(l))
+      .filter((n): n is number => n !== null);
+    const looksLikeUsDressSizes =
+      labelNums.length >= 2 && labelNums.some((n) => n >= 0 && n <= 16 && n % 2 === 0);
+    if (looksLikeUsDressSizes) {
+      const targets = womenLetterToUsNumbers(canonicalLetter);
+      for (const t of targets) {
+        const found = matchSizeLabel(t, labels, { ...opts, gender: undefined });
+        if (found) return found;
+      }
+    }
+  }
+
+  // 6. Women's numeric conversions
   if (
     plainNum !== null &&
     opts?.gender === 'women' &&
-    opts?.slot !== 'shoes' &&
-    opts?.slot !== 'shoe'
+    slotLower !== 'shoes' &&
+    slotLower !== 'shoe'
   ) {
+    // 6a. Number -> letter labels (0-2 XS, 4-6 S, 8-10 M, 12-14 L, 16 XL)
     const hasLetterLabels = labels.some((label) => {
       const code = labelLetterCode(label);
       return code !== null && ALL_LETTER_CODES.has(code);
@@ -364,12 +528,106 @@ export function matchSizeLabel(
     if (hasLetterLabels) {
       const mappedLetter = womenNumberToLetter(plainNum);
       if (mappedLetter) {
+        const found = matchSizeLabel(mappedLetter, labels, { ...opts, gender: undefined });
+        if (found) return found;
+      }
+    }
+
+    // 6b. Women's bottoms: dress size -> denim waist (23..36) OR misses/waist -> juniors odd (1,3,5,7,9,11,13,15)
+    if (slotLower === 'bottom') {
+      const labelNums = labels
+        .map((l) => extractLeadingNumber(l))
+        .filter((n): n is number => n !== null);
+
+      const hasDenimWaists =
+        labelNums.length >= 2 &&
+        labelNums.some((n) => n >= 23 && n <= 36) &&
+        !labelNums.some((n) => n >= 2 && n <= 16);
+
+      if (hasDenimWaists && plainNum >= 0 && plainNum <= 16) {
+        const waist = womenDressToDenimWaist(plainNum);
+        if (waist !== null) {
+          const found = matchSizeLabel(String(waist), labels, { ...opts, gender: undefined });
+          if (found) return found;
+        }
+      }
+
+      const oddCount = labelNums.filter((n) => n >= 1 && n <= 15 && n % 2 === 1).length;
+      const evenCount = labelNums.filter((n) => n >= 2 && n <= 16 && n % 2 === 0).length;
+      if (oddCount >= 3 && evenCount === 0) {
+        const juniors = womenToJuniorsOdd(plainNum);
+        if (juniors !== null) {
+          const found = matchSizeLabel(String(juniors), labels, { ...opts, gender: undefined });
+          if (found) return found;
+        }
+      }
+    }
+  }
+
+  // 7. Men's bottom waist (28-42) -> letter sizes ONLY when slot is 'bottom' and labels are letter-only.
+  // Never for 'top' and never for 'layer' (chest sizes 34-52 stay numeric).
+  if (plainNum !== null && opts?.gender === 'men' && slotLower === 'bottom') {
+    const allLetters = labels.every((l) => labelLetterCode(l) !== null);
+    if (allLetters) {
+      const mappedLetter = menWaistToLetter(plainNum);
+      if (mappedLetter) {
         return matchSizeLabel(mappedLetter, labels, { ...opts, gender: undefined });
       }
     }
   }
 
   return null;
+}
+
+export function isSizeConverted(
+  asked: string | null | undefined,
+  matched: string | null | undefined,
+): boolean {
+  if (!asked || !matched) return false;
+  const cleanedAsked = normalizeSpokenSize(asked);
+  const cleanedMatched = trimTrailingZero(matched.trim());
+  if (!cleanedAsked || !cleanedMatched) return false;
+
+  if (compact(cleanedAsked) === compact(cleanedMatched)) return false;
+
+  const askedLetter = toCanonicalLetter(cleanedAsked);
+  const matchedLetter = labelLetterCode(cleanedMatched);
+  if (askedLetter) {
+    if (matchedLetter) {
+      const aliases = LETTER_ALIASES[askedLetter] ?? [askedLetter];
+      return !aliases.includes(matchedLetter);
+    }
+    const slashParts = cleanedMatched.split(/\s*[/–-]\s*/).map((p) => toCanonicalLetter(p));
+    if (slashParts.length >= 2 && slashParts.every((p) => p !== null)) {
+      const aliases = new Set(LETTER_ALIASES[askedLetter] ?? [askedLetter]);
+      return !slashParts.some((p) => p !== null && aliases.has(p));
+    }
+    return true;
+  }
+
+  const askedWxL = parseWaistInseam(cleanedAsked);
+  const matchedWxL = parseWaistInseam(cleanedMatched);
+  if (askedWxL && matchedWxL) {
+    return askedWxL.waist !== matchedWxL.waist || askedWxL.inseam !== matchedWxL.inseam;
+  }
+
+  const askedWaistOrNum = cleanedAsked.match(/^(\d+(?:\.\d+)?)\s*W?$/i);
+  if (askedWaistOrNum) {
+    const askedNum = Number(askedWaistOrNum[1]);
+    if (matchedWxL) {
+      return matchedWxL.waist !== askedNum;
+    }
+    const matchedNumMatch = cleanedMatched.match(
+      /^(?:(?:US|UK|EU|M|W|MEN'?S?|WOMEN'?S?)\s+(?:US\s+)?(?:[MW]\s+)?)?(\d+(?:\.\d+)?)(?!\d|\.\d)(?=$|\s|[^0-9.])/i,
+    );
+    if (matchedNumMatch && !/^\d+X[SL]?$/i.test(cleanedMatched)) {
+      const matchedNum = Number(matchedNumMatch[1]);
+      return matchedNum !== askedNum;
+    }
+    return true;
+  }
+
+  return false;
 }
 
 function pickSize(sizes: Record<string, string> | undefined, ...keys: string[]): string | undefined {
@@ -495,6 +753,9 @@ export function createBag(deps?: Partial<BagStoreDeps>): {
       item_id: item.id,
     };
 
+    const rawSize = sizeForSlot(slot, sizes);
+    const asked_size = rawSize ?? null;
+
     const detail = await getProductFn(item.variant_id);
     if (!detail) {
       return {
@@ -505,6 +766,7 @@ export function createBag(deps?: Partial<BagStoreDeps>): {
           ...baseFields,
           variant_id: item.variant_id,
           size: null,
+          asked_size,
           reason: 'could not check product availability',
         },
       };
@@ -514,8 +776,8 @@ export function createBag(deps?: Partial<BagStoreDeps>): {
       detail.options.find((o) => /size/i.test(o.name)) ??
       detail.options.find((o) => /waist/i.test(o.name));
 
-    // No size option or single size option (e.g. One Size / OS / O/S)
-    if (!sizeOption || sizeOption.values.length <= 1) {
+    // No size option or true one-size option (e.g. One Size / OS / O/S)
+    if (isOneSizeOption(sizeOption)) {
       const singleSize = sizeOption?.values[0]?.label ?? null;
       if (detail.variant.available) {
         return {
@@ -526,6 +788,7 @@ export function createBag(deps?: Partial<BagStoreDeps>): {
             ...baseFields,
             variant_id: item.variant_id,
             size: singleSize,
+            asked_size,
           },
         };
       }
@@ -537,13 +800,13 @@ export function createBag(deps?: Partial<BagStoreDeps>): {
           ...baseFields,
           variant_id: item.variant_id,
           size: singleSize,
+          asked_size,
           reason: 'sold out',
         },
       };
     }
 
-    const rawSize = sizeForSlot(slot, sizes);
-    const preview = formatSizesPreview(sizeOption.values);
+    const preview = formatSizesPreview(sizeOption!.values);
 
     if (!rawSize) {
       return {
@@ -554,13 +817,14 @@ export function createBag(deps?: Partial<BagStoreDeps>): {
           ...baseFields,
           variant_id: item.variant_id,
           size: null,
+          asked_size: null,
           reason: `no ${slot} size given (sizes: ${preview})`,
         },
       };
     }
 
-    const allLabels = sizeOption.values.map((v) => v.label);
-    const availLabels = sizeOption.values.filter((v) => v.available).map((v) => v.label);
+    const allLabels = sizeOption!.values.map((v) => v.label);
+    const availLabels = sizeOption!.values.filter((v) => v.available).map((v) => v.label);
     const matched = matchSizeLabel(rawSize, allLabels, {
       slot,
       gender,
@@ -576,12 +840,15 @@ export function createBag(deps?: Partial<BagStoreDeps>): {
           ...baseFields,
           variant_id: item.variant_id,
           size: null,
+          asked_size,
           reason: `${rawSize} isn't in stock (sizes left: ${preview})`,
         },
       };
     }
 
-    const sv = await sizeVariantFn(item.variant_id, matched);
+    const sv = await sizeVariantFn(item.variant_id, matched, { gender });
+    const resolvedSize = sv.size ?? matched;
+    const converted = isSizeConverted(rawSize, resolvedSize);
     if (!sv.ok || !sv.variant_id) {
       return {
         piece,
@@ -590,7 +857,9 @@ export function createBag(deps?: Partial<BagStoreDeps>): {
         lineNotAdded: {
           ...baseFields,
           variant_id: sv.variant_id ?? item.variant_id,
-          size: sv.size ?? matched,
+          size: resolvedSize,
+          asked_size,
+          ...(converted ? { size_converted: true } : {}),
           reason: sv.reason ?? `${matched} is unavailable`,
         },
       };
@@ -603,7 +872,9 @@ export function createBag(deps?: Partial<BagStoreDeps>): {
       lineAdded: {
         ...baseFields,
         variant_id: sv.variant_id,
-        size: sv.size ?? matched,
+        size: resolvedSize,
+        asked_size,
+        ...(converted ? { size_converted: true } : {}),
       },
     };
   }
@@ -795,6 +1066,14 @@ export function createBag(deps?: Partial<BagStoreDeps>): {
           const priceStr =
             cart.total_usd !== null ? `$${cart.total_usd.toFixed(2)}` : 'total pending';
           parts.push(`${cart.store}: ${cart.added.length} added, ${priceStr}.`);
+        }
+        for (const item of cart.added) {
+          const line = item as BagLineAdded;
+          if (line.size_converted && line.size && line.asked_size) {
+            parts.push(
+              `${line.title ?? line.variant_id} went in as ${line.size} (you said ${line.asked_size}).`,
+            );
+          }
         }
         for (const item of cart.not_added) {
           parts.push(`${item.title ?? item.variant_id}: ${item.reason}.`);

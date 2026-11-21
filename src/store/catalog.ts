@@ -65,12 +65,17 @@ export interface SizeVariantResult {
   reason?: string;
 }
 
+export interface SizeVariantOpts {
+  gender?: Gender;
+  inseam?: string;
+}
+
 export interface CatalogClient {
   search(query: string, gender: Gender, opts?: SearchOpts): Promise<SearchResult>;
   lookup(ids: string[]): Promise<Map<string, LookupEntry>>;
   getProduct(id: string, selections?: ProductSelection[]): Promise<ProductDetail | null>;
   productImages(item: Item): Promise<string[]>;
-  sizeVariant(variantId: string, size: string): Promise<SizeVariantResult>;
+  sizeVariant(variantId: string, size: string, opts?: SizeVariantOpts): Promise<SizeVariantResult>;
 }
 
 const FRESH_SAVED_MS = 60 * 60 * 1000;
@@ -701,7 +706,74 @@ export function createCatalog(deps?: {
     return out;
   }
 
-  async function sizeVariant(variantId: string, size: string): Promise<SizeVariantResult> {
+function extractFirstNumber(label: string): number | null {
+  const m = label.match(/(\d+(?:\.\d+)?)/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function pickBestLengthLabel(
+  values: ProductOptionValue[],
+  gender?: Gender,
+  requestedInseam?: string,
+): ProductOptionValue | undefined {
+  if (values.length === 0) return undefined;
+  const avail = values.filter((v) => v.available);
+  const pool = avail.length > 0 ? avail : values;
+
+  if (requestedInseam) {
+    const reqNum = extractFirstNumber(requestedInseam);
+    if (reqNum !== null) {
+      const exact = pool.find((v) => extractFirstNumber(v.label) === reqNum);
+      if (exact) return exact;
+    }
+    const reqNorm = requestedInseam.trim().toUpperCase();
+    const exactText = pool.find((v) => v.label.trim().toUpperCase() === reqNorm);
+    if (exactText) return exactText;
+  }
+
+  const target = gender === 'women' ? 30 : 32;
+  let bestNum: ProductOptionValue | undefined;
+  let bestDist = Infinity;
+  for (const v of pool) {
+    const n = extractFirstNumber(v.label);
+    if (n === null) continue;
+    const dist = Math.abs(n - target);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestNum = v;
+    }
+  }
+  if (bestNum) return bestNum;
+
+  const regular = pool.find((v) => /\b(?:regular|reg|standard|medium)\b/i.test(v.label));
+  return regular ?? pool[0];
+}
+
+function matchCompanionSizeValue(
+  primaryLabel: string,
+  values: ProductOptionValue[],
+): ProductOptionValue | undefined {
+  const exact = matchSizeLabel(primaryLabel, values);
+  if (exact) return exact;
+  const num = extractFirstNumber(primaryLabel);
+  if (num !== null) {
+    const usMatch = values.find(
+      (v) => extractFirstNumber(v.label) === num && /\bUS\b/i.test(v.label),
+    );
+    if (usMatch) return usMatch;
+    const anyNum = values.find((v) => extractFirstNumber(v.label) === num);
+    if (anyNum) return anyNum;
+  }
+  return undefined;
+}
+
+  async function sizeVariant(
+    variantId: string,
+    size: string,
+    opts?: SizeVariantOpts,
+  ): Promise<SizeVariantResult> {
     try {
       const initial = await getProduct(variantId);
       if (!initial) {
@@ -747,18 +819,66 @@ export function createCatalog(deps?: {
         };
       }
 
+      // Detect secondary length/inseam option (e.g., separate "Length" or "Inseam")
+      // or a companion size option only when it actually has available values and is part of selected.
       const baseSelections =
         initial.selected.length > 0 ? initial.selected : initial.variant.options;
-      let replaced = false;
+      const selectedNames = new Set(baseSelections.map((s) => s.name.toLowerCase()));
+
+      const lengthOption = initial.options.find(
+        (o) =>
+          o.name.toLowerCase() !== sizeOption.name.toLowerCase() &&
+          /length|inseam/i.test(o.name) &&
+          o.values.some((v) => v.available),
+      );
+      const matchedLength = lengthOption
+        ? pickBestLengthLabel(lengthOption.values, opts?.gender, opts?.inseam)
+        : undefined;
+
+      const companionSizeOption = initial.options.find(
+        (o) =>
+          o.name.toLowerCase() !== sizeOption.name.toLowerCase() &&
+          (!lengthOption || o.name.toLowerCase() !== lengthOption.name.toLowerCase()) &&
+          /size/i.test(o.name) &&
+          selectedNames.has(o.name.toLowerCase()) &&
+          o.values.some((v) => v.available),
+      );
+      const matchedCompanion = companionSizeOption
+        ? matchCompanionSizeValue(matched.label, companionSizeOption.values)
+        : undefined;
+
+      const desiredByName = new Map<string, ProductSelection>();
+      desiredByName.set(sizeOption.name.toLowerCase(), {
+        name: sizeOption.name,
+        label: matched.label,
+      });
+      if (lengthOption && matchedLength) {
+        desiredByName.set(lengthOption.name.toLowerCase(), {
+          name: lengthOption.name,
+          label: matchedLength.label,
+        });
+      }
+      if (companionSizeOption && matchedCompanion && matchedCompanion.available) {
+        desiredByName.set(companionSizeOption.name.toLowerCase(), {
+          name: companionSizeOption.name,
+          label: matchedCompanion.label,
+        });
+      }
+
+      const applied = new Set<string>();
       const nextSelections: ProductSelection[] = baseSelections.map((sel) => {
-        if (sel.name.toLowerCase() === sizeOption.name.toLowerCase()) {
-          replaced = true;
-          return { name: sizeOption.name, label: matched.label };
+        const key = sel.name.toLowerCase();
+        const desired = desiredByName.get(key);
+        if (desired) {
+          applied.add(key);
+          return desired;
         }
         return { name: sel.name, label: sel.label };
       });
-      if (!replaced) {
-        nextSelections.push({ name: sizeOption.name, label: matched.label });
+      for (const [key, desired] of desiredByName.entries()) {
+        if (!applied.has(key)) {
+          nextSelections.push(desired);
+        }
       }
 
       // Pass the PRODUCT id (initial.id), NOT variantId, so selected options take effect.
