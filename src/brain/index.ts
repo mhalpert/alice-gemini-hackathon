@@ -1,7 +1,7 @@
 // Outfits track: the public entry points other tracks import.
-// For now this is a MOCK that serves the three looks in public/fixture.json with
-// believable timing, so the agent and the page can be built before the real stylist lands.
-// The real buildOutfits / swapPiece will keep these exact signatures.
+// buildOutfits serves the mock (the three looks in public/fixture.json with believable timing)
+// unless ALICE_BRAIN=live, which runs the real builder in build.ts. swapPiece is still the mock.
+// Signatures stay fixed either way.
 //
 // Pace is set by ALICE_MOCK_PACE:
 //   library (default)  first look after ~0.45 s, all three by ~0.6 s (a ready-made match)
@@ -48,7 +48,16 @@ function log(room: string | undefined, ev: string, data: Record<string, unknown>
 
 export interface BuildOptions { onOutfit?(outfit: Outfit, index: number): void; room?: string }
 
+// ALICE_BRAIN=live runs the real builder (plan + store search + pick); anything else serves the mock.
 export async function buildOutfits(brief: Brief, opts: BuildOptions = {}): Promise<BuildResult> {
+  if ((process.env.ALICE_BRAIN ?? '').toLowerCase() === 'live') {
+    const { buildLive } = await import('./build.ts');
+    return buildLive(brief, opts);
+  }
+  return buildMock(brief, opts);
+}
+
+async function buildMock(brief: Brief, opts: BuildOptions = {}): Promise<BuildResult> {
   const started = performance.now();
   const schedule = SCHEDULE[pace()];
   log(opts.room, 'build_start', { brief, mock: true, pace: pace() });
