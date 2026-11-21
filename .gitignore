@@ -19,3 +19,6 @@ SPEC.md
 spec.md
 SPEC*.md
 photos/
+
+# Browser libraries copied in by npm install
+public/vendor/
