@@ -52,8 +52,9 @@ export function estimateCostUsd(entry: {
     case 'gemini-4-hydrogen':
     case 'gemini-4-argon':
     case 'gemini-4-carbon':
-    case 'gemini-4-neon':
       return (inTok * 1.5 + outTok * 7.5) / 1_000_000;
+    case 'gemini-4-neon':
+      return (inTok * 3.0 + outTok * 15.0) / 1_000_000;
     case 'gemini-decision-1':
       return (inTok * 0.1) / 1_000_000;
     case 'gemini-nano-banana-2.1':

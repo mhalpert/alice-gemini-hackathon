@@ -620,6 +620,24 @@ describe('ledger', () => {
     assert.ok(
       Math.abs(
         estimateCostUsd({
+          model: 'gemini-4-neon',
+          input_tokens: 1_000_000,
+          output_tokens: 1_000_000,
+        }) - 18.0,
+      ) < 1e-9,
+    );
+    assert.ok(
+      Math.abs(
+        estimateCostUsd({
+          model: 'gemini-4-neon',
+          input_tokens: 1_000_000,
+          output_tokens: 0,
+        }) - 3.0,
+      ) < 1e-9,
+    );
+    assert.ok(
+      Math.abs(
+        estimateCostUsd({
           model: 'gemini-decision-1',
           input_tokens: 1_000_000,
           output_tokens: 500_000,
