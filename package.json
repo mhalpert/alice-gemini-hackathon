@@ -12,10 +12,17 @@
     "test": "node --test tests/",
     "start": "node server.ts",
     "serve": "node --watch server.ts",
-    "dev": "python3 -m http.server 5173 --directory public"
+    "dev": "python3 -m http.server 5173 --directory public",
+    "calllog": "node scripts/calllog.ts",
+    "agent": "node --env-file-if-exists=.env.local src/agent/worker.ts dev",
+    "agent:start": "node --env-file-if-exists=.env.local src/agent/worker.ts start"
   },
   "dependencies": {
     "livekit-client": "2.25.0",
-    "livekit-server-sdk": "2.20.1"
+    "livekit-server-sdk": "2.20.1",
+    "@livekit/agents": "1.10.1",
+    "@livekit/agents-plugin-google": "1.10.1",
+    "@livekit/rtc-node": "1.2.3",
+    "zod": "4.6.7"
   }
 }
