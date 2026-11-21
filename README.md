@@ -143,8 +143,8 @@ node --env-file-if-exists=.env.local eval/run.ts && node eval/report.ts
   test pattern, not a person, so a harness pass says the plumbing works, not that a stranger's
   call will go well.
 - **Earlier runs failed.** A run at about 1:45 PM failed on pacing: Alice held the whole bag
-  back over one shoe size that was out of stock, and checked in on silence too often (a fix
-  is in progress). A run on another laptop at 2:00 PM scored 6 of 7; the miss was the check
+  back over one shoe size that was out of stock, and checked in on silence too often. Both
+  were fixed later that afternoon. A run on another laptop at 2:00 PM scored 6 of 7; the miss was the check
   itself reading the wrong field, and the bag was correct.
 - **Outfit quality is uneven.** 13 of 22 occasions produced a set the judge called
   presentable. Formal occasions are the weak spot.
