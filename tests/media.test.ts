@@ -14,8 +14,10 @@ import {
   cropRawRgb,
   decideCrop,
   newTryonId,
+  parseInspectorReply,
   parsePickReply,
   resolvePick,
+  runTryOnVerifyLoop,
   shotFileName,
   sortPiecesForTryOn,
   stripHtml,
@@ -707,6 +709,235 @@ describe('media IPC client, warmMedia, call-log events, and fallback behavior', 
     assert.equal(mediaStatus().pid, null);
 
     stopMedia();
+  });
+});
+
+describe('try-on verify loop and inspector parser', () => {
+  it('parseInspectorReply handles valid show/redo JSON, arrays, fences, and garbage', () => {
+    const redo = parseInspectorReply(
+      '{"verdict":"redo","problems":[{"kind":"extra_item","detail":"black belt"}],"fix":"Remove the black belt."}',
+      'gemini-4-argon',
+    );
+    assert.deepEqual(redo, {
+      model: 'gemini-4-argon',
+      verdict: 'redo',
+      problems: [{ kind: 'extra_item', detail: 'black belt' }],
+      fix: 'Remove the black belt.',
+    });
+
+    const show = parseInspectorReply(
+      '```json\n[{"verdict":"show","problems":[],"fix":""}]\n```',
+      'gemini-4-carbon',
+    );
+    assert.deepEqual(show, {
+      model: 'gemini-4-carbon',
+      verdict: 'show',
+      problems: [],
+      fix: '',
+    });
+
+    assert.equal(parseInspectorReply('not json', 'gemini-4-argon'), null);
+    assert.equal(parseInspectorReply('{"verdict":"maybe"}', 'gemini-4-argon'), null);
+  });
+
+  it('skips inspector when fast gate passes cleanly (>= 0.70 on all)', async () => {
+    let inspectCalls = 0;
+    let genCalls = 0;
+    const out = await runTryOnVerifyLoop<string>({
+      generate: async () => {
+        genCalls += 1;
+        return 'img1';
+      },
+      gate: async () => ({
+        scores: { same_person: 0.9, all_pieces: 0.72, no_extras: 0.7, colours_match: 0.92 },
+        ms: 420,
+      }),
+      inspect: async () => {
+        inspectCalls += 1;
+        return { result: null, ms: 0 };
+      },
+    });
+    assert.equal(out.image, 'img1');
+    assert.equal(genCalls, 1);
+    assert.equal(inspectCalls, 0);
+    assert.equal(out.check.attempts, 1);
+    assert.equal(out.check.passed, true);
+    assert.equal(out.check.inspector, null);
+    assert.equal(out.check.ms_gate, 420);
+  });
+
+  it('calls inspector when any gate probability is below 0.70 even if >= 0.60', async () => {
+    let inspectCalls = 0;
+    const out = await runTryOnVerifyLoop<string>({
+      generate: async () => 'img1',
+      gate: async () => ({
+        scores: { same_person: 0.9, all_pieces: 0.68, no_extras: 0.85, colours_match: 0.9 },
+        ms: 350,
+      }),
+      inspect: async () => {
+        inspectCalls += 1;
+        return {
+          result: { model: 'gemini-4-neon', verdict: 'show', problems: [], fix: '' },
+          ms: 1200,
+        };
+      },
+    });
+    assert.equal(out.image, 'img1');
+    assert.equal(inspectCalls, 1);
+    assert.equal(out.check.attempts, 1);
+    assert.equal(out.check.passed, true);
+    assert.equal(out.check.inspector?.verdict, 'show');
+  });
+
+  it('regenerates once on gate fail + inspector redo and keeps second image when it scores higher', async () => {
+    const corrections: Array<string | null> = [];
+    let gateCalls = 0;
+    const out = await runTryOnVerifyLoop<string>({
+      generate: async (fix) => {
+        corrections.push(fix);
+        return fix ? 'img2' : 'img1';
+      },
+      gate: async (img) => {
+        gateCalls += 1;
+        if (img === 'img1') {
+          return {
+            scores: { same_person: 0.9, all_pieces: 0.85, no_extras: 0.2, colours_match: 0.9 },
+            ms: 300,
+          };
+        }
+        return {
+          scores: { same_person: 0.92, all_pieces: 0.88, no_extras: 0.91, colours_match: 0.9 },
+          ms: 350,
+        };
+      },
+      inspect: async () => ({
+        result: {
+          model: 'gemini-4-argon',
+          verdict: 'redo',
+          problems: [{ kind: 'extra_item', detail: 'unlisted black belt' }],
+          fix: 'Remove the black belt: no belt is in this look.',
+        },
+        ms: 2100,
+      }),
+    });
+    assert.equal(out.image, 'img2');
+    assert.deepEqual(corrections, [null, 'Remove the black belt: no belt is in this look.']);
+    assert.equal(gateCalls, 2);
+    assert.equal(out.check.attempts, 2);
+    assert.equal(out.check.passed, true);
+    assert.equal(out.check.ms_gate, 650);
+    assert.equal(out.check.ms_inspector, 2100);
+  });
+
+  it('keeps first image when redo scores worse than the first image', async () => {
+    const out = await runTryOnVerifyLoop<string>({
+      generate: async (fix) => (fix ? 'img2' : 'img1'),
+      gate: async (img) =>
+        img === 'img1'
+          ? {
+              scores: { same_person: 0.8, all_pieces: 0.7, no_extras: 0.65, colours_match: 0.8 },
+              ms: 200,
+            }
+          : {
+              scores: { same_person: 0.2, all_pieces: 0.5, no_extras: 0.9, colours_match: 0.7 },
+              ms: 200,
+            },
+      inspect: async () => ({
+        result: {
+          model: 'gemini-4-argon',
+          verdict: 'redo',
+          problems: [{ kind: 'extra_item', detail: 'belt' }],
+          fix: 'Remove the belt.',
+        },
+        ms: 1500,
+      }),
+    });
+    assert.equal(out.image, 'img1');
+    assert.equal(out.check.attempts, 2);
+    assert.equal(out.check.passed, true);
+  });
+
+  it('keeps first image when inspector times out (returns null)', async () => {
+    let genCalls = 0;
+    const out = await runTryOnVerifyLoop<string>({
+      generate: async () => {
+        genCalls += 1;
+        return 'img1';
+      },
+      gate: async () => ({
+        scores: { same_person: 0.9, all_pieces: 0.9, no_extras: 0.5, colours_match: 0.9 },
+        ms: 300,
+      }),
+      inspect: async () => ({ result: null, ms: 9000 }),
+    });
+    assert.equal(out.image, 'img1');
+    assert.equal(genCalls, 1);
+    assert.equal(out.check.attempts, 1);
+    assert.equal(out.check.passed, false);
+    assert.equal(out.check.inspector, null);
+    assert.equal(out.check.ms_inspector, 9000);
+  });
+
+  it('skips gate and inspector completely when verifyOff is true', async () => {
+    let gateCalls = 0;
+    let inspectCalls = 0;
+    const out = await runTryOnVerifyLoop<string>({
+      verifyOff: true,
+      generate: async () => 'img1',
+      gate: async () => {
+        gateCalls += 1;
+        return { scores: null, ms: 0 };
+      },
+      inspect: async () => {
+        inspectCalls += 1;
+        return { result: null, ms: 0 };
+      },
+    });
+    assert.equal(out.image, 'img1');
+    assert.equal(gateCalls, 0);
+    assert.equal(inspectCalls, 0);
+    assert.equal(out.check.attempts, 1);
+    assert.equal(out.check.passed, true);
+  });
+
+  it('respects the 55 s total cap and skips redo when time budget is nearly exhausted', async () => {
+    let clock = 0;
+    let genCalls = 0;
+    const out = await runTryOnVerifyLoop<string>({
+      now: () => clock,
+      startedAt: 0,
+      capMs: 55_000,
+      minRedoBudgetMs: 12_000,
+      generate: async () => {
+        genCalls += 1;
+        clock += 42_000;
+        return 'img1';
+      },
+      gate: async () => {
+        clock += 1_000;
+        return {
+          scores: { same_person: 0.9, all_pieces: 0.9, no_extras: 0.3, colours_match: 0.9 },
+          ms: 1000,
+        };
+      },
+      inspect: async () => {
+        clock += 3_000;
+        return {
+          result: {
+            model: 'gemini-4-argon',
+            verdict: 'redo',
+            problems: [{ kind: 'extra_item', detail: 'belt' }],
+            fix: 'Remove belt.',
+          },
+          ms: 3000,
+        };
+      },
+    });
+    // Elapsed = 46_000ms -> remaining 9_000ms < 12_000ms -> must skip redo!
+    assert.equal(out.image, 'img1');
+    assert.equal(genCalls, 1);
+    assert.equal(out.check.attempts, 1);
+    assert.equal(out.check.passed, false);
   });
 });
 

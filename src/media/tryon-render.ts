@@ -3,14 +3,17 @@ import path from 'node:path';
 import sharp from 'sharp';
 import { recordCost } from '../ledger.ts';
 import type { Gender, Outfit, Piece } from '../types.ts';
+import { buildContactSheet, runTryOnGate, runTryOnInspector } from './inspect.ts';
 import {
   newTryonId,
   publicUrl,
+  runTryOnVerifyLoop,
   sortPiecesForTryOn,
   stripHtml,
   tryonDir,
   tryonFileName,
   withWidth,
+  type TryOnCheck,
 } from './pure.ts';
 import { fetchImageBuffer, getGenAI, getProductShot, writeFileAtomic } from './shots.ts';
 
@@ -19,6 +22,7 @@ export interface TryOnResult {
   path: string;
   ms: number;
   id: string;
+  check: TryOnCheck;
 }
 
 const RATE_LIMIT_DELAYS_MS = [1500, 4000];
@@ -59,7 +63,7 @@ function isRateLimitOrUnavailable(err: unknown): boolean {
   return /\b(429|503)\b|RESOURCE_EXHAUSTED|UNAVAILABLE|overloaded|rate.?limit/i.test(msg);
 }
 
-async function generateImageWithRetry(
+export async function generateImageWithRetry(
   parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }>,
   job: 'tryon' | 'test-shopper',
 ): Promise<{ data: Buffer; mimeType: string }> {
@@ -127,7 +131,7 @@ async function generateImageWithRetry(
   }
 }
 
-async function getTestShopper(department: Gender): Promise<Buffer> {
+export async function getTestShopper(department: Gender): Promise<Buffer> {
   const dept: Gender = department === 'women' ? 'women' : 'men';
   const filePath = path.join(tryonDir(), `test-shopper-${dept}.jpg`);
 
@@ -166,7 +170,7 @@ async function getTestShopper(department: Gender): Promise<Buffer> {
   return promise;
 }
 
-async function prepareShopperJpeg(
+export async function prepareShopperJpeg(
   personInput: Uint8Array | Buffer | null,
   department: Gender,
 ): Promise<Buffer> {
@@ -179,7 +183,7 @@ async function prepareShopperJpeg(
     .toBuffer();
 }
 
-async function loadPieceForTryOn(piece: Piece): Promise<Buffer | null> {
+export async function loadPieceForTryOn(piece: Piece): Promise<Buffer | null> {
   try {
     let rawBuf: Buffer | null = null;
     if (process.env.ALICE_CLEAN_SHOTS !== 'off') {
@@ -208,7 +212,11 @@ async function loadPieceForTryOn(piece: Piece): Promise<Buffer | null> {
   }
 }
 
-function buildTryOnPrompt(hasShoes: boolean, hasBottom: boolean): string {
+export function buildTryOnPrompt(
+  hasShoes: boolean,
+  hasBottom: boolean,
+  extraLine?: string | null,
+): string {
   const lines = [
     'Generate a single photorealistic full-body studio try-on photograph of the shopper from Image 0 dressed in ONLY the listed items.',
     'The product images are cut-outs of single items (some may still show part of a model). Use each product image ONLY for the specific item named in its label.',
@@ -223,6 +231,9 @@ function buildTryOnPrompt(hasShoes: boolean, hasBottom: boolean): string {
   }
   if (!hasShoes) {
     lines.push('Wear plain white minimalist sneakers.');
+  }
+  if (extraLine && extraLine.trim().length > 0) {
+    lines.push(extraLine.trim());
   }
   return lines.join('\n');
 }
@@ -246,13 +257,14 @@ export async function renderTryOn(
     Promise.all(sortedPieces.map((piece) => loadPieceForTryOn(piece))),
   ]);
 
-  const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [
+  const baseParts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [
     { text: 'Image 0: the shopper (the ONLY source for the person)' },
     { inlineData: { mimeType: 'image/jpeg', data: shopperBuf.toString('base64') } },
   ];
 
+  const loadedPiecesList: Piece[] = [];
+  const loadedPieceBufs: Buffer[] = [];
   let imageNumber = 1;
-  let loadedPieces = 0;
   let hasShoes = false;
   let hasBottom = false;
 
@@ -260,7 +272,8 @@ export async function renderTryOn(
     const piece = sortedPieces[i];
     const buf = pieceBufs[i];
     if (!buf) continue;
-    loadedPieces += 1;
+    loadedPiecesList.push(piece);
+    loadedPieceBufs.push(buf);
     const slotKey = piece.slot.trim().toLowerCase();
     if (slotKey === 'shoes') {
       hasShoes = true;
@@ -272,22 +285,56 @@ export async function renderTryOn(
     const label = desc
       ? `Image ${imageNumber}: ${piece.slot}: "${piece.item.title}" (${desc})`
       : `Image ${imageNumber}: ${piece.slot}: "${piece.item.title}"`;
-    parts.push({ text: label });
-    parts.push({ inlineData: { mimeType: 'image/jpeg', data: buf.toString('base64') } });
+    baseParts.push({ text: label });
+    baseParts.push({ inlineData: { mimeType: 'image/jpeg', data: buf.toString('base64') } });
     imageNumber += 1;
   }
 
-  if (loadedPieces === 0) {
+  if (loadedPiecesList.length === 0) {
     throw new Error('no product images could be loaded for try-on');
   }
 
-  parts.push({ text: buildTryOnPrompt(hasShoes, hasBottom) });
+  const verifyOff = process.env.ALICE_TRYON_VERIFY === 'off';
+  const contactSheetPromise: Promise<Buffer> | null = verifyOff
+    ? null
+    : buildContactSheet(loadedPieceBufs);
 
-  const generated = await generateImageWithRetry(parts, 'tryon');
-  const outBuf =
-    generated.mimeType === 'image/jpeg'
+  const generateOnce = async (correction: string | null): Promise<Buffer> => {
+    const extraLine = correction ? `Correction from the inspector: ${correction}` : null;
+    const parts = [...baseParts, { text: buildTryOnPrompt(hasShoes, hasBottom, extraLine) }];
+    const generated = await generateImageWithRetry(parts, 'tryon');
+    return generated.mimeType === 'image/jpeg'
       ? generated.data
       : await sharp(generated.data).jpeg({ quality: 90 }).toBuffer();
+  };
+
+  const { image: outBuf, check } = await runTryOnVerifyLoop<Buffer>({
+    generate: generateOnce,
+    gate: async (tryonJpeg) => {
+      const contactSheetJpeg = await (contactSheetPromise ?? buildContactSheet(loadedPieceBufs));
+      return runTryOnGate({
+        shopperJpeg: shopperBuf,
+        tryonJpeg,
+        contactSheetJpeg,
+        pieces: loadedPiecesList,
+      });
+    },
+    inspect: async (tryonJpeg, gateScores) => {
+      const contactSheetJpeg = await (contactSheetPromise ?? buildContactSheet(loadedPieceBufs));
+      return runTryOnInspector(
+        {
+          shopperJpeg: shopperBuf,
+          tryonJpeg,
+          contactSheetJpeg,
+          pieces: loadedPiecesList,
+        },
+        { gateScores },
+      );
+    },
+    verifyOff,
+    startedAt: t0,
+    capMs: 55_000,
+  });
 
   const id = newTryonId();
   const name = tryonFileName(id);
@@ -295,12 +342,15 @@ export async function renderTryOn(
   await writeFileAtomic(filePath, outBuf);
 
   const ms = Date.now() - t0;
-  console.log(`tryon ${id} look ${outfit.number ?? opts?.label ?? '?'} ready in ${ms} ms`);
+  console.log(
+    `tryon ${id} look ${outfit.number ?? opts?.label ?? '?'} ready in ${ms} ms (attempts=${check.attempts} passed=${check.passed} gate=${check.ms_gate}ms inspect=${check.ms_inspector}ms)`,
+  );
 
   return {
     url: publicUrl(name),
     path: filePath,
     ms,
     id,
+    check,
   };
 }

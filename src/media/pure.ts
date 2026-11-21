@@ -553,3 +553,341 @@ export function stripHtml(input: string | undefined | null, maxLen = 220): strin
     .trim();
   return plain.length > maxLen ? plain.slice(0, maxLen).trimEnd() : plain;
 }
+
+// ---------------------------------------------------------------------------
+// Try-on gate, inspector parsing, scoring, and verify/redo loop (pure, no sharp)
+// ---------------------------------------------------------------------------
+
+export interface TryOnGateScores {
+  same_person: number;
+  all_pieces: number;
+  no_extras: number;
+  colours_match: number;
+}
+
+export type InspectorProblemKind =
+  | 'face'
+  | 'missing_piece'
+  | 'extra_item'
+  | 'colour'
+  | 'body'
+  | 'framing';
+
+export interface InspectorProblem {
+  kind: InspectorProblemKind;
+  detail: string;
+}
+
+export interface TryOnInspectorResult {
+  model: string;
+  verdict: 'show' | 'redo';
+  problems: InspectorProblem[];
+  fix: string;
+}
+
+export interface TryOnCheck {
+  gate: TryOnGateScores | null;
+  inspector: TryOnInspectorResult | null;
+  attempts: 1 | 2;
+  passed: boolean;
+  ms_gate: number;
+  ms_inspector: number;
+}
+
+export const GATE_PASS_THRESHOLD = 0.6;
+export const GATE_INSPECT_THRESHOLD = 0.7;
+
+const VALID_PROBLEM_KINDS = new Set<InspectorProblemKind>([
+  'face',
+  'missing_piece',
+  'extra_item',
+  'colour',
+  'body',
+  'framing',
+]);
+
+export function gatePassed(g: TryOnGateScores): boolean {
+  return (
+    g.same_person >= GATE_PASS_THRESHOLD &&
+    g.all_pieces >= GATE_PASS_THRESHOLD &&
+    g.no_extras >= GATE_PASS_THRESHOLD &&
+    g.colours_match >= GATE_PASS_THRESHOLD
+  );
+}
+
+export function needsInspector(g: TryOnGateScores): boolean {
+  return (
+    g.same_person < GATE_INSPECT_THRESHOLD ||
+    g.all_pieces < GATE_INSPECT_THRESHOLD ||
+    g.no_extras < GATE_INSPECT_THRESHOLD ||
+    g.colours_match < GATE_INSPECT_THRESHOLD
+  );
+}
+
+export function scoreGate(g: TryOnGateScores): number {
+  const vals = [g.same_person, g.all_pieces, g.no_extras, g.colours_match];
+  const minVal = Math.min(...vals);
+  const avgVal = (vals[0] + vals[1] + vals[2] + vals[3]) / 4;
+  return minVal * 0.6 + avgVal * 0.4;
+}
+
+export function parseInspectorReply(
+  text: string | undefined | null,
+  model: string,
+): TryOnInspectorResult | null {
+  if (typeof text !== 'string') return null;
+  let cleaned = text.trim();
+  if (!cleaned) return null;
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    return null;
+  }
+
+  const obj = Array.isArray(parsed) ? parsed[0] : parsed;
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+
+  const rec = obj as Record<string, unknown>;
+  const rawVerdict = typeof rec.verdict === 'string' ? rec.verdict.trim().toLowerCase() : '';
+  if (rawVerdict !== 'show' && rawVerdict !== 'redo') {
+    return null;
+  }
+
+  const problems: InspectorProblem[] = [];
+  if (Array.isArray(rec.problems)) {
+    for (const p of rec.problems) {
+      if (!p || typeof p !== 'object') continue;
+      const pr = p as Record<string, unknown>;
+      const rawKind = typeof pr.kind === 'string' ? pr.kind.trim().toLowerCase() : '';
+      const kind: InspectorProblemKind = VALID_PROBLEM_KINDS.has(rawKind as InspectorProblemKind)
+        ? (rawKind as InspectorProblemKind)
+        : 'extra_item';
+      const detail = typeof pr.detail === 'string' ? pr.detail.trim() : '';
+      if (detail) {
+        problems.push({ kind, detail });
+      }
+    }
+  }
+
+  const fix = typeof rec.fix === 'string' ? rec.fix.trim() : '';
+
+  return {
+    model,
+    verdict: rawVerdict,
+    problems,
+    fix,
+  };
+}
+
+export interface VerifyLoopDeps<TImage> {
+  generate: (correction: string | null) => Promise<TImage>;
+  gate: (img: TImage) => Promise<{ scores: TryOnGateScores | null; ms: number }>;
+  inspect: (img: TImage, gate: TryOnGateScores) => Promise<{ result: TryOnInspectorResult | null; ms: number }>;
+  verifyOff?: boolean;
+  now?: () => number;
+  startedAt?: number;
+  capMs?: number;
+  minGateBudgetMs?: number;
+  minInspectBudgetMs?: number;
+  minRedoBudgetMs?: number;
+}
+
+export interface VerifyLoopOut<TImage> {
+  image: TImage;
+  check: TryOnCheck;
+}
+
+export async function runTryOnVerifyLoop<TImage>(
+  deps: VerifyLoopDeps<TImage>,
+): Promise<VerifyLoopOut<TImage>> {
+  const now = deps.now ?? (() => Date.now());
+  const startedAt = deps.startedAt ?? now();
+  const capMs = deps.capMs ?? 55_000;
+  const minGateBudgetMs = deps.minGateBudgetMs ?? 2_000;
+  const minInspectBudgetMs = deps.minInspectBudgetMs ?? 4_000;
+  const minRedoBudgetMs = deps.minRedoBudgetMs ?? 12_000;
+  const remaining = (): number => capMs - (now() - startedAt);
+
+  const img1 = await deps.generate(null);
+
+  if (deps.verifyOff || remaining() < minGateBudgetMs) {
+    return {
+      image: img1,
+      check: {
+        gate: null,
+        inspector: null,
+        attempts: 1,
+        passed: true,
+        ms_gate: 0,
+        ms_inspector: 0,
+      },
+    };
+  }
+
+  const g1Res = await deps.gate(img1);
+  const g1 = g1Res.scores;
+  let totalGateMs = g1Res.ms;
+
+  // Unknown gate (timeout/error) -> pass
+  if (!g1) {
+    return {
+      image: img1,
+      check: {
+        gate: null,
+        inspector: null,
+        attempts: 1,
+        passed: true,
+        ms_gate: totalGateMs,
+        ms_inspector: 0,
+      },
+    };
+  }
+
+  // Confident pass (>= 0.75 on every question) -> skip inspector
+  if (!needsInspector(g1)) {
+    return {
+      image: img1,
+      check: {
+        gate: g1,
+        inspector: null,
+        attempts: 1,
+        passed: true,
+        ms_gate: totalGateMs,
+        ms_inspector: 0,
+      },
+    };
+  }
+
+  // Gate failed (< 0.6) or borderline (< 0.75) -> consult Gemini 4 inspector if time allows
+  if (remaining() < minInspectBudgetMs) {
+    return {
+      image: img1,
+      check: {
+        gate: g1,
+        inspector: null,
+        attempts: 1,
+        passed: gatePassed(g1),
+        ms_gate: totalGateMs,
+        ms_inspector: 0,
+      },
+    };
+  }
+
+  const inspRes = await deps.inspect(img1, g1);
+  const insp = inspRes.result;
+  const msInspector = inspRes.ms;
+
+  // Inspector timeout/error -> keep first image
+  if (!insp) {
+    return {
+      image: img1,
+      check: {
+        gate: g1,
+        inspector: null,
+        attempts: 1,
+        passed: gatePassed(g1),
+        ms_gate: totalGateMs,
+        ms_inspector: msInspector,
+      },
+    };
+  }
+
+  if (insp.verdict === 'show') {
+    return {
+      image: img1,
+      check: {
+        gate: g1,
+        inspector: insp,
+        attempts: 1,
+        passed: true,
+        ms_gate: totalGateMs,
+        ms_inspector: msInspector,
+      },
+    };
+  }
+
+  // Verdict is 'redo' -> regenerate ONCE if within the 55 s cap
+  if (remaining() < minRedoBudgetMs) {
+    return {
+      image: img1,
+      check: {
+        gate: g1,
+        inspector: insp,
+        attempts: 1,
+        passed: false,
+        ms_gate: totalGateMs,
+        ms_inspector: msInspector,
+      },
+    };
+  }
+
+  let img2: TImage;
+  try {
+    img2 = await deps.generate(insp.fix || 'Fix the issues found in the previous try-on.');
+  } catch {
+    return {
+      image: img1,
+      check: {
+        gate: g1,
+        inspector: insp,
+        attempts: 2,
+        passed: false,
+        ms_gate: totalGateMs,
+        ms_inspector: msInspector,
+      },
+    };
+  }
+
+  if (remaining() < minGateBudgetMs) {
+    return {
+      image: img2,
+      check: {
+        gate: g1,
+        inspector: insp,
+        attempts: 2,
+        passed: false,
+        ms_gate: totalGateMs,
+        ms_inspector: msInspector,
+      },
+    };
+  }
+
+  const g2Res = await deps.gate(img2);
+  totalGateMs += g2Res.ms;
+  const g2 = g2Res.scores;
+
+  if (!g2) {
+    return {
+      image: img2,
+      check: {
+        gate: g1,
+        inspector: insp,
+        attempts: 2,
+        passed: true,
+        ms_gate: totalGateMs,
+        ms_inspector: msInspector,
+      },
+    };
+  }
+
+  const keepSecond = scoreGate(g2) >= scoreGate(g1);
+  const chosenImage = keepSecond ? img2 : img1;
+  const chosenGate = keepSecond ? g2 : g1;
+
+  return {
+    image: chosenImage,
+    check: {
+      gate: chosenGate,
+      inspector: insp,
+      attempts: 2,
+      passed: gatePassed(chosenGate),
+      ms_gate: totalGateMs,
+      ms_inspector: msInspector,
+    },
+  };
+}
