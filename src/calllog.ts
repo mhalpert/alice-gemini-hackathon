@@ -28,23 +28,60 @@ export function getCallLogPath(room: string): string {
   return path.join(getLogDir(), `${sanitizeRoomName(room)}.jsonl`);
 }
 
+const SECRET_ENV_VARS = [
+  'GOOGLE_API_KEY',
+  'GOOGLE_TRYON_API_KEY',
+  'LIVEKIT_API_SECRET',
+  'TAVUS_API_KEY',
+  'ALICE_PASSCODE',
+] as const;
+const MIN_ENV_SECRET_LEN = 12;
+const REDACT_PRE_TRUNCATE_LEN = MAX_STRING_LEN + 512;
+const GOOGLE_KEY_RE = /AIza[0-9A-Za-z_-]{20,}/g;
+const QUERY_KEY_RE = /([?&](?:key|api_key|apikey|access_token|token)=)[^&\s"'<>]+/gi;
+const JWT_RE = /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g;
+
+export function redactSecrets(text: string): string {
+  if (text.length === 0) return text;
+  let out = text;
+
+  for (const name of SECRET_ENV_VARS) {
+    const val = process.env[name];
+    if (typeof val === 'string' && val.length >= MIN_ENV_SECRET_LEN && out.includes(val)) {
+      out = out.split(val).join(`[redacted:${name}]`);
+    }
+  }
+
+  out = out.replace(GOOGLE_KEY_RE, '[redacted:google-key]');
+  out = out.replace(QUERY_KEY_RE, '$1[redacted]');
+  out = out.replace(JWT_RE, '[redacted:jwt]');
+
+  return out;
+}
+
 function truncateString(str: string): string {
   return str.length > MAX_STRING_LEN ? str.slice(0, MAX_STRING_LEN) : str;
 }
 
+function sanitizeString(str: string): string {
+  const bounded =
+    str.length > REDACT_PRE_TRUNCATE_LEN ? str.slice(0, REDACT_PRE_TRUNCATE_LEN) : str;
+  return truncateString(redactSecrets(bounded));
+}
+
 export function sanitizeValue(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
   if (value === null || value === undefined) return value;
-  if (typeof value === 'string') return truncateString(value);
+  if (typeof value === 'string') return sanitizeString(value);
   if (typeof value === 'number' || typeof value === 'boolean') return value;
-  if (typeof value === 'bigint') return truncateString(value.toString());
+  if (typeof value === 'bigint') return sanitizeString(value.toString());
   if (typeof value === 'function' || typeof value === 'symbol') return undefined;
 
   if (value instanceof Error) {
     const out: { message: string; stack?: string } = {
-      message: truncateString(typeof value.message === 'string' ? value.message : String(value)),
+      message: sanitizeString(typeof value.message === 'string' ? value.message : String(value)),
     };
     if (typeof value.stack === 'string') {
-      out.stack = truncateString(value.stack);
+      out.stack = sanitizeString(value.stack);
     }
     return out;
   }
@@ -89,7 +126,7 @@ export function sanitizeValue(value: unknown, seen: WeakSet<object> = new WeakSe
     return out;
   }
 
-  return truncateString(String(value));
+  return sanitizeString(String(value));
 }
 
 function getOrInitStartTime(filePath: string, nowMs: number): number {
