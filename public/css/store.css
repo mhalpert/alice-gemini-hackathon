@@ -132,8 +132,10 @@ img {
 .panel-close-btn:focus-visible,
 .product-thumb:focus-visible,
 .boutique-dept-btn:focus-visible,
-.boutique-occasion-chip:focus-visible,
-.boutique-occasion-filter:focus-visible,
+.boutique-occasion-select:focus-visible,
+.boutique-occasion-search-input:focus-visible,
+.boutique-occasion-search-btn:focus-visible,
+.boutique-occasion-talk-btn:focus-visible,
 .boutique-looks-empty-cta:focus-visible,
 .boutique-look-cta:focus-visible,
 .boutique-collage-cell:focus-visible,
@@ -2753,87 +2755,182 @@ img {
   width: 100%;
 }
 
-.boutique-occasions-head {
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px var(--space-4);
+.boutique-occasion-label {
+  cursor: pointer;
 }
 
-.boutique-occasion-filter {
-  flex: 0 1 220px;
-  width: 220px;
-  max-width: 100%;
+.boutique-occasion-controls {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  width: 100%;
   min-width: 0;
-  padding: 7px 12px;
+}
+
+.boutique-occasion-select-wrap {
+  position: relative;
+  flex: 0 1 260px;
+  min-width: 0;
+}
+
+.boutique-occasion-select-wrap::after {
+  content: '';
+  position: absolute;
+  right: 15px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid var(--ink-muted);
+  border-bottom: 1.5px solid var(--ink-muted);
+  transform: translateY(-65%) rotate(45deg);
+  pointer-events: none;
+  transition: border-color 180ms ease;
+}
+
+.boutique-occasion-select-wrap:hover::after,
+.boutique-occasion-select-wrap:focus-within::after {
+  border-color: var(--ink);
+}
+
+.boutique-occasion-select {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 44px;
+  padding: 0 38px 0 14px;
   border: 1px solid var(--line-strong);
+  border-radius: 0;
   background: var(--surface);
-  font-size: 13px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.3;
+  color: var(--ink);
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  text-overflow: ellipsis;
+  transition: border-color 180ms ease;
+}
+
+.boutique-occasion-select.is-placeholder {
+  color: var(--ink-muted);
+}
+
+.boutique-occasion-select:hover {
+  border-color: var(--ink-muted);
+}
+
+.boutique-occasion-select:focus {
+  border-color: var(--ink);
+}
+
+.boutique-occasion-select:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.boutique-occasion-search {
+  flex: 1 1 320px;
+  max-width: 520px;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+}
+
+.boutique-occasion-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--line-strong);
+  border-right: none;
+  border-radius: 0;
+  background: var(--surface);
+  font-size: 14px;
   line-height: 1.3;
   color: var(--ink);
   transition: border-color 180ms ease;
 }
 
-.boutique-occasion-filter::placeholder {
+.boutique-occasion-search-input::placeholder {
   color: var(--ink-subtle);
 }
 
-.boutique-occasion-filter:hover {
+.boutique-occasion-search-input:hover {
   border-color: var(--ink-muted);
 }
 
-.boutique-occasion-filter:focus {
+.boutique-occasion-search-input:focus {
   border-color: var(--ink);
 }
 
-.boutique-occasion-filter:focus:not(:focus-visible) {
+.boutique-occasion-search-input:focus-visible {
+  position: relative;
+  z-index: 1;
+}
+
+.boutique-occasion-search-input:focus:not(:focus-visible) {
   outline: none;
 }
 
-.boutique-occasions-strip {
-  display: flex;
-  flex-wrap: nowrap;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scroll-snap-type: x proximity;
-  -webkit-overflow-scrolling: touch;
-  padding: 4px 2px 10px;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-strong) transparent;
-}
-
-.boutique-occasion-chip {
+.boutique-occasion-search-btn {
   flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  padding: 7px 15px;
-  border-radius: 999px;
-  border: 1px solid var(--line-strong);
-  background: var(--ivory);
-  color: var(--ink);
-  font-size: 13px;
-  font-weight: 400;
-  line-height: 1.25;
-  white-space: nowrap;
-  cursor: pointer;
-  scroll-snap-align: start;
-  transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease;
-}
-
-.boutique-occasion-chip:hover {
-  border-color: var(--ink);
-  background: var(--board);
-}
-
-.boutique-occasion-chip.is-active,
-.boutique-occasion-chip[aria-pressed="true"] {
+  min-width: 112px;
+  height: 44px;
+  padding: 0 18px;
+  border: 1px solid var(--ink);
+  border-radius: 0;
   background: var(--ink);
   color: var(--ivory);
-  border-color: var(--ink);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 180ms ease, border-color 180ms ease, opacity 180ms ease;
+}
+
+.boutique-occasion-search-btn:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.boutique-occasion-search-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.boutique-occasion-status {
+  margin: 10px 0 0;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink-muted);
+}
+
+.boutique-occasion-status[hidden] {
+  display: none;
+}
+
+.boutique-occasion-talk-btn {
+  display: inline;
+  padding: 0;
+  margin-left: 4px;
+  border: none;
+  border-bottom: 1px solid currentColor;
+  background: none;
+  font: inherit;
+  font-weight: 500;
+  color: var(--accent);
+  cursor: pointer;
+  transition: color 180ms ease;
+}
+
+.boutique-occasion-talk-btn:hover {
+  color: var(--ink);
+}
+
+body.call-live .boutique-occasion-talk-btn {
+  display: none;
 }
 
 /* Boutique "Looks by Alice" row */
@@ -3278,16 +3375,30 @@ body.has-boutique #call .call-start__status:empty {
     font-size: 14px;
   }
 
-  .boutique-occasions-head {
+  .boutique-occasion-controls {
     flex-direction: column;
     align-items: stretch;
     gap: 10px;
   }
 
-  .boutique-occasion-filter {
-    flex: 1 1 auto;
+  .boutique-occasion-select-wrap {
+    flex: 0 0 auto;
     width: 100%;
-    font-size: 14px;
+  }
+
+  .boutique-occasion-select,
+  .boutique-occasion-search-input {
+    font-size: 16px;
+  }
+
+  .boutique-occasion-search {
+    flex: 0 0 auto;
+    width: 100%;
+    max-width: none;
+  }
+
+  .boutique-occasion-search-btn {
+    padding: 0 14px;
   }
 
   .boutique-looks-grid {
@@ -3876,8 +3987,11 @@ body.has-boutique #call .call-start__status:empty {
   .panel-sheet,
   .boutique-collage-img,
   .product-img,
-  .boutique-occasion-chip,
-  .boutique-occasion-filter,
+  .boutique-occasion-select-wrap::after,
+  .boutique-occasion-select,
+  .boutique-occasion-search-input,
+  .boutique-occasion-search-btn,
+  .boutique-occasion-talk-btn,
   .boutique-looks-empty-cta,
   .look-board-layer,
   .stage-placeholder,

@@ -514,6 +514,40 @@ function normalizeOccasions(data) {
   return out;
 }
 
+const OCCASION_MENU_MAX = 15;
+const OCCASION_QUERY_MAX_LEN = 120;
+const OCCASION_STATIC_PLACEHOLDER = 'Search an occasion';
+const OCCASION_SEARCH_PLACEHOLDERS = [
+  'rooftop birthday…',
+  'beach wedding in Capri…',
+  'black tie gala…',
+  'first date…',
+];
+
+// Normalize /api/occasions menu entries, falling back to the first 15 occasions when menu is missing or empty
+function normalizeOccasionMenu(data) {
+  if (data && Array.isArray(data.menu)) {
+    const seen = new Set();
+    const out = [];
+    for (const raw of data.menu) {
+      if (!raw || typeof raw !== 'object') continue;
+      const key = typeof raw.key === 'string' ? raw.key.trim() : '';
+      const label =
+        typeof raw.keyword === 'string' && raw.keyword.trim()
+          ? raw.keyword.trim()
+          : typeof raw.label === 'string'
+            ? raw.label.trim()
+            : '';
+      if (!key || !label || seen.has(key)) continue;
+      seen.add(key);
+      out.push({ key, label });
+      if (out.length >= OCCASION_MENU_MAX) break;
+    }
+    if (out.length > 0) return out;
+  }
+  return normalizeOccasions(data).slice(0, OCCASION_MENU_MAX);
+}
+
 // Renders the shop into `root` (the #store element) and returns the page-action handlers.
 export function mountStore(root, { onTalk } = {}) {
   if (!root || !(root instanceof HTMLElement)) {
@@ -553,7 +587,11 @@ export function mountStore(root, { onTalk } = {}) {
     sections: [],
     occasions: [],
     selectedOccasion: null, // null for all looks, or { key, label }
-    occasionFilter: '',
+    occasionQuery: '',
+    occasionMatchStatus: null, // null | { kind: 'matched', label } | { kind: 'empty' }
+    occasionMatchPending: false,
+    occasionMatchReqId: 0,
+    occasionMatchAbortController: null,
     looksPending: false,
     storefrontPending: false,
     reqId: 0,
@@ -571,6 +609,7 @@ export function mountStore(root, { onTalk } = {}) {
 
   // Live DOM slot refs while the boutique view is mounted
   let boutiqueRefs = null;
+  let occasionPlaceholderTimer = null;
 
   // Optional hint set during local product-card clicks so multi-look items keep their look number
   let pendingProductOutfit = null;
@@ -1441,103 +1480,295 @@ export function mountStore(root, { onTalk } = {}) {
       : 'Looks by Alice';
   }
 
-  // Update chip pressed state in place so selection keeps focus and scroll position
-  function syncOccasionChipSelection() {
-    if (!boutiqueRefs || !boutiqueRefs.occasionStrip) return;
-    const selectedKey = boutique.selectedOccasion ? boutique.selectedOccasion.key : null;
-    for (const btn of boutiqueRefs.occasionStrip.querySelectorAll('.boutique-occasion-chip')) {
-      const btnKey = btn.dataset.occasion || null;
-      const active = btnKey === selectedKey;
-      btn.classList.toggle('is-active', active);
-      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  function stopOccasionPlaceholder() {
+    if (occasionPlaceholderTimer !== null) {
+      clearTimeout(occasionPlaceholderTimer);
+      occasionPlaceholderTimer = null;
     }
   }
 
-  function renderBoutiqueOccasionChips() {
-    if (!boutiqueRefs || !boutiqueRefs.occasionStrip) return;
-    const strip = boutiqueRefs.occasionStrip;
-    const needle = boutique.occasionFilter.trim().toLowerCase();
-    const visibleOccasions = needle
-      ? boutique.occasions.filter((occ) => occ.label.toLowerCase().includes(needle))
-      : boutique.occasions;
+  // Type and erase example prompts in the occasion search field while it is empty and unfocused
+  function startOccasionPlaceholder(inputEl) {
+    stopOccasionPlaceholder();
+    if (!inputEl) return;
+    if (prefersReducedMotion()) {
+      inputEl.placeholder = OCCASION_STATIC_PLACEHOLDER;
+      return;
+    }
+    if (document.activeElement === inputEl || inputEl.value.length > 0) {
+      inputEl.placeholder = OCCASION_STATIC_PLACEHOLDER;
+      return;
+    }
 
-    const allSelected = boutique.selectedOccasion === null;
-    const allChip = el(
-      'button',
-      {
-        type: 'button',
-        className: `boutique-occasion-chip${allSelected ? ' is-active' : ''}`,
-        'aria-pressed': allSelected ? 'true' : 'false',
-        onClick: () => selectOccasion(null),
-      },
-      'All looks'
-    );
+    let phraseIdx = 0;
+    let charIdx = 0;
+    let erasing = false;
+    inputEl.placeholder = '';
 
-    const occasionChips = visibleOccasions.map((occ) => {
-      const selected = Boolean(
-        boutique.selectedOccasion && boutique.selectedOccasion.key === occ.key
+    const step = () => {
+      occasionPlaceholderTimer = null;
+      if (!inputEl.isConnected || !boutiqueRefs || boutiqueRefs.occasionSearchInput !== inputEl) {
+        return;
+      }
+      if (prefersReducedMotion()) {
+        inputEl.placeholder = OCCASION_STATIC_PLACEHOLDER;
+        return;
+      }
+      if (document.activeElement === inputEl || inputEl.value.length > 0) {
+        inputEl.placeholder = OCCASION_STATIC_PLACEHOLDER;
+        return;
+      }
+
+      const phrase = OCCASION_SEARCH_PLACEHOLDERS[phraseIdx];
+      if (!erasing) {
+        charIdx += 1;
+        inputEl.placeholder = phrase.slice(0, charIdx);
+        if (charIdx >= phrase.length) {
+          erasing = true;
+          occasionPlaceholderTimer = setTimeout(step, 1800);
+        } else {
+          occasionPlaceholderTimer = setTimeout(step, 85);
+        }
+      } else {
+        charIdx -= 1;
+        inputEl.placeholder = phrase.slice(0, charIdx);
+        if (charIdx <= 0) {
+          erasing = false;
+          phraseIdx = (phraseIdx + 1) % OCCASION_SEARCH_PLACEHOLDERS.length;
+          occasionPlaceholderTimer = setTimeout(step, 500);
+        } else {
+          occasionPlaceholderTimer = setTimeout(step, 45);
+        }
+      }
+    };
+
+    occasionPlaceholderTimer = setTimeout(step, 450);
+  }
+
+  function syncOccasionSearchButton() {
+    if (!boutiqueRefs || !boutiqueRefs.occasionSearchBtn) return;
+    const btn = boutiqueRefs.occasionSearchBtn;
+    btn.disabled = boutique.occasionMatchPending;
+    btn.textContent = boutique.occasionMatchPending ? 'Finding…' : 'Find looks';
+  }
+
+  function cancelOccasionMatch() {
+    if (boutique.occasionMatchAbortController) {
+      boutique.occasionMatchAbortController.abort();
+      boutique.occasionMatchAbortController = null;
+    }
+    boutique.occasionMatchReqId += 1;
+    boutique.occasionMatchPending = false;
+    syncOccasionSearchButton();
+  }
+
+  // Keep the dropdown value aligned with selectedOccasion when its key is in the menu
+  function syncOccasionSelect() {
+    if (!boutiqueRefs || !boutiqueRefs.occasionSelect) return;
+    const select = boutiqueRefs.occasionSelect;
+    const selectedKey = boutique.selectedOccasion ? boutique.selectedOccasion.key : '';
+    const inMenu =
+      Boolean(selectedKey) && boutique.occasions.some((occ) => occ.key === selectedKey);
+    select.value = inMenu ? selectedKey : '';
+    select.classList.toggle('is-placeholder', !inMenu);
+  }
+
+  function renderBoutiqueOccasionStatus() {
+    if (!boutiqueRefs || !boutiqueRefs.occasionStatus) return;
+    const statusEl = boutiqueRefs.occasionStatus;
+    const status = boutique.occasionMatchStatus;
+    if (!status) {
+      statusEl.replaceChildren();
+      statusEl.hidden = true;
+      return;
+    }
+    if (status.kind === 'matched') {
+      statusEl.hidden = false;
+      statusEl.replaceChildren(`Showing looks for "${status.label}"`);
+      return;
+    }
+    statusEl.hidden = false;
+    if (document.body.classList.contains('call-live')) {
+      statusEl.replaceChildren(
+        'Nothing ready-made for that yet. Tell Alice and she will build it for you live.'
       );
-      return el(
+      return;
+    }
+    statusEl.replaceChildren(
+      'Nothing ready-made for that yet. Tell Alice and she will build it for you live. ',
+      el(
         'button',
         {
           type: 'button',
-          className: `boutique-occasion-chip${selected ? ' is-active' : ''}`,
-          'aria-pressed': selected ? 'true' : 'false',
-          dataset: { occasion: occ.key },
-          onClick: () => selectOccasion(occ),
+          className: 'boutique-occasion-talk-btn',
+          onClick: () => triggerTalk(),
         },
-        occ.label
-      );
-    });
+        'Talk to Alice'
+      )
+    );
+  }
 
-    strip.replaceChildren(allChip, ...occasionChips);
+  // Match a free-text occasion search against ready-made occasions for the active department
+  async function runOccasionMatch() {
+    const raw =
+      boutiqueRefs && boutiqueRefs.occasionSearchInput
+        ? boutiqueRefs.occasionSearchInput.value
+        : boutique.occasionQuery;
+    const q = raw.trim().slice(0, OCCASION_QUERY_MAX_LEN);
+    if (!q) return;
+
+    if (boutique.occasionMatchAbortController) {
+      boutique.occasionMatchAbortController.abort();
+    }
+    const controller = new AbortController();
+    boutique.occasionMatchAbortController = controller;
+    const dept = boutique.department;
+    const deptReqId = boutique.reqId;
+    const matchReqId = ++boutique.occasionMatchReqId;
+
+    boutique.occasionMatchPending = true;
+    syncOccasionSearchButton();
+
+    const url = `/api/occasions/match?department=${encodeURIComponent(dept)}&q=${encodeURIComponent(q)}`;
+    let data = null;
+    try {
+      data = await fetchJson(url, { signal: controller.signal });
+    } finally {
+      if (deptReqId === boutique.reqId && matchReqId === boutique.occasionMatchReqId) {
+        boutique.occasionMatchAbortController = null;
+        boutique.occasionMatchPending = false;
+        syncOccasionSearchButton();
+      }
+    }
+
+    if (deptReqId !== boutique.reqId || matchReqId !== boutique.occasionMatchReqId) return;
+
+    const rawMatch =
+      data && data.match && typeof data.match === 'object' ? data.match : null;
+    const matchKey =
+      rawMatch && typeof rawMatch.key === 'string' ? rawMatch.key.trim() : '';
+    const matchLabel =
+      rawMatch && typeof rawMatch.label === 'string' ? rawMatch.label.trim() : '';
+
+    if (!matchKey) {
+      boutique.occasionMatchStatus = { kind: 'empty' };
+      renderBoutiqueOccasionStatus();
+      return;
+    }
+
+    const menuEntry = boutique.occasions.find((occ) => occ.key === matchKey);
+    const label = matchLabel || (menuEntry ? menuEntry.label : matchKey);
+    boutique.occasionMatchStatus = { kind: 'matched', label };
+    selectOccasion({ key: matchKey, label });
+    syncOccasionSelect();
+    renderBoutiqueOccasionStatus();
   }
 
   function renderBoutiqueOccasionsSlot() {
+    stopOccasionPlaceholder();
     if (!boutiqueRefs) return;
     const { occasionsSlot } = boutiqueRefs;
 
     if (boutique.occasions.length === 0) {
-      boutiqueRefs.occasionStrip = null;
+      boutiqueRefs.occasionSelect = null;
+      boutiqueRefs.occasionSearchInput = null;
+      boutiqueRefs.occasionSearchBtn = null;
+      boutiqueRefs.occasionStatus = null;
       occasionsSlot.replaceChildren();
       occasionsSlot.hidden = true;
       return;
     }
 
-    const filterInput =
-      boutique.occasions.length > 16
-        ? el('input', {
-            type: 'text',
-            className: 'boutique-occasion-filter',
-            placeholder: 'Find an occasion',
-            'aria-label': 'Find an occasion',
-            autocomplete: 'off',
-            spellcheck: 'false',
-            value: boutique.occasionFilter,
-            onInput: (e) => {
-              boutique.occasionFilter = e.currentTarget.value;
-              renderBoutiqueOccasionChips();
-            },
-            onKeydown: (e) => {
-              if (e.key === 'Escape' && (e.currentTarget.value || boutique.occasionFilter)) {
-                e.preventDefault();
-                e.stopPropagation();
-                e.currentTarget.value = '';
-                boutique.occasionFilter = '';
-                renderBoutiqueOccasionChips();
-              }
-            },
-          })
-        : null;
+    const selectId = 'boutique-occasion-select';
+    const selectEl = el(
+      'select',
+      {
+        id: selectId,
+        className: 'boutique-occasion-select',
+        onChange: (e) => {
+          const key = e.currentTarget.value;
+          cancelOccasionMatch();
+          boutique.occasionMatchStatus = null;
+          renderBoutiqueOccasionStatus();
+          if (!key) {
+            selectOccasion(null);
+            return;
+          }
+          const picked = boutique.occasions.find((occ) => occ.key === key) || null;
+          selectOccasion(picked);
+        },
+      },
+      el('option', { value: '' }, 'Choose an occasion'),
+      ...boutique.occasions.map((occ) => el('option', { value: occ.key }, occ.label))
+    );
 
-    const strip = el('div', {
-      className: 'boutique-occasions-strip',
-      role: 'group',
-      'aria-label': 'Occasions',
+    const searchInput = el('input', {
+      type: 'text',
+      className: 'boutique-occasion-search-input',
+      maxlength: String(OCCASION_QUERY_MAX_LEN),
+      placeholder: OCCASION_STATIC_PLACEHOLDER,
+      'aria-label': 'Search an occasion',
+      autocomplete: 'off',
+      spellcheck: 'false',
+      value: boutique.occasionQuery,
+      onInput: (e) => {
+        boutique.occasionQuery = e.currentTarget.value;
+        if (e.currentTarget.value.length > 0) {
+          stopOccasionPlaceholder();
+        }
+      },
+      onFocus: (e) => {
+        stopOccasionPlaceholder();
+        e.currentTarget.placeholder = OCCASION_STATIC_PLACEHOLDER;
+      },
+      onBlur: (e) => {
+        if (e.currentTarget.value.length === 0) {
+          startOccasionPlaceholder(e.currentTarget);
+        }
+      },
+    });
+    if (boutique.occasionQuery) {
+      searchInput.value = boutique.occasionQuery;
+    }
+
+    const searchBtn = el(
+      'button',
+      {
+        type: 'submit',
+        className: 'boutique-occasion-search-btn',
+      },
+      'Find looks'
+    );
+
+    const searchForm = el(
+      'form',
+      {
+        className: 'boutique-occasion-search',
+        role: 'search',
+        onSubmit: (e) => {
+          e.preventDefault();
+          runOccasionMatch();
+        },
+      },
+      searchInput,
+      searchBtn
+    );
+
+    const statusEl = el('p', {
+      className: 'boutique-occasion-status',
+      role: 'status',
+      'aria-live': 'polite',
+      hidden: true,
     });
 
-    boutiqueRefs.occasionStrip = strip;
-    renderBoutiqueOccasionChips();
+    boutiqueRefs.occasionSelect = selectEl;
+    boutiqueRefs.occasionSearchInput = searchInput;
+    boutiqueRefs.occasionSearchBtn = searchBtn;
+    boutiqueRefs.occasionStatus = statusEl;
+
+    syncOccasionSelect();
+    syncOccasionSearchButton();
+    renderBoutiqueOccasionStatus();
 
     occasionsSlot.hidden = false;
     occasionsSlot.replaceChildren(
@@ -1546,13 +1777,24 @@ export function mountStore(root, { onTalk } = {}) {
         { className: 'boutique-occasions-section', 'aria-label': 'Shop by occasion' },
         el(
           'div',
-          { className: 'boutique-section-head boutique-occasions-head' },
-          el('h2', { className: 'boutique-section-title' }, 'Shop by occasion'),
-          filterInput
+          { className: 'boutique-section-head' },
+          el(
+            'h2',
+            { className: 'boutique-section-title' },
+            el('label', { className: 'boutique-occasion-label', for: selectId }, 'Shop by occasion')
+          )
         ),
-        strip
+        el(
+          'div',
+          { className: 'boutique-occasion-controls' },
+          el('div', { className: 'boutique-occasion-select-wrap' }, selectEl),
+          searchForm
+        ),
+        statusEl
       )
     );
+
+    startOccasionPlaceholder(searchInput);
   }
 
   function selectOccasion(occasion) {
@@ -1565,7 +1807,7 @@ export function mountStore(root, { onTalk } = {}) {
     if (currentKey === nextKey) return;
 
     boutique.selectedOccasion = next;
-    syncOccasionChipSelection();
+    syncOccasionSelect();
     loadBoutiqueLooks(boutique.department, next, boutique.reqId);
   }
 
@@ -1801,7 +2043,17 @@ export function mountStore(root, { onTalk } = {}) {
       "Prices and stock come live from each store. Checkout happens on the store's own site."
     );
 
-    boutiqueRefs = { deptButtons, occasionsSlot, occasionStrip: null, looksSlot, railsSlot, footerNote };
+    boutiqueRefs = {
+      deptButtons,
+      occasionsSlot,
+      occasionSelect: null,
+      occasionSearchInput: null,
+      occasionSearchBtn: null,
+      occasionStatus: null,
+      looksSlot,
+      railsSlot,
+      footerNote,
+    };
 
     renderBoutiqueOccasionsSlot();
     renderBoutiqueLooksSlot();
@@ -1933,6 +2185,7 @@ export function mountStore(root, { onTalk } = {}) {
       boutique.looksAbortController.abort();
       boutique.looksAbortController = null;
     }
+    cancelOccasionMatch();
     const controller = new AbortController();
     boutique.abortController = controller;
     const reqId = ++boutique.reqId;
@@ -1945,7 +2198,8 @@ export function mountStore(root, { onTalk } = {}) {
     boutique.sections = fromMemory ? kept.sections : [];
     boutique.occasions = fromMemory ? kept.occasions : [];
     boutique.selectedOccasion = null;
-    boutique.occasionFilter = '';
+    boutique.occasionQuery = '';
+    boutique.occasionMatchStatus = null;
     boutique.looksPending = !fromMemory;
     boutique.storefrontPending = !fromMemory;
 
@@ -2013,7 +2267,7 @@ export function mountStore(root, { onTalk } = {}) {
     fetchJson(`/api/occasions?department=${encodedDept}`, { signal: controller.signal }).then(
       (data) => {
         if (reqId !== boutique.reqId) return;
-        boutique.occasions = normalizeOccasions(data);
+        boutique.occasions = normalizeOccasionMenu(data);
         if (data) rememberBoutique(dept, 'occasions', boutique.occasions);
         if (state.view === 'boutique' && boutiqueRefs) {
           renderBoutiqueOccasionsSlot();
