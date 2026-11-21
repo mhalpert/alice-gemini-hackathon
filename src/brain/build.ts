@@ -9,7 +9,7 @@ import { stylistPick, CANDIDATES_SHOWN, type SlotCandidates } from './pick.ts';
 import { gateOutfit, prefetchThumbs, type GateResult } from './gate.ts';
 import { critiqueOutfit, type Critique } from './critic.ts';
 import { calllog } from '../calllog.ts';
-import { breaksDressCode, fixNameColours } from './words.ts';
+import { breaksDressCode, fixNameColours, titleHas, typeIn, wrongSlot } from './words.ts';
 
 const SHOWN = 3;
 const CANDIDATES_PER_SLOT = 12;
@@ -109,6 +109,32 @@ function heuristicPieces(idea: PlanIdea, ranked: Map<Slot, Item[]>, problems: st
   return pieces;
 }
 
+function wrongTypeOf(title: string): string {
+  if (titleHas(title, ['oxford']) && titleHas(title, ['shirt', 'shirts', 'blouse', 'top', 'polo'])) {
+    return typeIn(title, 'top')?.word ?? 'shirt';
+  }
+  return typeIn(title, '')?.word ?? 'wrong type';
+}
+
+// Drops any picked piece that fails wrongSlot and fills its slot from the ranked list.
+export function repairWrongSlots(name: string, pieces: Piece[], ranked: Map<Slot, Item[]>, problems: string[]): Piece[] {
+  const out: Piece[] = [];
+  for (const p of pieces) {
+    if (!wrongSlot(p.item.title, p.slot)) { out.push(p); continue; }
+    const wrongType = wrongTypeOf(p.item.title);
+    const list = ranked.get(p.slot as Slot) ?? [];
+    const alt = list.find((i) => !wrongSlot(i.title, p.slot) && !out.some((x) => x.item.id === i.id))
+      ?? list.find((i) => !wrongSlot(i.title, p.slot));
+    if (alt) {
+      out.push({ slot: p.slot, why: whyFor(alt, p.slot as Slot), item: alt });
+      problems.push(`${name}: ${p.slot} pick was a ${wrongType}, replaced`);
+    } else {
+      problems.push(`${name}: ${p.slot} pick was a ${wrongType}, dropped`);
+    }
+  }
+  return out;
+}
+
 // Budget repair: trade the priciest piece down within its slot; then drop optional slots.
 function fitBudget(name: string, pieces: Piece[], ranked: Map<Slot, Item[]>, brief: Brief, taken: Set<string>, problems: string[]): Piece[] {
   const out = [...pieces];
@@ -196,12 +222,13 @@ export async function buildLive(brief: Brief, opts: LiveBuildOptions = {}): Prom
   const searches = new Map<string, Promise<Item[]>>();
   const searchSlot = (s: PlanSlot) => {
     if (s.own) return Promise.resolve([] as Item[]);
-    if (!searches.has(s.query)) {
-      searches.set(s.query, searchMixed(s.query, brief.gender, { limit: CANDIDATES_PER_SLOT * 2, maxPrice: ceiling })
-        .then((r) => r.items.filter((i) => usable(i, brief, ceiling) && !breaksDressCode(i, s.slot, brief)))
+    const key = `${s.slot}\0${s.query}`;
+    if (!searches.has(key)) {
+      searches.set(key, searchMixed(s.query, brief.gender, { limit: CANDIDATES_PER_SLOT * 2, maxPrice: ceiling })
+        .then((r) => r.items.filter((i) => usable(i, brief, ceiling) && !breaksDressCode(i, s.slot, brief) && !wrongSlot(i.title, s.slot)))
         .catch((err) => { problems.push(`search "${s.query}" failed: ${(err as Error).message}`); return [] as Item[]; }));
     }
-    return searches.get(s.query)!.then((items) => {
+    return searches.get(key)!.then((items) => {
       const have = pool.get(s.slot) ?? [];
       pool.set(s.slot, [...have, ...items.filter((i) => !have.some((x) => x.id === i.id))]);
       return items;
@@ -254,6 +281,7 @@ export async function buildLive(brief: Brief, opts: LiveBuildOptions = {}): Prom
       problems.push(`${idea.name}: ${(err as Error).message}; used the quick pick`);
       pieces = heuristicPieces(idea, ranked, problems);
     }
+    pieces = repairWrongSlots(name, pieces, ranked, problems);
     pieces = fitBudget(name, pieces, ranked, brief, taken, problems);
     if (!complete(pieces)) { problems.push(`${name}: incomplete, skipped`); return; }
     const fixed = fixNameColours(name, pieces.map((p) => p.item.title));

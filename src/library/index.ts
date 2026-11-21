@@ -7,7 +7,7 @@ import type { Brief, BuildResult, Gender, Item, Outfit, Piece } from '../types.t
 import { calllog } from '../calllog.ts';
 import { lookup as defaultLookup } from '../store/index.ts';
 import { swapLive as defaultSwap } from '../brain/swap.ts';
-import { breaksDressCode } from '../brain/words.ts';
+import { breaksDressCode, wrongSlot } from '../brain/words.ts';
 import { embed as defaultEmbed, cosine, occasionText } from './embed.ts';
 import { DEMO_OCCASION_KEY, OCCASIONS, type LibraryOccasion } from './occasions.ts';
 import type { GradesFile, OutfitGrade, SetGrade } from './grade.ts';
@@ -207,6 +207,14 @@ function outfitBreaksDressCode(outfit: Outfit, brief: { occasion: string; gender
   return outfit.pieces.some((piece) => breaksDressCode(piece.item, piece.slot, brief));
 }
 
+function outfitHasWrongSlot(outfit: Outfit): boolean {
+  return outfit.pieces.some((piece) => wrongSlot(piece.item.title, piece.slot));
+}
+
+function outfitNotServable(outfit: Outfit, brief: { occasion: string; gender: string }): boolean {
+  return outfitBreaksDressCode(outfit, brief) || outfitHasWrongSlot(outfit);
+}
+
 function selectOutfitsForSet(
   set: LibrarySet,
   grades: Record<string, SetGrade>,
@@ -229,7 +237,7 @@ function selectOutfitsForSet(
       const outfit = cloned[i];
       const og = byName.get(outfit.name)?.shift();
       if (!og || og.score < minScore) continue;
-      if (outfitBreaksDressCode(outfit, brief)) continue;
+      if (outfitNotServable(outfit, brief)) continue;
       ranked.push({ outfit, score: og.score, index: i });
     }
 
@@ -238,7 +246,7 @@ function selectOutfitsForSet(
     return { outfits, graded: true, failedGrade: outfits.length < 2 };
   }
 
-  const outfits = cloned.filter((o) => !outfitBreaksDressCode(o, brief));
+  const outfits = cloned.filter((o) => !outfitNotServable(o, brief));
   return { outfits, graded: false, failedGrade: false };
 }
 
