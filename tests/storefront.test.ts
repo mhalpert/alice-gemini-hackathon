@@ -283,6 +283,201 @@ describe('storefront() orchestration', () => {
       ['dresses', 'from-everlane'],
     );
   });
+
+  it('keeps a single in-flight build running across a short wait=500 timeout, joins later requests with zero new searches, and starts one fresh build after settling', async () => {
+    let nowMs = 1_000_000;
+    let callCount = 0;
+    let batch = 1;
+
+    interface DeferredSearch {
+      query: string;
+      gender: Gender;
+      resolve: () => void;
+    }
+
+    const pending: DeferredSearch[] = [];
+
+    const fakeSearch = async (query: string, gender: Gender): Promise<SearchResult> => {
+      callCount += 1;
+      const currentBatch = batch;
+      const key = `${query.replace(/\W+/g, '-')}-b${currentBatch}-${callCount}`;
+
+      // In batch 1: 2 rails finish immediately; the other 8 stay pending under our control.
+      if (currentBatch === 1 && query !== "women's dress" && query !== "women's top") {
+        await new Promise<void>((resolve) => {
+          pending.push({ query, gender, resolve });
+        });
+      }
+
+      return {
+        items: makeItems(key, 4, gender),
+        source: 'live',
+        ms: 5,
+      };
+    };
+
+    const loader = createStorefront({
+      search: fakeSearch,
+      perSearchBudgetMs: 60_000,
+      now: () => nowMs,
+      env: {},
+    });
+
+    // 1. First request with wait=500 returns partial while the build stays in-flight.
+    const first = await loader('women', { budgetMs: 500 });
+    assert.equal(callCount, 10);
+    assert.equal(first.partial, true);
+    assert.deepEqual(first.storefront, { searches: 10, shared: false });
+    assert.deepEqual(
+      first.sections.map((s) => s.id),
+      ['dresses', 'tops'],
+    );
+    assert.equal(pending.length, 8);
+
+    // 2. While the build is still running, 3 more rails finish; a short-wait joiner makes
+    //    ZERO new searches and gets the fuller 5-section snapshot without removing the build.
+    nowMs += 600;
+    for (let i = 0; i < 3; i += 1) {
+      pending.shift()!.resolve();
+    }
+    await new Promise((r) => setTimeout(r, 10));
+
+    const secondPartial = await loader('women', { budgetMs: 40 });
+    assert.equal(callCount, 10, 'second request during active build must start zero new searches');
+    assert.equal(secondPartial.partial, true);
+    assert.deepEqual(secondPartial.storefront, { searches: 0, shared: true });
+    assert.equal(secondPartial.sections.length, 5);
+
+    // 3. Another joiner with a longer budget waits for the remaining 5 rails and gets all 10
+    //    sections with ZERO new searches.
+    nowMs += 200;
+    const thirdPromise = loader('women', { budgetMs: 4000 });
+    assert.equal(callCount, 10, 'third request during active build must start zero new searches');
+    while (pending.length > 0) {
+      pending.shift()!.resolve();
+    }
+    const third = await thirdPromise;
+    assert.equal(callCount, 10);
+    assert.equal(third.partial, undefined);
+    assert.deepEqual(third.storefront, { searches: 0, shared: true });
+    assert.equal(third.sections.length, 10);
+
+    // 4. After the build has fully settled, the next request starts exactly one new build of 10.
+    batch = 2;
+    nowMs += 100;
+    const fresh = await loader('women', { budgetMs: 4000 });
+    assert.equal(callCount, 20, `expected one new build of 10 after settle, got ${callCount}`);
+    assert.equal(fresh.partial, undefined);
+    assert.deepEqual(fresh.storefront, { searches: 10, shared: false });
+    assert.equal(fresh.sections.length, 10);
+  });
+
+  it('drops an unsettled build after the 15 s safety net so a hung search cannot block the department forever', async () => {
+    let nowMs = 5_000_000;
+    let callCount = 0;
+    let hangSearches = true;
+    const hungResolvers: Array<() => void> = [];
+
+    const fakeSearch = async (query: string, gender: Gender): Promise<SearchResult> => {
+      callCount += 1;
+      if (hangSearches) {
+        await new Promise<void>((resolve) => {
+          hungResolvers.push(resolve);
+        });
+      }
+      return {
+        items: makeItems(`${query.replace(/\W+/g, '-')}-${callCount}`, 4, gender),
+        source: 'live',
+        ms: 5,
+      };
+    };
+
+    const loader = createStorefront({
+      search: fakeSearch,
+      perSearchBudgetMs: 60_000,
+      now: () => nowMs,
+      env: {},
+    });
+
+    // Build 1 hangs; request 1 returns partial at its budget while build 1 stays in the map.
+    const first = await loader('men', { budgetMs: 40 });
+    assert.equal(callCount, 10);
+    assert.equal(first.partial, true);
+    assert.deepEqual(first.storefront, { searches: 10, shared: false });
+    assert.equal(first.sections.length, 0);
+
+    // Just before 15 s, a second request still joins build 1 (0 new searches).
+    nowMs += 14_999;
+    const beforeCap = await loader('men', { budgetMs: 40 });
+    assert.equal(callCount, 10);
+    assert.equal(beforeCap.partial, true);
+    assert.deepEqual(beforeCap.storefront, { searches: 0, shared: true });
+
+    // At 15 s, the safety net drops build 1 and allows a fresh build of 10.
+    nowMs += 1;
+    hangSearches = false;
+    const afterCap = await loader('men', { budgetMs: 4000 });
+    assert.equal(callCount, 20, `expected fresh build after 15 s safety net, got ${callCount}`);
+    assert.equal(afterCap.partial, undefined);
+    assert.deepEqual(afterCap.storefront, { searches: 10, shared: false });
+    assert.equal(afterCap.sections.length, 10);
+
+    // Cleanly release the hung build's promises so no open handles remain;
+    // settling the dropped build must not poison subsequent requests.
+    for (const resolve of hungResolvers) {
+      resolve();
+    }
+    await new Promise((r) => setTimeout(r, 10));
+
+    const nextFresh = await loader('men', { budgetMs: 4000 });
+    assert.equal(callCount, 30);
+    assert.deepEqual(nextFresh.storefront, { searches: 10, shared: false });
+    assert.equal(nextFresh.sections.length, 10);
+  });
+
+  it('drops an unsettled build via the real safety timer when wall-clock maxBuildMs elapses', async () => {
+    let callCount = 0;
+    let hangSearches = true;
+    const hungResolvers: Array<() => void> = [];
+
+    const fakeSearch = async (query: string, gender: Gender): Promise<SearchResult> => {
+      callCount += 1;
+      if (hangSearches) {
+        await new Promise<void>((resolve) => {
+          hungResolvers.push(resolve);
+        });
+      }
+      return {
+        items: makeItems(`${query.replace(/\W+/g, '-')}-${callCount}`, 4, gender),
+        source: 'live',
+        ms: 5,
+      };
+    };
+
+    const loader = createStorefront({
+      search: fakeSearch,
+      perSearchBudgetMs: 60_000,
+      maxBuildMs: 80,
+      env: {},
+    });
+
+    const first = await loader('women', { budgetMs: 30 });
+    assert.equal(callCount, 10);
+    assert.equal(first.partial, true);
+
+    await new Promise((r) => setTimeout(r, 80));
+    hangSearches = false;
+
+    const afterTimer = await loader('women', { budgetMs: 4000 });
+    assert.equal(callCount, 20);
+    assert.equal(afterTimer.partial, undefined);
+    assert.deepEqual(afterTimer.storefront, { searches: 10, shared: false });
+    assert.equal(afterTimer.sections.length, 10);
+
+    for (const resolve of hungResolvers) {
+      resolve();
+    }
+  });
 });
 
 describe('buildProductPayload and helpers', () => {
