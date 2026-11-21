@@ -55,6 +55,18 @@ export interface BagLine { title: string; slot: string; image: string; price: nu
 export interface BagStore { store: string; added: BagLine[]; not_added: BagLine[]; subtotal: number | null }
 export interface BagLink { store: string; url: string }
 
+// An order the shopper reviews before the agent places it. Labels are display text only:
+// a payment label names the method ("Shop Pay, Visa ending 42"), never a number that could be used.
+export type OrderStatus = 'review' | 'placing' | 'placed' | 'handoff' | 'failed';
+export interface OrderStore {
+  store: string; items: BagLine[]; total: number | null; payment_label: string | null; ready: boolean;
+  status?: OrderStatus; order_number?: string; continue_url?: string; note?: string;
+}
+export interface OrderReview {
+  order_id: string; stores: OrderStore[]; total: number | null; address_label?: string | null;
+  needs_sign_in?: boolean; sign_in?: { url: string; code?: string };
+}
+
 // Where each piece sits on a flat-lay board: slot -> [x, y, width, height], each a fraction 0 to 1 of the image.
 export type BoardBoxes = Record<string, [number, number, number, number]>;
 // The renders of a look on the shopper: on white, in the occasion's setting, and a short clip.
@@ -68,6 +80,9 @@ export interface PageActions {
   tryOnReady: { outfit: number; url: string; kind?: TryOnKind };   // no kind means the studio still
   collageReady: { outfit: number; url: string; boxes?: BoardBoxes };
   showAll: Record<string, never>;
+  showOrderReview: { order: OrderReview };
+  confirmOrder: { order_id: string };                         // reply adds confirmed: boolean
+  orderPlaced: { order_id: string; stores: OrderStore[] };
   reveal: { outfit: number; url?: string; kind?: TryOnKind };
   bagReady: { stores: BagStore[]; links: BagLink[]; total: number };
   say: { caption: string };
