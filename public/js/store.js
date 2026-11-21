@@ -3107,7 +3107,7 @@ export function mountStore(root, { onTalk, isLive, tellAlice } = {}) {
       return;
     }
     const showingFlatLay = !(media.revealed && !media.stageSwapped);
-    if (!showingFlatLay) {
+    if (!showingFlatLay || isShowingPiece(panelRefs)) {
       cancelBoardDropIn(panelRefs);
       return;
     }
@@ -3243,7 +3243,7 @@ export function mountStore(root, { onTalk, isLive, tellAlice } = {}) {
   function updateBoardSpotlight(panelRefs, media, slot, occurrence = 1) {
     if (!panelRefs || !panelRefs.boardFrame || !panelRefs.collageImg) return;
     const showingFlatLay = Boolean(media && media.collageUrl && !(media.revealed && !media.stageSwapped));
-    if (prefersReducedMotion() || isPhoneViewport() || !showingFlatLay) {
+    if (prefersReducedMotion() || isPhoneViewport() || !showingFlatLay || isShowingPiece(panelRefs)) {
       clearBoardSpotlight(panelRefs, { immediate: true });
       return;
     }
@@ -3572,6 +3572,7 @@ export function mountStore(root, { onTalk, isLive, tellAlice } = {}) {
 
   function cancelPickedMotion(panelRefs) {
     if (!panelRefs) return;
+    closePieceLayer(panelRefs);
     flushPendingSwap(panelRefs);
     cancelBoardDropIn(panelRefs);
     clearBoardSpotlight(panelRefs, { immediate: true });
@@ -3583,6 +3584,12 @@ export function mountStore(root, { onTalk, isLive, tellAlice } = {}) {
   function updateBoardPointerRing(refs, media, slot, occurrence = 1) {
     if (!refs || !refs.pointerRing) return;
     const ring = refs.pointerRing;
+    if (isShowingPiece(refs)) {
+      ring.classList.remove('is-visible');
+      ring.setAttribute('aria-hidden', 'true');
+      clearBoardSpotlight(refs, { immediate: true });
+      return;
+    }
     const normalized = typeof slot === 'string' && slot.trim() ? slot.trim() : null;
     const box =
       media && media.collageUrl && normalized
@@ -3773,6 +3780,7 @@ export function mountStore(root, { onTalk, isLive, tellAlice } = {}) {
             currentMedia.newRenderTags.delete(kind);
           }
           if (state.view === 'picked' && activePickedRefs === panelRefs) {
+            closePieceLayer(panelRefs);
             applyStageState(panelRefs, currentMedia, {
               fadeRender: !wasSwapped && prevKind !== kind,
               tileSwitch: wasSwapped,
@@ -4760,6 +4768,7 @@ export function mountStore(root, { onTalk, isLive, tellAlice } = {}) {
       spotlight: null,
       stageMotion: null,
       swapState: null,
+      pieceState: null,
       lastShownRenderKey: null,
     };
 
@@ -4796,6 +4805,672 @@ export function mountStore(root, { onTalk, isLive, tellAlice } = {}) {
 
     if (activeRow) {
       scrollRowIntoList(activePickedRefs.pieceNotesList, activeRow);
+    }
+  }
+
+  // Validate a normalized [0, 1] pointer coordinate across the displayed piece image
+  function normalizePiecePoint(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const { x, y } = raw;
+    if (typeof x !== 'number' || typeof y !== 'number') return null;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+    return { x, y };
+  }
+
+  // Compute the displayed image box inside an object-fit: contain img relative to its container
+  function getContainedImageRect(img, container) {
+    if (!img || !container) return null;
+    const nw = img.naturalWidth;
+    const nh = img.naturalHeight;
+    if (!nw || !nh) return null;
+
+    const containerRect = container.getBoundingClientRect();
+    const imgRect = img.getBoundingClientRect();
+    const boxW = imgRect.width;
+    const boxH = imgRect.height;
+    if (boxW <= 0 || boxH <= 0) return null;
+
+    const imgRatio = nw / nh;
+    const boxRatio = boxW / boxH;
+    let dispW;
+    let dispH;
+    if (imgRatio > boxRatio) {
+      dispW = boxW;
+      dispH = boxW / imgRatio;
+    } else {
+      dispH = boxH;
+      dispW = boxH * imgRatio;
+    }
+
+    return {
+      left: imgRect.left - containerRect.left + (boxW - dispW) / 2,
+      top: imgRect.top - containerRect.top + (boxH - dispH) / 2,
+      width: dispW,
+      height: dispH,
+      containerWidth: containerRect.width,
+      containerHeight: containerRect.height,
+    };
+  }
+
+  function isShowingPiece(panelRefs) {
+    return Boolean(panelRefs && panelRefs.pieceState && panelRefs.pieceState.layer);
+  }
+
+  // Resolve 1-based slot occurrence using highlight's rules, preferring an exact item match on repeated slots
+  function resolvePieceOccurrence(look, rawSlot, item, sameLook) {
+    const parsed = parseHighlightPiece(rawSlot);
+    const slot = parsed.slot;
+    if (!slot) return { slot: null, occurrence: null };
+
+    const pieces = Array.isArray(look?.pieces) ? look.pieces : [];
+    const slotCount = countSlotPieces(look, slot);
+
+    if (parsed.hasHash) {
+      const occ =
+        parsed.explicitOccurrence !== null && parsed.explicitOccurrence <= slotCount
+          ? parsed.explicitOccurrence
+          : 1;
+      return { slot, occurrence: occ };
+    }
+
+    if (slotCount > 1 && item && typeof item === 'object') {
+      let occ = 0;
+      const matched = [];
+      for (const piece of pieces) {
+        if (piece && piece.slot === slot) {
+          occ += 1;
+          if (itemMatches(piece.item, item)) matched.push(occ);
+        }
+      }
+      if (matched.length === 1) {
+        return { slot, occurrence: matched[0] };
+      }
+    }
+
+    if (sameLook && state.highlightedSlot === slot && slotCount > 1) {
+      const currentOcc =
+        Number.isInteger(state.highlightedOccurrence) && state.highlightedOccurrence >= 1
+          ? state.highlightedOccurrence
+          : 1;
+      return { slot, occurrence: currentOcc >= slotCount ? 1 : currentOcc + 1 };
+    }
+
+    return { slot, occurrence: 1 };
+  }
+
+  // Mark the active piece in the notes list and shop grid without showing the flat-lay board ring
+  function syncPieceListHighlight(panelRefs, slot, occurrence = 1) {
+    if (!panelRefs) return;
+    flushPendingSwap(panelRefs);
+    const normalized = typeof slot === 'string' && slot.trim() ? slot.trim() : null;
+    const targetOcc = normalized && Number.isInteger(occurrence) && occurrence >= 1 ? occurrence : 1;
+    const targetOccStr = String(targetOcc);
+
+    for (const card of panelRefs.shopGrid.querySelectorAll('.product-card')) {
+      const match = Boolean(
+        normalized && card.dataset.slot === normalized && card.dataset.occurrence === targetOccStr
+      );
+      card.classList.toggle('is-pointed', match);
+    }
+
+    let activeRow = null;
+    for (const row of panelRefs.pieceNotesList.querySelectorAll('.piece-note-item')) {
+      const match = Boolean(
+        normalized && row.dataset.slot === normalized && row.dataset.occurrence === targetOccStr
+      );
+      row.classList.toggle('is-pointed', match);
+      if (match) activeRow = row;
+    }
+    panelRefs.pieceNotesList.classList.toggle('has-active', Boolean(activeRow));
+
+    if (activeRow) {
+      scrollRowIntoList(panelRefs.pieceNotesList, activeRow);
+    }
+  }
+
+  // Preload the next piece image in the look so stepping forward crossfades without waiting
+  function preloadUpcomingPiece(look, media, currentSlot, currentOcc, currentIndex, currentSrc) {
+    const pieces = Array.isArray(look?.pieces) ? look.pieces : [];
+    if (pieces.length < 2) return;
+    let upcoming = null;
+    if (currentSlot) {
+      let occ = 0;
+      for (let i = 0; i < pieces.length; i += 1) {
+        if (pieces[i]?.slot === currentSlot) {
+          occ += 1;
+          if (occ === (currentOcc || 1)) {
+            upcoming = pieces[i + 1] || null;
+            break;
+          }
+        }
+      }
+    }
+    if (!upcoming && Number.isInteger(currentIndex) && currentIndex >= 1 && currentIndex < pieces.length) {
+      upcoming = pieces[currentIndex] || null;
+    }
+    const nextRaw = upcoming?.item?.image;
+    if (typeof nextRaw === 'string' && nextRaw.trim()) {
+      const upcomingUrl = stageUrl(nextRaw.trim(), 900);
+      if (upcomingUrl && upcomingUrl !== currentSrc) {
+        preloadImage(media, upcomingUrl);
+      }
+    }
+  }
+
+  function cancelPendingPieceLoad(ps) {
+    if (!ps) return;
+    ps.pendingSeq += 1;
+    if (ps.pendingTimeout) {
+      clearTimeout(ps.pendingTimeout);
+      ps.pendingTimeout = null;
+    }
+    if (ps.pendingImg) {
+      ps.pendingImg.onload = null;
+      ps.pendingImg.onerror = null;
+      ps.pendingImg = null;
+    }
+  }
+
+  function cancelPieceCrossfade(ps) {
+    if (!ps) return;
+    if (ps.crossfadeTimer) {
+      clearTimeout(ps.crossfadeTimer);
+      ps.crossfadeTimer = null;
+    }
+    if (ps.outgoingImg) {
+      ps.outgoingImg.remove();
+      ps.outgoingImg = null;
+    }
+    if (ps.activeImg) {
+      ps.activeImg.classList.remove('is-piece-fade-start');
+    }
+  }
+
+  // Position the pointer dot and note pill relative to the displayed product image
+  function positionPieceAnnotations(panelRefs) {
+    const ps = panelRefs && panelRefs.pieceState;
+    if (!ps || !ps.layer || !ps.mediaEl || !ps.activeImg || !ps.spec) return;
+    const { mediaEl, activeImg, dotEl, pillEl, counterEl, spec } = ps;
+    const hasPoint = Boolean(spec.point);
+    const hasNote = Boolean(spec.note);
+
+    if (!hasPoint && !hasNote) {
+      dotEl.hidden = true;
+      pillEl.hidden = true;
+      return;
+    }
+
+    if (activeImg.hidden || !activeImg.complete || activeImg.naturalWidth <= 0) {
+      dotEl.hidden = true;
+      pillEl.hidden = true;
+      return;
+    }
+
+    const rect = getContainedImageRect(activeImg, mediaEl);
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
+      dotEl.hidden = true;
+      pillEl.hidden = true;
+      return;
+    }
+
+    const pad = 8;
+    const cw = rect.containerWidth;
+    const ch = rect.containerHeight;
+
+    if (hasPoint) {
+      const px = rect.left + spec.point.x * rect.width;
+      const py = rect.top + spec.point.y * rect.height;
+      dotEl.style.left = `${px}px`;
+      dotEl.style.top = `${py}px`;
+      dotEl.hidden = false;
+
+      if (!hasNote) {
+        pillEl.hidden = true;
+        return;
+      }
+
+      pillEl.textContent = spec.note;
+      pillEl.hidden = false;
+      const pillW = pillEl.offsetWidth;
+      const pillH = pillEl.offsetHeight;
+      const gap = 12;
+      const maxLeft = Math.max(pad, cw - pad - pillW);
+      const maxTop = Math.max(pad, ch - pad - pillH);
+
+      let pillLeft;
+      let pillTop;
+      if (px + gap + pillW <= cw - pad) {
+        pillLeft = px + gap;
+        pillTop = Math.min(maxTop, Math.max(pad, py - pillH / 2));
+      } else if (px - gap - pillW >= pad) {
+        pillLeft = px - gap - pillW;
+        pillTop = Math.min(maxTop, Math.max(pad, py - pillH / 2));
+      } else {
+        pillLeft = Math.min(maxLeft, Math.max(pad, px - pillW / 2));
+        pillTop =
+          py - gap - pillH >= pad
+            ? py - gap - pillH
+            : Math.min(maxTop, Math.max(pad, py + gap));
+      }
+
+      pillEl.style.left = `${pillLeft}px`;
+      pillEl.style.top = `${pillTop}px`;
+      return;
+    }
+
+    // Note without point: center the pill along the top edge of the displayed image
+    dotEl.hidden = true;
+    pillEl.textContent = spec.note;
+    pillEl.hidden = false;
+    const pillW = pillEl.offsetWidth;
+    const pillH = pillEl.offsetHeight;
+    const maxLeft = Math.max(pad, cw - pad - pillW);
+    const maxTop = Math.max(pad, ch - pad - pillH);
+    const imgCenterX = rect.left + rect.width / 2;
+    let pillLeft = Math.min(maxLeft, Math.max(pad, imgCenterX - pillW / 2));
+    const pillTop = Math.min(maxTop, Math.max(pad, rect.top + 8));
+
+    if (counterEl && !counterEl.hidden && pillTop < 40) {
+      const counterRightLimit = cw - counterEl.offsetWidth - 20;
+      if (pillLeft + pillW > counterRightLimit) {
+        pillLeft = Math.max(pad, counterRightLimit - pillW);
+      }
+    }
+
+    pillEl.style.left = `${pillLeft}px`;
+    pillEl.style.top = `${pillTop}px`;
+  }
+
+  function ensurePieceLayerDom(panelRefs, ps) {
+    if (ps.layer) return;
+    const canvasEl = el('div', { className: 'stage-piece-canvas' });
+    const dotEl = el('span', { className: 'stage-piece-dot', 'aria-hidden': 'true', hidden: true });
+    const pillEl = el('span', { className: 'stage-piece-pill', hidden: true });
+    const mediaEl = el('div', { className: 'stage-piece-media' }, canvasEl, dotEl, pillEl);
+    const counterEl = el('span', { className: 'stage-piece-counter', hidden: true });
+    const slotEl = el('span', { className: 'stage-piece-slot' });
+    const titleEl = el('span', { className: 'stage-piece-title' });
+    const priceEl = el('span', { className: 'stage-piece-price', hidden: true });
+    const barEl = el(
+      'div',
+      { className: 'stage-piece-bar' },
+      el('div', { className: 'stage-piece-meta' }, slotEl, titleEl),
+      priceEl
+    );
+    const layer = el(
+      'div',
+      { className: 'stage-piece-layer', 'aria-label': 'Piece close-up' },
+      mediaEl,
+      counterEl,
+      barEl
+    );
+
+    ps.layer = layer;
+    ps.mediaEl = mediaEl;
+    ps.canvasEl = canvasEl;
+    ps.dotEl = dotEl;
+    ps.pillEl = pillEl;
+    ps.counterEl = counterEl;
+    ps.slotEl = slotEl;
+    ps.titleEl = titleEl;
+    ps.priceEl = priceEl;
+
+    if (typeof ResizeObserver === 'function') {
+      const ro = new ResizeObserver(() => {
+        if (state.view === 'picked' && activePickedRefs === panelRefs && panelRefs.pieceState === ps) {
+          positionPieceAnnotations(panelRefs);
+        }
+      });
+      ro.observe(mediaEl);
+      ps.resizeObserver = ro;
+    } else {
+      const onResize = () => {
+        if (state.view === 'picked' && activePickedRefs === panelRefs && panelRefs.pieceState === ps) {
+          positionPieceAnnotations(panelRefs);
+        }
+      };
+      window.addEventListener('resize', onResize, { passive: true });
+      ps.resizeHandler = onResize;
+    }
+
+    panelRefs.stagePanel.appendChild(layer);
+    if (!prefersReducedMotion()) {
+      layer.classList.add('is-piece-entering');
+      void layer.offsetWidth;
+      layer.classList.remove('is-piece-entering');
+    }
+    panelRefs.stagePanel.classList.add('is-showing-piece');
+
+    if (panelRefs.pointerRing) {
+      panelRefs.pointerRing.classList.remove('is-visible');
+      panelRefs.pointerRing.setAttribute('aria-hidden', 'true');
+    }
+    clearBoardSpotlight(panelRefs, { immediate: true });
+    cancelBoardDropIn(panelRefs);
+  }
+
+  function updatePieceMetadata(ps, spec) {
+    ps.slotEl.textContent = formatSlot(spec.slot);
+    ps.titleEl.textContent = spec.title;
+    if (spec.priceText) {
+      ps.priceEl.textContent = spec.priceText;
+      ps.priceEl.hidden = false;
+    } else {
+      ps.priceEl.textContent = '';
+      ps.priceEl.hidden = true;
+    }
+    if (spec.counterText) {
+      ps.counterEl.textContent = spec.counterText;
+      ps.counterEl.hidden = false;
+    } else {
+      ps.counterEl.textContent = '';
+      ps.counterEl.hidden = true;
+    }
+  }
+
+  function commitPieceToStage(panelRefs, ps, spec, nextImg, { loaded = true } = {}) {
+    if (state.view !== 'picked' || activePickedRefs !== panelRefs || panelRefs.pieceState !== ps) {
+      return;
+    }
+    const wasShowing = Boolean(ps.layer);
+    const prevSpec = ps.spec;
+    const prevImg = ps.activeImg;
+    const reduced = prefersReducedMotion();
+
+    ps.spec = spec;
+    ensurePieceLayerDom(panelRefs, ps);
+    updatePieceMetadata(ps, spec);
+
+    if (
+      wasShowing &&
+      prevImg &&
+      prevSpec &&
+      prevSpec.src === spec.src &&
+      !prevImg.hidden &&
+      prevImg.complete &&
+      prevImg.naturalWidth > 0
+    ) {
+      positionPieceAnnotations(panelRefs);
+      return;
+    }
+
+    if (prevImg && prevImg !== nextImg) {
+      prevImg.onload = null;
+      prevImg.onerror = null;
+    }
+
+    if (wasShowing && prevImg && prevImg !== nextImg) {
+      cancelPieceCrossfade(ps);
+      if (!reduced && loaded && !prevImg.hidden) {
+        prevImg.classList.add('stage-piece-img--out');
+        ps.outgoingImg = prevImg;
+        nextImg.hidden = false;
+        nextImg.classList.remove('stage-piece-img--out', 'is-piece-fade-out');
+        nextImg.classList.add('is-piece-fade-start');
+        ps.canvasEl.appendChild(nextImg);
+        ps.activeImg = nextImg;
+        void nextImg.offsetWidth;
+        prevImg.classList.add('is-piece-fade-out');
+        nextImg.classList.remove('is-piece-fade-start');
+        ps.crossfadeTimer = setTimeout(() => {
+          if (panelRefs.pieceState === ps) cancelPieceCrossfade(ps);
+        }, 320);
+      } else {
+        prevImg.remove();
+        nextImg.hidden = !loaded;
+        nextImg.classList.remove('is-piece-fade-start', 'stage-piece-img--out', 'is-piece-fade-out');
+        ps.canvasEl.appendChild(nextImg);
+        ps.activeImg = nextImg;
+      }
+    } else {
+      nextImg.hidden = !loaded;
+      nextImg.classList.remove('is-piece-fade-start', 'stage-piece-img--out', 'is-piece-fade-out');
+      ps.canvasEl.replaceChildren(nextImg);
+      ps.activeImg = nextImg;
+    }
+
+    positionPieceAnnotations(panelRefs);
+  }
+
+  function closePieceLayer(panelRefs, { clearHighlight = false } = {}) {
+    if (!panelRefs) return;
+    const ps = panelRefs.pieceState;
+    if (ps) {
+      cancelPendingPieceLoad(ps);
+      cancelPieceCrossfade(ps);
+      if (ps.activeImg) {
+        ps.activeImg.onload = null;
+        ps.activeImg.onerror = null;
+      }
+      if (ps.resizeObserver) {
+        ps.resizeObserver.disconnect();
+        ps.resizeObserver = null;
+      }
+      if (ps.resizeHandler) {
+        window.removeEventListener('resize', ps.resizeHandler);
+        ps.resizeHandler = null;
+      }
+      if (ps.layer) {
+        ps.layer.remove();
+      }
+      panelRefs.pieceState = null;
+    }
+    if (panelRefs.stagePanel) {
+      panelRefs.stagePanel.classList.remove('is-showing-piece');
+    }
+    if (clearHighlight && activePickedRefs === panelRefs) {
+      state.highlightedSlot = null;
+      state.highlightedOccurrence = null;
+      applyPointerInPlace(null, null);
+      clearBoardSpotlight(panelRefs, { immediate: true });
+      if (panelRefs.pointerRing) {
+        panelRefs.pointerRing.style.left = '';
+        panelRefs.pointerRing.style.top = '';
+        panelRefs.pointerRing.style.width = '';
+        panelRefs.pointerRing.style.height = '';
+      }
+    }
+  }
+
+  function showPieceOnStage(panelRefs, look, media, spec, prevHighlight) {
+    if (!panelRefs.pieceState) {
+      panelRefs.pieceState = {
+        layer: null,
+        mediaEl: null,
+        canvasEl: null,
+        activeImg: null,
+        outgoingImg: null,
+        dotEl: null,
+        pillEl: null,
+        counterEl: null,
+        slotEl: null,
+        titleEl: null,
+        priceEl: null,
+        spec: null,
+        crossfadeTimer: null,
+        pendingSeq: 0,
+        pendingImg: null,
+        pendingTimeout: null,
+        prePendingHighlight: null,
+        resizeObserver: null,
+        resizeHandler: null,
+      };
+    }
+    const ps = panelRefs.pieceState;
+    preloadUpcomingPiece(look, media, spec.slot, spec.occurrence, spec.index, spec.src);
+
+    // Same image already on screen: update copy and pointer in place without reloading
+    if (
+      ps.layer &&
+      ps.activeImg &&
+      ps.spec &&
+      ps.spec.src === spec.src &&
+      !ps.activeImg.hidden &&
+      ps.activeImg.complete &&
+      ps.activeImg.naturalWidth > 0
+    ) {
+      cancelPendingPieceLoad(ps);
+      ps.prePendingHighlight = null;
+      commitPieceToStage(panelRefs, ps, spec, ps.activeImg, { loaded: true });
+      return;
+    }
+
+    if (!ps.prePendingHighlight) {
+      ps.prePendingHighlight =
+        ps.layer && ps.spec
+          ? { slot: ps.spec.slot, occurrence: ps.spec.occurrence }
+          : prevHighlight;
+    }
+
+    cancelPendingPieceLoad(ps);
+    const seq = ps.pendingSeq;
+    const wasShowing = Boolean(ps.layer);
+
+    const nextImg = el('img', {
+      className: 'stage-piece-img',
+      alt: spec.title || formatSlot(spec.slot),
+      decoding: 'async',
+    });
+
+    let settled = false;
+
+    const handleError = () => {
+      if (settled) return;
+      settled = true;
+      nextImg.onload = null;
+      nextImg.onerror = null;
+      if (ps.pendingTimeout) {
+        clearTimeout(ps.pendingTimeout);
+        ps.pendingTimeout = null;
+      }
+      if (ps.pendingImg === nextImg) ps.pendingImg = null;
+      if (
+        state.view !== 'picked' ||
+        activePickedRefs !== panelRefs ||
+        panelRefs.pieceState !== ps ||
+        ps.pendingSeq !== seq
+      ) {
+        return;
+      }
+      const fallback = ps.prePendingHighlight;
+      ps.prePendingHighlight = null;
+      if (fallback) {
+        state.highlightedSlot = fallback.slot;
+        state.highlightedOccurrence = fallback.occurrence;
+        syncPieceListHighlight(panelRefs, fallback.slot, fallback.occurrence);
+      }
+      if (!ps.layer) {
+        panelRefs.pieceState = null;
+      }
+    };
+
+    const finishLoad = () => {
+      if (settled) return;
+      if (nextImg.naturalWidth <= 0) {
+        handleError();
+        return;
+      }
+      settled = true;
+      nextImg.onload = null;
+      nextImg.onerror = null;
+      if (ps.pendingTimeout) {
+        clearTimeout(ps.pendingTimeout);
+        ps.pendingTimeout = null;
+      }
+      if (ps.pendingImg === nextImg) ps.pendingImg = null;
+      if (
+        state.view !== 'picked' ||
+        activePickedRefs !== panelRefs ||
+        panelRefs.pieceState !== ps ||
+        ps.pendingSeq !== seq
+      ) {
+        return;
+      }
+      ps.prePendingHighlight = null;
+      commitPieceToStage(panelRefs, ps, spec, nextImg, { loaded: true });
+    };
+
+    ps.pendingImg = nextImg;
+    nextImg.onload = finishLoad;
+    nextImg.onerror = handleError;
+    nextImg.src = spec.src;
+
+    if (nextImg.complete && nextImg.naturalWidth > 0) {
+      finishLoad();
+      return;
+    }
+
+    // Moving between pieces: hold the old image until loaded, and for at most 1.5 s
+    if (wasShowing) {
+      ps.pendingTimeout = setTimeout(() => {
+        if (settled) return;
+        if (
+          state.view !== 'picked' ||
+          activePickedRefs !== panelRefs ||
+          panelRefs.pieceState !== ps ||
+          ps.pendingSeq !== seq
+        ) {
+          return;
+        }
+        settled = true;
+        ps.pendingTimeout = null;
+        if (ps.pendingImg === nextImg) ps.pendingImg = null;
+        const fallbackHighlight = ps.prePendingHighlight;
+        ps.prePendingHighlight = null;
+        const fallbackSpec = ps.spec;
+        const fallbackImg = ps.activeImg && !ps.activeImg.hidden ? ps.activeImg : null;
+
+        commitPieceToStage(panelRefs, ps, spec, nextImg, { loaded: false });
+
+        const restoreAfterLateError = () => {
+          nextImg.onload = null;
+          nextImg.onerror = null;
+          if (
+            state.view !== 'picked' ||
+            activePickedRefs !== panelRefs ||
+            panelRefs.pieceState !== ps ||
+            ps.activeImg !== nextImg
+          ) {
+            return;
+          }
+          if (fallbackImg && fallbackSpec) {
+            commitPieceToStage(panelRefs, ps, fallbackSpec, fallbackImg, { loaded: true });
+            if (fallbackHighlight) {
+              state.highlightedSlot = fallbackHighlight.slot;
+              state.highlightedOccurrence = fallbackHighlight.occurrence;
+              syncPieceListHighlight(panelRefs, fallbackHighlight.slot, fallbackHighlight.occurrence);
+            }
+          } else {
+            closePieceLayer(panelRefs, { clearHighlight: true });
+          }
+        };
+
+        nextImg.onload = () => {
+          nextImg.onload = null;
+          nextImg.onerror = null;
+          if (
+            state.view !== 'picked' ||
+            activePickedRefs !== panelRefs ||
+            panelRefs.pieceState !== ps ||
+            ps.activeImg !== nextImg
+          ) {
+            return;
+          }
+          if (nextImg.naturalWidth <= 0) {
+            restoreAfterLateError();
+            return;
+          }
+          nextImg.hidden = false;
+          if (!prefersReducedMotion()) {
+            nextImg.classList.add('is-piece-fade-start');
+            void nextImg.offsetWidth;
+            nextImg.classList.remove('is-piece-fade-start');
+          }
+          positionPieceAnnotations(panelRefs);
+        };
+        nextImg.onerror = restoreAfterLateError;
+      }, 1500);
     }
   }
 
@@ -6193,6 +6868,7 @@ export function mountStore(root, { onTalk, isLive, tellAlice } = {}) {
       setHasProducts();
 
       if (samePicked) {
+        closePieceLayer(activePickedRefs);
         applyPointerInPlace(nextSlot, nextOccurrence);
       } else {
         renderPickedView();
@@ -6205,6 +6881,105 @@ export function mountStore(root, { onTalk, isLive, tellAlice } = {}) {
         }
       }
 
+      return { ok: true };
+    }),
+
+    showPiece: safeHandler((payload) => {
+      if (!payload || typeof payload.outfit !== 'number' || !Number.isFinite(payload.outfit)) {
+        return { ok: false, error: 'showPiece requires a numeric outfit' };
+      }
+      if (!state.outfits.has(payload.outfit)) {
+        return { ok: false, error: `Unknown outfit: ${payload.outfit}` };
+      }
+
+      const item = payload.item && typeof payload.item === 'object' ? payload.item : {};
+      const rawImage =
+        (typeof payload.image === 'string' && payload.image.trim()) ||
+        (typeof item.image === 'string' && item.image.trim()) ||
+        '';
+      if (!rawImage) {
+        return { ok: false, error: 'showPiece requires an image url' };
+      }
+
+      leaveSearchView();
+
+      const look = state.outfits.get(payload.outfit);
+      const media = getMedia(payload.outfit);
+      const sameLook = state.view === 'picked' && state.pickedOutfit === payload.outfit;
+      const samePicked = sameLook && activePickedRefs && activePickedRefs.outfit === payload.outfit;
+      const prevHighlight = samePicked
+        ? { slot: state.highlightedSlot, occurrence: state.highlightedOccurrence }
+        : null;
+
+      const { slot: nextSlot, occurrence: nextOccurrence } = resolvePieceOccurrence(
+        look,
+        payload.slot,
+        item,
+        sameLook
+      );
+
+      const idx =
+        typeof payload.index === 'number' && Number.isFinite(payload.index)
+          ? Math.floor(payload.index)
+          : null;
+      const cnt =
+        typeof payload.count === 'number' && Number.isFinite(payload.count)
+          ? Math.floor(payload.count)
+          : null;
+      const counterText = idx !== null && idx >= 1 && cnt !== null && cnt >= 1 ? `${idx} / ${cnt}` : '';
+      const note =
+        typeof payload.note === 'string' ? payload.note.trim().slice(0, 60).trimEnd() : '';
+      const point = normalizePiecePoint(payload.point);
+      const title = typeof item.title === 'string' ? item.title.trim() : '';
+      const priceText = formatOptionalPrice(item.price);
+      const src = stageUrl(rawImage, 900);
+
+      state.view = 'picked';
+      state.pickedOutfit = payload.outfit;
+      state.highlightedSlot = nextSlot;
+      state.highlightedOccurrence = nextOccurrence;
+      setHasProducts();
+
+      if (samePicked) {
+        syncPieceListHighlight(activePickedRefs, nextSlot, nextOccurrence);
+      } else {
+        renderPickedView();
+        window.scrollTo({ top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
+        if (nextSlot && activePickedRefs) {
+          const activeRow = activePickedRefs.pieceNotesList.querySelector(
+            '.piece-note-item.is-pointed'
+          );
+          if (activeRow) scrollRowIntoList(activePickedRefs.pieceNotesList, activeRow);
+        }
+      }
+
+      if (activePickedRefs && activePickedRefs.outfit === payload.outfit) {
+        showPieceOnStage(
+          activePickedRefs,
+          look,
+          media,
+          {
+            slot: nextSlot,
+            occurrence: nextOccurrence,
+            title,
+            priceText,
+            counterText,
+            note,
+            point,
+            src,
+            index: idx,
+          },
+          prevHighlight
+        );
+      }
+
+      return { ok: true };
+    }),
+
+    hidePiece: safeHandler(() => {
+      if (activePickedRefs && activePickedRefs.pieceState) {
+        closePieceLayer(activePickedRefs, { clearHighlight: true });
+      }
       return { ok: true };
     }),
 
@@ -6229,6 +7004,7 @@ export function mountStore(root, { onTalk, isLive, tellAlice } = {}) {
       // Reset try-on to rendering and clear all renders, flat-lay, boxes, ring and reveal
       const media = getMedia(payload.outfit);
       if (activePickedRefs && activePickedRefs.outfit === payload.outfit) {
+        closePieceLayer(activePickedRefs);
         releaseStageVideo(activePickedRefs);
       }
       clearLookRenders(media);
@@ -6494,6 +7270,7 @@ export function mountStore(root, { onTalk, isLive, tellAlice } = {}) {
         window.scrollTo({ top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
       } else {
         if (activePickedRefs && activePickedRefs.outfit === payload.outfit) {
+          closePieceLayer(activePickedRefs);
           flushPendingSwap(activePickedRefs);
         }
         syncMediaInCurrentView(payload.outfit, {
