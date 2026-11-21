@@ -5,6 +5,8 @@
 import type { Brief, BuildResult, Item, Outfit, Piece } from '../types.ts';
 import { searchMixed, setCallRoom } from '../store/index.ts';
 import { planOutfits, pieceCeiling, type PlanIdea, type PlanSlot, type Slot } from './plan.ts';
+import { stylistPick, CANDIDATES_SHOWN, type SlotCandidates } from './pick.ts';
+import { gateOutfit, prefetchThumbs, type GateResult } from './gate.ts';
 import { calllog } from '../calllog.ts';
 
 const SHOWN = 3;
@@ -76,59 +78,70 @@ function whyFor(item: Item, slot: Slot): string {
   return `${lead[slot] ?? 'Rounds out the look'}: ${item.title.split(/\s[-|]\s/)[0]}.`;
 }
 
-function pickOutfit(idea: PlanIdea, cands: Candidates[], brief: Brief, used: Set<string>, extra: Map<Slot, Item[]>): { pieces: Piece[]; problems: string[] } {
-  const problems: string[] = [];
-  const pieces: Piece[] = [];
+// Ranks each slot's candidates by the heuristic score; the top few go to the stylist.
+function rankSlots(idea: PlanIdea, cands: Candidates[], pool: Map<Slot, Item[]>, problems: string[]): Map<Slot, Item[]> {
   const ranked = new Map<Slot, Item[]>();
-
   for (const c of cands) {
     if (c.slot.own) continue;
-    const list = c.items
-      .filter((i) => !used.has(i.id))
+    ranked.set(c.slot.slot, c.items
       .map((i) => ({ i, s: scoreItem(i, c.slot.query, c.slot.slot) }))
       .sort((a, b) => b.s - a.s)
-      .map((x) => x.i);
-    ranked.set(c.slot.slot, list);
+      .map((x) => x.i));
   }
-
-  // Repair: a required slot with nothing usable borrows from the other ideas' candidates.
+  // A required slot with nothing usable borrows from the other ideas' candidates.
   for (const need of ['shoes', idea.slots.some((s) => s.slot === 'dress') ? 'dress' : 'bottom'] as Slot[]) {
     if (idea.slots.some((s) => s.slot === need && s.own)) continue;
     if ((ranked.get(need)?.length ?? 0) > 0) continue;
-    const borrowed = (extra.get(need) ?? []).filter((i) => !used.has(i.id));
+    const borrowed = pool.get(need) ?? [];
     if (borrowed.length) { ranked.set(need, borrowed); problems.push(`${idea.name}: ${need} borrowed from another idea`); }
   }
+  return ranked;
+}
 
-  for (const s of idea.slots) {
-    if (s.own) continue;
-    const best = ranked.get(s.slot)?.[0];
-    if (best) pieces.push({ slot: s.slot, why: whyFor(best, s.slot), item: best });
-    else problems.push(`${idea.name}: nothing in stock for "${s.query}"`);
+function heuristicPieces(idea: PlanIdea, ranked: Map<Slot, Item[]>, problems: string[]): Piece[] {
+  const pieces: Piece[] = [];
+  for (const [slot, list] of ranked) {
+    if (list[0]) pieces.push({ slot, why: whyFor(list[0], slot), item: list[0] });
+    else problems.push(`${idea.name}: nothing in stock for ${slot}`);
   }
+  return pieces;
+}
 
-  // Budget: while over, move the priciest piece to its cheapest acceptable alternative.
-  let guard = 10;
-  while (total(pieces) > brief.budget_usd && guard-- > 0) {
-    const byPrice = [...pieces].sort((a, b) => b.item.price - a.item.price);
+// Budget repair: trade the priciest piece down within its slot; then drop optional slots.
+function fitBudget(name: string, pieces: Piece[], ranked: Map<Slot, Item[]>, brief: Brief, taken: Set<string>, problems: string[]): Piece[] {
+  const out = [...pieces];
+  let guard = 12;
+  while (total(out) > brief.budget_usd && guard-- > 0) {
     let changed = false;
-    for (const p of byPrice) {
-      const cheaper = (ranked.get(p.slot as Slot) ?? []).filter((i) => i.price < p.item.price).slice(0, 3);
-      if (!cheaper.length) continue;
-      const alt = cheaper[0];
-      pieces[pieces.indexOf(p)] = { slot: p.slot, why: whyFor(alt, p.slot as Slot), item: alt };
+    for (const p of [...out].sort((a, b) => b.item.price - a.item.price)) {
+      const alt = (ranked.get(p.slot as Slot) ?? []).find((i) => i.price < p.item.price && !taken.has(i.id));
+      if (!alt) continue;
+      out[out.indexOf(p)] = { slot: p.slot, why: whyFor(alt, p.slot as Slot), item: alt };
+      problems.push(`${name}: traded ${p.slot} down to fit the budget`);
       changed = true;
       break;
     }
     if (!changed) break;
   }
-  // Optional slots can go if the look is still over budget.
   for (const optional of ['jewelry', 'bag', 'layer'] as Slot[]) {
-    if (total(pieces) <= brief.budget_usd) break;
-    const at = pieces.findIndex((p) => p.slot === optional);
-    const accessories = pieces.filter((p) => ['accessory', 'bag', 'jewelry'].includes(p.slot)).length;
-    if (at >= 0 && (optional === 'layer' || accessories > 1)) { pieces.splice(at, 1); problems.push(`${idea.name}: dropped the ${optional} to fit the budget`); }
+    if (total(out) <= brief.budget_usd) break;
+    const at = out.findIndex((p) => p.slot === optional);
+    const accessories = out.filter((p) => ['accessory', 'bag', 'jewelry'].includes(p.slot)).length;
+    if (at >= 0 && (optional === 'layer' || accessories > 1)) { out.splice(at, 1); problems.push(`${name}: dropped the ${optional} to fit the budget`); }
   }
-  return { pieces, problems };
+  return out;
+}
+
+// No product in two looks: swap a taken piece for the next candidate in its slot.
+function dedupe(name: string, pieces: Piece[], ranked: Map<Slot, Item[]>, taken: Set<string>, problems: string[]): Piece[] | null {
+  const out: Piece[] = [];
+  for (const p of pieces) {
+    if (!taken.has(p.item.id)) { out.push(p); continue; }
+    const alt = (ranked.get(p.slot as Slot) ?? []).find((i) => !taken.has(i.id) && !out.some((x) => x.item.id === i.id));
+    if (alt) { out.push({ slot: p.slot, why: whyFor(alt, p.slot as Slot), item: alt }); problems.push(`${name}: ${p.slot} already in another look, used the next pick`); }
+    else if (['shoes', 'bottom', 'dress'].includes(p.slot)) return null;
+  }
+  return out;
 }
 
 function complete(pieces: Piece[]): boolean {
@@ -143,9 +156,14 @@ function storyFor(idea: PlanIdea, pieces: Piece[]): string {
   return `${idea.difference} ${main ? `It starts with the ${main}` : 'It starts with the base'}${shoes ? ` and lands on the ${shoes}` : ''}.`.trim();
 }
 
+const SLOT_ORDER = ['dress', 'layer', 'top', 'bottom', 'shoes', 'accessory', 'bag', 'jewelry'];
+const ordered = (pieces: Piece[]) => [...pieces].sort((a, b) => SLOT_ORDER.indexOf(a.slot) - SLOT_ORDER.indexOf(b.slot));
+
 // ---------------------------------------------------------------------------
 // Build
 // ---------------------------------------------------------------------------
+
+interface Candidate { outfit: Outfit; ranked: Map<Slot, Item[]>; gate: GateResult; picker: string }
 
 export async function buildLive(brief: Brief, opts: LiveBuildOptions = {}): Promise<BuildResult> {
   const started = performance.now();
@@ -163,17 +181,16 @@ export async function buildLive(brief: Brief, opts: LiveBuildOptions = {}): Prom
     plan = await planOutfits(brief);
   } catch (err) {
     problems.push(`plan failed: ${(err as Error).message}`);
-    log(room, 'build_done', { mode: 'live', outfits: 0, problems, ms: ms() });
+    log(room, 'build_done', { mode: 'live', outfits: 0, problems, build_ms: ms() });
     return { outfits, source: 'live', timing: { first_outfit_ms: 0, total_ms: ms() }, problems };
   }
   problems.push(...plan.repairs.map((r) => `plan: ${r}`));
-  log(room, 'build_plan', { model: plan.model, ms: plan.ms, ideas: plan.ideas.map((i) => ({ name: i.name, slots: i.slots.map((s) => `${s.slot}: ${s.query}`) })) });
+  log(room, 'build_plan', { model: plan.model, plan_ms: plan.ms, ideas: plan.ideas.map((i) => ({ name: i.name, slots: i.slots.map((s) => `${s.slot}: ${s.query}`) })) });
 
   const ceiling = pieceCeiling(brief.budget_usd);
-  const used = new Set<string>();
+  const taken = new Set<string>();         // products already in a look on screen
   const pool = new Map<Slot, Item[]>();     // every usable item seen per slot, for repairs
 
-  // One search per distinct query; ideas share results when they ask for the same thing.
   const searches = new Map<string, Promise<Item[]>>();
   const searchSlot = (s: PlanSlot) => {
     if (s.own) return Promise.resolve([] as Item[]);
@@ -183,36 +200,76 @@ export async function buildLive(brief: Brief, opts: LiveBuildOptions = {}): Prom
         .catch((err) => { problems.push(`search "${s.query}" failed: ${(err as Error).message}`); return [] as Item[]; }));
     }
     return searches.get(s.query)!.then((items) => {
-      pool.set(s.slot, [...(pool.get(s.slot) ?? []), ...items.filter((i) => !(pool.get(s.slot) ?? []).some((x) => x.id === i.id))]);
+      const have = pool.get(s.slot) ?? [];
+      pool.set(s.slot, [...have, ...items.filter((i) => !have.some((x) => x.id === i.id))]);
       return items;
     });
   };
 
-  const emit = (outfit: Outfit) => {
-    outfit.number = outfits.length + 1;
+  const emit = (c: Candidate): boolean => {
+    if (outfits.length >= SHOWN) return false;
+    const name = c.outfit.name;
+    let pieces = dedupe(name, c.outfit.pieces, c.ranked, taken, problems);
+    if (!pieces || !complete(pieces)) { problems.push(`${name}: lost a required piece to another look`); return false; }
+    pieces = fitBudget(name, pieces, c.ranked, brief, taken, problems);
+    const outfit: Outfit = { ...c.outfit, number: outfits.length + 1, pieces: ordered(pieces), total: total(pieces) };
+    for (const p of pieces) taken.add(p.item.id);
     outfits.push(outfit);
     if (outfits.length === 1) firstMs = ms();
-    log(room, 'build_outfit', { number: outfit.number, name: outfit.name, total: outfit.total, slots: outfit.pieces.map((p) => `${p.slot}: ${p.item.title} $${p.item.price}`), ms: ms() });
+    log(room, 'build_outfit', {
+      number: outfit.number, name: outfit.name, total: outfit.total, picker: c.picker,
+      gate: { fits: +c.gate.fits.toFixed(2), cohesion: +c.gate.cohesion.toFixed(2), pass: c.gate.pass, gate_ms: c.gate.ms, error: c.gate.error },
+      slots: outfit.pieces.map((p) => `${p.slot}: ${p.item.title} $${p.item.price}`), build_ms: ms(),
+    });
     try { opts.onOutfit?.(structuredClone(outfit), outfit.number - 1); } catch (err) { problems.push(`onOutfit threw: ${(err as Error).message}`); }
+    return true;
   };
 
-  // Every idea picks as soon as its own searches are back. JS runs each pick to completion,
-  // so "used" stays consistent and no product appears in two looks.
-  const spare: Outfit[] = [];
+  // Each idea: search -> pick -> repair -> gate, independently. The first look that passes the
+  // gate is shown at once; the best of the rest follow when all four are judged.
+  const judged: Candidate[] = [];
   await Promise.all(plan.ideas.map(async (idea) => {
     const cands: Candidates[] = await Promise.all(idea.slots.map(async (slot) => ({ slot, items: await searchSlot(slot) })));
-    if (outfits.length >= SHOWN) return;
-    const { pieces, problems: p } = pickOutfit(idea, cands, brief, used, pool);
-    problems.push(...p);
-    if (!complete(pieces)) { problems.push(`${idea.name}: incomplete, skipped`); return; }
-    for (const piece of pieces) used.add(piece.item.id);
-    const outfit: Outfit = { name: idea.name, difference: idea.difference, story: storyFor(idea, pieces), pieces, total: total(pieces) };
-    if (outfit.total > brief.budget_usd) { problems.push(`${idea.name}: $${outfit.total} over budget`); spare.push(outfit); return; }
-    emit(outfit);
+    const ranked = rankSlots(idea, cands, pool, problems);
+    const slots: SlotCandidates[] = [...ranked].filter(([, items]) => items.length).map(([slot, items]) => ({
+      slot, query: idea.slots.find((s) => s.slot === slot)?.query ?? slot, items: items.slice(0, CANDIDATES_SHOWN),
+    }));
+
+    prefetchThumbs(slots.flatMap((s) => s.items.map((i) => i.image)));
+    let pieces: Piece[];
+    let name = idea.name, difference = idea.difference, story = '';
+    let picker = 'heuristic';
+    try {
+      const others = plan.ideas.filter((o) => o !== idea);
+      const own = idea.slots.find((s) => s.own)?.query;
+      const picked = await stylistPick(idea, slots, brief, others, own);
+      ({ pieces, name, difference, story } = picked);
+      picker = `${picked.model} ${picked.ms} ms`;
+    } catch (err) {
+      problems.push(`${idea.name}: ${(err as Error).message}; used the quick pick`);
+      pieces = heuristicPieces(idea, ranked, problems);
+    }
+    pieces = fitBudget(name, pieces, ranked, brief, taken, problems);
+    if (!complete(pieces)) { problems.push(`${name}: incomplete, skipped`); return; }
+
+    const outfit: Outfit = { name, difference, story: story || storyFor(idea, pieces), pieces: ordered(pieces), total: total(pieces) };
+    const gate = await gateOutfit(outfit, brief);
+    if (gate.error) problems.push(`${name}: gate unavailable (${gate.error})`);
+    const c: Candidate = { outfit, ranked, gate, picker };
+    log(room, 'build_gate', { name, fits: +gate.fits.toFixed(2), cohesion: +gate.cohesion.toFixed(2), pass: gate.pass, gate_ms: gate.ms, picker });
+    if (outfits.length === 0 && gate.pass && outfit.total <= brief.budget_usd && emit(c)) return;
+    judged.push(c);
   }));
 
-  // If fewer than three fit the budget, show the closest over-budget ones rather than nothing.
-  for (const o of spare.sort((a, b) => a.total - b.total)) if (outfits.length < SHOWN) emit(o);
+  // Best of the rest: passing looks first, then by gate score; over-budget looks last.
+  judged.sort((a, b) =>
+    Number(b.outfit.total <= brief.budget_usd) - Number(a.outfit.total <= brief.budget_usd) ||
+    Number(b.gate.pass) - Number(a.gate.pass) || b.gate.score - a.gate.score);
+  for (const c of judged) {
+    if (outfits.length >= SHOWN) { problems.push(`dropped "${c.outfit.name}" (gate ${c.gate.fits.toFixed(2)} / ${c.gate.cohesion.toFixed(1)})`); continue; }
+    if (c.outfit.total > brief.budget_usd) problems.push(`${c.outfit.name}: $${c.outfit.total} over budget`);
+    emit(c);
+  }
   if (outfits.length < SHOWN) problems.push(`only ${outfits.length} complete outfits`);
 
   const result: BuildResult = { outfits, source: 'live', timing: { first_outfit_ms: firstMs, total_ms: ms() }, problems };
