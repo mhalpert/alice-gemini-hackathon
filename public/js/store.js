@@ -5653,19 +5653,9 @@ export function mountStore(root, { onTalk } = {}) {
         newlyArrivedKind = kind;
         markRenderNew(payload.outfit, media, kind);
 
-        // Promote scene or video once automatically while the shopper is still on the initial studio still
-        if (
-          !media.stageSwapped &&
-          media.activeRender === 'studio' &&
-          !media.userPickedRender &&
-          (kind === 'scene' || kind === 'video') &&
-          !media.autoAdvancedKinds.has(kind)
-        ) {
-          media.autoAdvancedKinds.add(kind);
-          media.activeRender = kind;
-          media.tryOnUrl = url;
-          fadeRender = true;
-        } else if (!media.activeRender) {
+        // A render that arrives after the reveal joins the strip; the stage changes only on a
+        // reveal or a tile click, so the agent decides the order the renders are shown in
+        if (!media.activeRender) {
           media.activeRender = kind;
           media.tryOnUrl = url;
           fadeRender = !media.stageSwapped;
@@ -5742,7 +5732,9 @@ export function mountStore(root, { onTalk } = {}) {
         }
       }
 
-      const chosenKind = pickRenderKind(media, requestedKind);
+      // A first reveal that names no kind starts on the studio still when it has arrived
+      const startOnStudio = !requestedKind && !media.revealed && Boolean(media.renders.studio);
+      const chosenKind = pickRenderKind(media, startOnStudio ? 'studio' : requestedKind);
       if (!chosenKind) {
         return { ok: false, error: `No try-on image ready for outfit ${payload.outfit}` };
       }
