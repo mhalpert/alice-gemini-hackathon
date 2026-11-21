@@ -7,8 +7,10 @@ import type { Brief, BuildResult, Gender, Item, Outfit, Piece } from '../types.t
 import { calllog } from '../calllog.ts';
 import { lookup as defaultLookup } from '../store/index.ts';
 import { swapLive as defaultSwap } from '../brain/swap.ts';
+import { breaksDressCode } from '../brain/words.ts';
 import { embed as defaultEmbed, cosine, occasionText } from './embed.ts';
-import { DEMO_OCCASION_KEY } from './occasions.ts';
+import { DEMO_OCCASION_KEY, OCCASIONS, type LibraryOccasion } from './occasions.ts';
+import type { GradesFile, OutfitGrade, SetGrade } from './grade.ts';
 
 export interface LibraryMatch {
   key: string;
@@ -24,6 +26,7 @@ export interface LibrarySet {
   outfits: Outfit[];
   vectors: number[][];
   built_ms: number;
+  improved_at?: string;
 }
 
 export interface LibraryFile {
@@ -57,6 +60,7 @@ export interface ServeLibraryOptions {
 }
 
 const DEFAULT_THRESHOLD = 0.78;
+const DEFAULT_MIN_SCORE = 6;
 const DEFAULT_SETS_PATH = path.resolve(import.meta.dirname, 'sets.json');
 const DROP_ON_MISSING_SLOTS = new Set(['shoes', 'bottom', 'dress']);
 const OPTIONAL_SLOTS = new Set(['accessory', 'bag', 'jewelry', 'layer']);
@@ -73,6 +77,8 @@ let deps: LibraryDeps = {
 
 let loadedPath: string | null = null;
 let loadedSets: LibrarySet[] | null = null;
+let loadedGradesPath: string | null = null;
+let loadedGrades: Record<string, SetGrade> | null = null;
 const queryEmbedCache = new Map<string, number[]>();
 
 export function _setDeps(overrides: Partial<LibraryDeps> | null): void {
@@ -91,6 +97,8 @@ export function _setDeps(overrides: Partial<LibraryDeps> | null): void {
   }
   loadedPath = null;
   loadedSets = null;
+  loadedGradesPath = null;
+  loadedGrades = null;
   queryEmbedCache.clear();
 }
 
@@ -102,11 +110,22 @@ function libraryFilePath(): string {
   return DEFAULT_SETS_PATH;
 }
 
+function gradesFilePath(): string {
+  return path.join(path.dirname(libraryFilePath()), 'grades.json');
+}
+
 function threshold(): number {
   const raw = process.env.ALICE_LIBRARY_THRESHOLD;
   if (raw === undefined || raw.trim() === '') return DEFAULT_THRESHOLD;
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : DEFAULT_THRESHOLD;
+}
+
+function minServeScore(): number {
+  const raw = process.env.ALICE_LIBRARY_MIN_SCORE;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_MIN_SCORE;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : DEFAULT_MIN_SCORE;
 }
 
 function log(room: string | undefined, ev: string, data: Record<string, unknown>): void {
@@ -137,8 +156,84 @@ async function loadSets(): Promise<LibrarySet[]> {
   }
 }
 
+async function loadGrades(): Promise<Record<string, SetGrade>> {
+  const filePath = gradesFilePath();
+  if (loadedGrades !== null && loadedGradesPath === filePath) {
+    return loadedGrades;
+  }
+  try {
+    const raw = await readFile(filePath, 'utf8');
+    const parsed = JSON.parse(raw) as Partial<GradesFile>;
+    const grades =
+      parsed?.grades && typeof parsed.grades === 'object' && !Array.isArray(parsed.grades)
+        ? parsed.grades
+        : {};
+    loadedGradesPath = filePath;
+    loadedGrades = grades;
+    return grades;
+  } catch {
+    loadedGradesPath = filePath;
+    loadedGrades = {};
+    return {};
+  }
+}
+
+function sameOutfitNames(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const sa = [...a].sort();
+  const sb = [...b].sort();
+  return sa.every((name, i) => name === sb[i]);
+}
+
+function hasMatchingGrade(set: LibrarySet, grade: SetGrade | undefined): grade is SetGrade {
+  if (!grade || !Array.isArray(grade.outfits)) return false;
+  return sameOutfitNames(
+    set.outfits.map((o) => o.name),
+    grade.outfits.map((o) => o.name),
+  );
+}
+
+function outfitBreaksDressCode(outfit: Outfit, brief: { occasion: string; gender: string }): boolean {
+  return outfit.pieces.some((piece) => breaksDressCode(piece.item, piece.slot, brief));
+}
+
+function selectOutfitsForSet(
+  set: LibrarySet,
+  grades: Record<string, SetGrade>,
+  brief: { occasion: string; gender: string },
+): { outfits: Outfit[]; graded: boolean; failedGrade: boolean } {
+  const cloned = structuredClone(set.outfits);
+  const grade = grades[`${set.key}|${set.gender}`];
+
+  if (hasMatchingGrade(set, grade)) {
+    const minScore = minServeScore();
+    const byName = new Map<string, OutfitGrade[]>();
+    for (const og of grade.outfits) {
+      const list = byName.get(og.name) ?? [];
+      list.push(og);
+      byName.set(og.name, list);
+    }
+
+    const ranked: { outfit: Outfit; score: number; index: number }[] = [];
+    for (let i = 0; i < cloned.length; i++) {
+      const outfit = cloned[i];
+      const og = byName.get(outfit.name)?.shift();
+      if (!og || og.score < minScore) continue;
+      if (outfitBreaksDressCode(outfit, brief)) continue;
+      ranked.push({ outfit, score: og.score, index: i });
+    }
+
+    ranked.sort((a, b) => b.score - a.score || a.index - b.index);
+    const outfits = ranked.map((r) => r.outfit);
+    return { outfits, graded: true, failedGrade: outfits.length < 2 };
+  }
+
+  const outfits = cloned.filter((o) => !outfitBreaksDressCode(o, brief));
+  return { outfits, graded: false, failedGrade: false };
+}
+
 export async function warmLibrary(): Promise<void> {
-  await loadSets();
+  await Promise.all([loadSets(), loadGrades()]);
 }
 
 async function queryVector(gender: Gender, occasion: string): Promise<number[] | null> {
@@ -194,7 +289,11 @@ async function findMatch(
 export async function matchLibrary(brief: Brief): Promise<LibraryMatch | null> {
   try {
     const found = await findMatch(brief, false);
-    return found ? found.match : null;
+    if (!found) return null;
+    const grades = await loadGrades();
+    const selected = selectOutfitsForSet(found.set, grades, brief);
+    if (selected.failedGrade || selected.outfits.length < 2) return null;
+    return found.match;
   } catch {
     return null;
   }
@@ -236,6 +335,13 @@ export async function serveLibrary(
     if (!found) return null;
 
     const { match, set } = found;
+    const grades = await loadGrades();
+    const selected = selectOutfitsForSet(set, grades, brief);
+    const minOutfits = opts.anyMatch ? 1 : 2;
+    if (selected.failedGrade || selected.outfits.length < minOutfits) {
+      return null;
+    }
+
     const matchMs = elapsed();
     log(opts.room, 'library_match', {
       key: match.key,
@@ -243,7 +349,7 @@ export async function serveLibrary(
       ms: matchMs,
     });
 
-    const cloned = structuredClone(set.outfits);
+    const cloned = selected.outfits;
     const stock = await deps.lookup(collectIds(cloned));
     const problems: string[] = [
       `library: matched ${match.key} (similarity ${match.similarity.toFixed(3)})`,
@@ -314,7 +420,6 @@ export async function serveLibrary(
       finalOutfits = finalOutfits.filter((o) => o.total <= brief.budget_usd);
     }
 
-    const minOutfits = opts.anyMatch ? 1 : 2;
     if (finalOutfits.length < minOutfits) return null;
 
     let firstMs = 0;
@@ -364,14 +469,23 @@ export async function libraryLooks(
     const allGenderSets = (await loadSets()).filter((s) => s.gender === gender);
     if (allGenderSets.length === 0) return [];
 
+    const grades = await loadGrades();
     const occasionQuery = opts.occasion?.trim();
     if (occasionQuery) {
-      const match = await matchLibrary({ gender, occasion: occasionQuery, budget_usd: 1e9 });
-      if (!match) return [];
-      const matchedSet = allGenderSets.find((s) => s.key === match.key);
-      if (!matchedSet) return [];
+      let matchedSet = allGenderSets.find((s) => s.key === occasionQuery);
+      let occasionBrief = { gender, occasion: matchedSet ? matchedSet.occasion : occasionQuery };
+      if (!matchedSet) {
+        const match = await matchLibrary({ gender, occasion: occasionQuery, budget_usd: 1e9 });
+        if (!match) return [];
+        matchedSet = allGenderSets.find((s) => s.key === match.key);
+        if (!matchedSet) return [];
+        occasionBrief = { gender, occasion: occasionQuery };
+      }
 
-      const cloned = structuredClone(matchedSet.outfits);
+      const selected = selectOutfitsForSet(matchedSet, grades, occasionBrief);
+      if (selected.failedGrade || selected.outfits.length === 0) return [];
+
+      const cloned = selected.outfits;
       const stock = await deps.lookup(collectIds(cloned));
       const ok: Outfit[] = [];
       for (const outfit of cloned) {
@@ -399,12 +513,16 @@ export async function libraryLooks(
       return limited;
     }
 
-    const clonedSets = allGenderSets.map((s) => ({
-      key: s.key,
-      outfits: structuredClone(s.outfits),
-    }));
+    const clonedSets = allGenderSets.map((s) => {
+      const selected = selectOutfitsForSet(s, grades, { gender: s.gender, occasion: s.occasion });
+      return {
+        key: s.key,
+        outfits: selected.failedGrade ? [] : selected.outfits,
+      };
+    });
 
     const allOutfits = clonedSets.flatMap((s) => s.outfits);
+    if (allOutfits.length === 0) return [];
     const stock = await deps.lookup(collectIds(allOutfits));
 
     const checkedBySet = clonedSets.map((s) => {
@@ -454,6 +572,80 @@ export async function libraryLooks(
       limited[i].number = i + 1;
     }
     return limited;
+  } catch {
+    return [];
+  }
+}
+
+let cachedExtraOccasions: LibraryOccasion[] | null = null;
+
+async function loadAllOccasions(): Promise<LibraryOccasion[]> {
+  if (cachedExtraOccasions === null) {
+    try {
+      const mod = (await import('./occasions-extra.ts')) as { EXTRA_OCCASIONS?: unknown };
+      cachedExtraOccasions = Array.isArray(mod?.EXTRA_OCCASIONS)
+        ? (mod.EXTRA_OCCASIONS as LibraryOccasion[])
+        : [];
+    } catch {
+      cachedExtraOccasions = [];
+    }
+  }
+
+  const seen = new Set<string>();
+  const combined: LibraryOccasion[] = [];
+  for (const occ of [...OCCASIONS, ...cachedExtraOccasions]) {
+    if (!occ?.key || seen.has(occ.key)) continue;
+    seen.add(occ.key);
+    combined.push(occ);
+  }
+  return combined;
+}
+
+function capitalizeFirst(text: string): string {
+  return text.length > 0 ? text[0].toUpperCase() + text.slice(1) : text;
+}
+
+export async function libraryOccasions(
+  gender: Gender,
+): Promise<{ key: string; occasion: string; label: string }[]> {
+  try {
+    const [sets, grades, occasions] = await Promise.all([
+      loadSets(),
+      loadGrades(),
+      loadAllOccasions(),
+    ]);
+
+    const servableByKey = new Map<string, LibrarySet>();
+    for (const set of sets) {
+      if (set.gender !== gender) continue;
+      const selected = selectOutfitsForSet(set, grades, {
+        gender: set.gender,
+        occasion: set.occasion,
+      });
+      if (selected.failedGrade || selected.outfits.length < 2) continue;
+      if (!servableByKey.has(set.key)) {
+        servableByKey.set(set.key, set);
+      }
+    }
+
+    const result: { key: string; occasion: string; label: string }[] = [];
+    const emitted = new Set<string>();
+
+    for (const occ of occasions) {
+      const set = servableByKey.get(occ.key);
+      if (!set) continue;
+      emitted.add(occ.key);
+      const firstWording = occ.wordings?.[0]?.trim();
+      const label = firstWording ? capitalizeFirst(firstWording) : set.occasion;
+      result.push({ key: set.key, occasion: set.occasion, label });
+    }
+
+    for (const [key, set] of servableByKey) {
+      if (emitted.has(key)) continue;
+      result.push({ key: set.key, occasion: set.occasion, label: set.occasion });
+    }
+
+    return result;
   } catch {
     return [];
   }

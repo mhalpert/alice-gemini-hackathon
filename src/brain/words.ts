@@ -130,14 +130,30 @@ export function fixNameColours(name: string, titles: string[]): string {
 // Hard dress-code filters that a model must not be trusted with.
 const BRIDAL = /\b(bride|bridal|bachelorette|wedding dress|veil|just married)\b/i;
 const WHITES = ['white', 'ivory', 'off-white', 'cream', 'ecru', 'bone'];
+const FORMAL_TIE_OCCASION = /black tie|gala|formal|tux|interview|funeral|memorial|opera|award|charity dinner/i;
+const TIE_TITLE = /\b(tie|necktie)\b/i;
+const NOT_A_TIE = /tie[- ]?(dye|front|waist|up)/i;
+const NOVELTY_TIE = /\b(knicks|nba|nfl|mlb|nhl|team|logo|graphic|printed|print|novelty|cartoon|character|paisley|floral|pattern(ed)?|stripe[sd]?|polka|dots?)\b/i;
 export function isWeddingGuest(occasion: string): boolean {
   const o = (occasion ?? '').toLowerCase();
   return /wedding|reception|rehearsal dinner/.test(o) && !/\b(my|our) (own )?wedding\b|i'?m getting married|\bmy bridal\b/.test(o);
 }
 export function breaksDressCode(item: { title: string; description?: string }, slot: string, brief: { occasion: string; gender: string }): boolean {
-  if (!isWeddingGuest(brief.occasion)) return false;
-  if (BRIDAL.test(item.title) || BRIDAL.test(item.description ?? '')) return true;
-  // Guests never wear white: anything visible for women, the jacket or trousers for men.
-  const visible = brief.gender === 'women' ? ['dress', 'top', 'bottom', 'layer'] : ['layer', 'bottom'];
-  return visible.includes(slot) && titleHas(item.title, WHITES);
+  const title = item.title ?? '';
+  const desc = item.description ?? '';
+  if (isWeddingGuest(brief.occasion)) {
+    if (BRIDAL.test(title) || BRIDAL.test(desc)) return true;
+    // Guests never wear white: anything visible for women, the jacket or trousers for men.
+    const visible = brief.gender === 'women' ? ['dress', 'top', 'bottom', 'layer'] : ['layer', 'bottom'];
+    if (visible.includes(slot) && titleHas(title, WHITES)) return true;
+  }
+  if (
+    FORMAL_TIE_OCCASION.test(brief.occasion ?? '') &&
+    TIE_TITLE.test(title) &&
+    !NOT_A_TIE.test(title) &&
+    (NOVELTY_TIE.test(title) || NOVELTY_TIE.test(desc))
+  ) {
+    return true;
+  }
+  return false;
 }

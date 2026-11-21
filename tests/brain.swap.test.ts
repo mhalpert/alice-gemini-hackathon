@@ -2,6 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { swapLive, readRequest } from '../src/brain/swap.ts';
+import { breaksDressCode } from '../src/brain/words.ts';
 import type { Brief, Item, Outfit, SearchResult } from '../src/types.ts';
 
 const brief: Brief = { gender: 'men', occasion: "a friend's rooftop birthday", budget_usd: 150 };
@@ -96,4 +97,56 @@ test('a slot the look does not have changes nothing', async () => {
   const out = await swapLive(look, 'bag', 'a black bag', brief, { search: fakeSearch([]), rewrite: false });
   assert.equal(out.outfit.total, look.total);
   assert.match(out.note ?? '', /no bag/);
+});
+
+test('breaksDressCode rejects novelty/printed ties at formal occasions and interviews regardless of slot', () => {
+  const gala = { occasion: 'black tie optional gala', gender: 'men' };
+  const interview = { occasion: 'investment bank interview', gender: 'women' };
+  const birthday = { occasion: "a friend's rooftop birthday party", gender: 'men' };
+
+  // Knicks tie at a gala is rejected in any slot
+  assert.equal(
+    breaksDressCode({ title: 'Kith for the New York Knicks Silk Tie' }, 'accessory', gala),
+    true,
+  );
+  assert.equal(
+    breaksDressCode({ title: 'Kith for the New York Knicks Silk Tie' }, 'top', gala),
+    true,
+  );
+
+  // Printed tie at a gala is rejected (via title or description)
+  assert.equal(
+    breaksDressCode({ title: 'Kith Printed Silk Neck Tie - Sage' }, 'accessory', gala),
+    true,
+  );
+  assert.equal(
+    breaksDressCode({ title: 'Classic Silk Necktie', description: 'Features an allover paisley pattern' }, 'accessory', interview),
+    true,
+  );
+
+  // "Solid Silk Tie - Black" at a gala passes
+  assert.equal(
+    breaksDressCode({ title: 'Solid Silk Tie - Black' }, 'accessory', gala),
+    false,
+  );
+
+  // A printed tie at a rooftop birthday passes
+  assert.equal(
+    breaksDressCode({ title: 'Kith Printed Silk Neck Tie - Sage' }, 'accessory', birthday),
+    false,
+  );
+
+  // "Tie Front Blouse" at an interview passes
+  assert.equal(
+    breaksDressCode({ title: 'Tie Front Blouse', description: 'Printed floral blouse' }, 'top', interview),
+    false,
+  );
+
+  // Existing wedding guest white rule still works alongside formal tie rule
+  const formalWedding = { occasion: 'formal wedding reception', gender: 'women' };
+  assert.equal(breaksDressCode({ title: 'Ivory Satin Dress' }, 'dress', formalWedding), true);
+  assert.equal(
+    breaksDressCode({ title: 'Striped Silk Tie' }, 'accessory', { occasion: 'formal wedding', gender: 'men' }),
+    true,
+  );
 });
