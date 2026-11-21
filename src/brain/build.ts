@@ -4,12 +4,21 @@
 // pick and the Decisions gate slot in on top of it.
 import type { Brief, BuildResult, Item, Outfit, Piece } from '../types.ts';
 import { searchMixed, setCallRoom } from '../store/index.ts';
-import { planOutfits, pieceCeiling, type PlanIdea, type PlanSlot, type Slot } from './plan.ts';
+import { planOutfits, pieceCeiling, type Plan, type PlanIdea, type PlanSlot, type Slot } from './plan.ts';
 import { stylistPick, CANDIDATES_SHOWN, type SlotCandidates } from './pick.ts';
 import { gateOutfit, prefetchThumbs, type GateResult } from './gate.ts';
 import { critiqueOutfit, type Critique } from './critic.ts';
 import { calllog } from '../calllog.ts';
-import { breaksDressCode, fixNameColours, titleHas, typeIn, wrongSlot } from './words.ts';
+import { breaksDressCode, colourOf, fixNameColours, titleHas, typeIn, wrongSlot } from './words.ts';
+import {
+  fitFormalBudget,
+  formalFilter,
+  formalPlan,
+  formalScoreBoost,
+  isMenBlackTie,
+  matchSuit,
+  pickSuitTrouserSync,
+} from './formal.ts';
 
 const SHOWN = 3;
 const CANDIDATES_PER_SLOT = 12;
@@ -81,17 +90,30 @@ function whyFor(item: Item, slot: Slot): string {
 }
 
 // Ranks each slot's candidates by the heuristic score; the top few go to the stylist.
-function rankSlots(idea: PlanIdea, cands: Candidates[], pool: Map<Slot, Item[]>, problems: string[]): Map<Slot, Item[]> {
+function rankSlots(
+  idea: PlanIdea,
+  cands: Candidates[],
+  pool: Map<Slot, Item[]>,
+  problems: string[],
+  brief?: Brief,
+  formal = false,
+): Map<Slot, Item[]> {
   const ranked = new Map<Slot, Item[]>();
   for (const c of cands) {
     if (c.slot.own) continue;
     ranked.set(c.slot.slot, c.items
-      .map((i) => ({ i, s: scoreItem(i, c.slot.query, c.slot.slot) }))
+      .map((i) => ({
+        i,
+        s: scoreItem(i, c.slot.query, c.slot.slot) + (formal && brief ? formalScoreBoost(i, c.slot.slot, c.slot.query, brief) : 0),
+      }))
       .sort((a, b) => b.s - a.s)
       .map((x) => x.i));
   }
   // A required slot with nothing usable borrows from the other ideas' candidates.
-  for (const need of ['shoes', idea.slots.some((s) => s.slot === 'dress') ? 'dress' : 'bottom'] as Slot[]) {
+  const required: Slot[] = formal
+    ? ['shoes', 'bottom', 'accessory']
+    : ['shoes', idea.slots.some((s) => s.slot === 'dress') ? 'dress' : 'bottom'];
+  for (const need of required) {
     if (idea.slots.some((s) => s.slot === need && s.own)) continue;
     if ((ranked.get(need)?.length ?? 0) > 0) continue;
     const borrowed = pool.get(need) ?? [];
@@ -161,13 +183,23 @@ function fitBudget(name: string, pieces: Piece[], ranked: Map<Slot, Item[]>, bri
 }
 
 // No product in two looks: swap a taken piece for the next candidate in its slot.
-function dedupe(name: string, pieces: Piece[], ranked: Map<Slot, Item[]>, taken: Set<string>, problems: string[]): Piece[] | null {
+// For men's black tie, the accessory slot (the solid silk tie) is exempt so every look may share it.
+export function dedupe(
+  name: string,
+  pieces: Piece[],
+  ranked: Map<Slot, Item[]>,
+  taken: Set<string>,
+  problems: string[],
+  formal = false,
+): Piece[] | null {
   const out: Piece[] = [];
+  const required = formal ? ['shoes', 'bottom', 'dress', 'layer', 'top'] : ['shoes', 'bottom', 'dress'];
   for (const p of pieces) {
+    if (formal && p.slot === 'accessory') { out.push(p); continue; }
     if (!taken.has(p.item.id)) { out.push(p); continue; }
     const alt = (ranked.get(p.slot as Slot) ?? []).find((i) => !taken.has(i.id) && !out.some((x) => x.item.id === i.id));
     if (alt) { out.push({ slot: p.slot, why: whyFor(alt, p.slot as Slot), item: alt }); problems.push(`${name}: ${p.slot} already in another look, used the next pick`); }
-    else if (['shoes', 'bottom', 'dress'].includes(p.slot)) return null;
+    else if (required.includes(p.slot)) return null;
   }
   return out;
 }
@@ -204,28 +236,39 @@ export async function buildLive(brief: Brief, opts: LiveBuildOptions = {}): Prom
   const outfits: Outfit[] = [];
   let firstMs = 0;
 
-  let plan;
-  try {
-    plan = await planOutfits(brief);
-  } catch (err) {
-    problems.push(`plan failed: ${(err as Error).message}`);
-    log(room, 'build_done', { mode: 'live', outfits: 0, problems, build_ms: ms() });
-    return { outfits, source: 'live', timing: { first_outfit_ms: 0, total_ms: ms() }, problems };
+  const formal = isMenBlackTie(brief);
+  let plan: Plan;
+  if (formal) {
+    plan = { ideas: formalPlan(brief), own_slot: null, model: 'formal-plan', ms: 0, repairs: [] };
+  } else {
+    try {
+      plan = await planOutfits(brief);
+    } catch (err) {
+      problems.push(`plan failed: ${(err as Error).message}`);
+      log(room, 'build_done', { mode: 'live', outfits: 0, problems, build_ms: ms() });
+      return { outfits, source: 'live', timing: { first_outfit_ms: 0, total_ms: ms() }, problems };
+    }
   }
   problems.push(...plan.repairs.map((r) => `plan: ${r}`));
   log(room, 'build_plan', { model: plan.model, plan_ms: plan.ms, ideas: plan.ideas.map((i) => ({ name: i.name, slots: i.slots.map((s) => `${s.slot}: ${s.query}`) })) });
 
-  const ceiling = pieceCeiling(brief.budget_usd);
+  const ceiling = formal ? Math.max(pieceCeiling(brief.budget_usd), Math.round(brief.budget_usd * 0.65)) : pieceCeiling(brief.budget_usd);
   const taken = new Set<string>();         // products already in a look on screen
   const pool = new Map<Slot, Item[]>();     // every usable item seen per slot, for repairs
 
   const searches = new Map<string, Promise<Item[]>>();
   const searchSlot = (s: PlanSlot) => {
     if (s.own) return Promise.resolve([] as Item[]);
-    const key = `${s.slot}\0${s.query}`;
+    // Solid silk ties in stock are $245-$295; keep them searchable for men's black tie even at lower budgets.
+    const slotCeiling = formal && s.slot === 'accessory' ? Math.max(ceiling, 300) : ceiling;
+    const key = `${s.slot}\0${s.query}\0${slotCeiling}`;
     if (!searches.has(key)) {
-      searches.set(key, searchMixed(s.query, brief.gender, { limit: CANDIDATES_PER_SLOT * 2, maxPrice: ceiling })
-        .then((r) => r.items.filter((i) => usable(i, brief, ceiling) && !breaksDressCode(i, s.slot, brief) && !wrongSlot(i.title, s.slot)))
+      searches.set(key, searchMixed(s.query, brief.gender, { limit: CANDIDATES_PER_SLOT * 2, maxPrice: slotCeiling })
+        .then((r) => r.items.filter((i) =>
+          usable(i, brief, slotCeiling) &&
+          !breaksDressCode(i, s.slot, brief) &&
+          !wrongSlot(i.title, s.slot) &&
+          (!formal || formalFilter(i, s.slot))))
         .catch((err) => { problems.push(`search "${s.query}" failed: ${(err as Error).message}`); return [] as Item[]; }));
     }
     return searches.get(key)!.then((items) => {
@@ -235,14 +278,47 @@ export async function buildLive(brief: Brief, opts: LiveBuildOptions = {}): Prom
     });
   };
 
+  // Cache targeted matchSuit searches across formal ideas so we only query once per build.
+  const formalSearchCache = new Map<string, ReturnType<typeof searchMixed>>();
+  const cachedFormalSearch: typeof searchMixed = (q, g, o) => {
+    const key = `${g}\0${q}\0${o?.maxPrice ?? ''}`;
+    if (!formalSearchCache.has(key)) formalSearchCache.set(key, searchMixed(q, g, o));
+    return formalSearchCache.get(key)!;
+  };
+
   const emit = (c: Candidate): boolean => {
     if (outfits.length >= SHOWN) return false;
     const name = c.outfit.name;
-    let pieces = dedupe(name, c.outfit.pieces, c.ranked, taken, problems);
+    let pieces = dedupe(name, c.outfit.pieces, c.ranked, taken, problems, formal);
     if (!pieces || !complete(pieces)) { problems.push(`${name}: lost a required piece to another look`); return false; }
-    pieces = fitBudget(name, pieces, c.ranked, brief, taken, problems);
+    if (formal) {
+      const layer = pieces.find((p) => p.slot === 'layer');
+      const bottom = pieces.find((p) => p.slot === 'bottom');
+      if (!layer || !bottom) { problems.push(`${name}: missing suit jacket or trousers`); return false; }
+      const layerColour = colourOf(layer.item.title);
+      const bottomColour = colourOf(bottom.item.title);
+      if (layerColour && bottomColour !== layerColour) {
+        const allBottoms = [...(c.ranked.get('bottom') ?? []), ...(pool.get('bottom') ?? [])]
+          .filter((i) => !taken.has(i.id));
+        const matchedBottom = pickSuitTrouserSync(layer.item, allBottoms, true);
+        if (!matchedBottom) { problems.push(`${name}: no matching ${layerColour} trousers left`); return false; }
+        pieces = pieces.map((p) =>
+          p.slot === 'bottom'
+            ? { slot: 'bottom', why: `Matching trousers for the ${layer.item.title.split(/\s[-|]\s/)[0]}.`, item: matchedBottom }
+            : p,
+        );
+      }
+      // Never drop the tie during dedupe if another untaken tie exists in the shared pool.
+      if (!pieces.some((p) => p.slot === 'accessory')) {
+        const poolTie = (pool.get('accessory') ?? []).find((i) => !taken.has(i.id));
+        if (poolTie) pieces = [...pieces, { slot: 'accessory', why: whyFor(poolTie, 'accessory'), item: poolTie }];
+      }
+      pieces = fitFormalBudget(name, pieces, c.ranked, pool, brief, taken, problems, whyFor);
+    } else {
+      pieces = fitBudget(name, pieces, c.ranked, brief, taken, problems);
+    }
     const outfit: Outfit = { ...c.outfit, number: outfits.length + 1, pieces: ordered(pieces), total: total(pieces) };
-    for (const p of pieces) taken.add(p.item.id);
+    for (const p of pieces) if (!(formal && p.slot === 'accessory')) taken.add(p.item.id);
     outfits.push(outfit);
     if (outfits.length === 1) firstMs = ms();
     log(room, 'build_outfit', {
@@ -262,7 +338,7 @@ export async function buildLive(brief: Brief, opts: LiveBuildOptions = {}): Prom
   const judged: Candidate[] = [];
   await Promise.all(plan.ideas.map(async (idea) => {
     const cands: Candidates[] = await Promise.all(idea.slots.map(async (slot) => ({ slot, items: await searchSlot(slot) })));
-    const ranked = rankSlots(idea, cands, pool, problems);
+    const ranked = rankSlots(idea, cands, pool, problems, brief, formal);
     const slots: SlotCandidates[] = [...ranked].filter(([, items]) => items.length).map(([slot, items]) => ({
       slot, query: idea.slots.find((s) => s.slot === slot)?.query ?? slot, items: items.slice(0, CANDIDATES_SHOWN),
     }));
@@ -282,7 +358,39 @@ export async function buildLive(brief: Brief, opts: LiveBuildOptions = {}): Prom
       pieces = heuristicPieces(idea, ranked, problems);
     }
     pieces = repairWrongSlots(name, pieces, ranked, problems);
-    pieces = fitBudget(name, pieces, ranked, brief, taken, problems);
+    if (formal) {
+      const layer = pieces.find((p) => p.slot === 'layer');
+      if (layer) {
+        const bottoms = [...(ranked.get('bottom') ?? []), ...(pool.get('bottom') ?? [])];
+        const matched = await matchSuit(layer.item, bottoms, {
+          search: cachedFormalSearch,
+          maxPrice: ceiling,
+          gender: brief.gender,
+        });
+        if (matched) {
+          const idx = pieces.findIndex((p) => p.slot === 'bottom');
+          const bottomPiece: Piece = {
+            slot: 'bottom',
+            why: `Matching trousers for the ${layer.item.title.split(/\s[-|]\s/)[0]}.`,
+            item: matched,
+          };
+          if (idx >= 0) pieces[idx] = bottomPiece;
+          else pieces.push(bottomPiece);
+          const cur = ranked.get('bottom') ?? [];
+          ranked.set('bottom', [matched, ...cur.filter((i) => i.id !== matched.id)]);
+          const haveBottoms = pool.get('bottom') ?? [];
+          if (!haveBottoms.some((i) => i.id === matched.id)) pool.set('bottom', [...haveBottoms, matched]);
+        }
+      }
+      // Guarantee every men's black-tie look keeps a solid silk tie.
+      if (!pieces.some((p) => p.slot === 'accessory')) {
+        const tie = (ranked.get('accessory') ?? pool.get('accessory') ?? [])[0];
+        if (tie) pieces.push({ slot: 'accessory', why: whyFor(tie, 'accessory'), item: tie });
+      }
+      pieces = fitFormalBudget(name, pieces, ranked, pool, brief, taken, problems, whyFor);
+    } else {
+      pieces = fitBudget(name, pieces, ranked, brief, taken, problems);
+    }
     if (!complete(pieces)) { problems.push(`${name}: incomplete, skipped`); return; }
     const fixed = fixNameColours(name, pieces.map((p) => p.item.title));
     if (fixed !== name) { problems.push(`renamed "${name}" to "${fixed}": no piece has that colour`); name = fixed; }

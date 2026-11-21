@@ -141,7 +141,7 @@ export const OCCASIONS: LibraryOccasion[] = [
   {
     key: 'gala',
     occasion: 'black tie optional gala',
-    budget: { men: 250, women: 250 },
+    budget: { men: 600, women: 250 },
     wordings: [
       'charity gala dinner',
       'black tie optional evening event',

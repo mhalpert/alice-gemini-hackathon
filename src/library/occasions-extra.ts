@@ -620,7 +620,7 @@ export const EXTRA_OCCASIONS: LibraryOccasion[] = [
   {
     key: 'black-tie-wedding',
     occasion: 'full-length formal black-tie attire for an evening wedding',
-    budget: { men: 295, women: 285 },
+    budget: { men: 700, women: 285 },
     wordings: [
       'strict black tie wedding invite',
       'tuxedo or floor length gown wedding look',
@@ -631,7 +631,7 @@ export const EXTRA_OCCASIONS: LibraryOccasion[] = [
   {
     key: 'opera-or-ballet-night',
     occasion: 'dramatic cultured eveningwear for the opera or ballet',
-    budget: { men: 260, women: 255 },
+    budget: { men: 500, women: 255 },
     wordings: [
       'going to the opera at Lincoln Center',
       'dressy night at the ballet',
@@ -642,7 +642,7 @@ export const EXTRA_OCCASIONS: LibraryOccasion[] = [
   {
     key: 'formal-charity-dinner',
     occasion: 'elegant eveningwear for a formal charity fundraising dinner',
-    budget: { men: 270, women: 265 },
+    budget: { men: 600, women: 265 },
     wordings: [
       'charity benefit dinner next month',
       'formal fundraising dinner outfit',
@@ -653,7 +653,7 @@ export const EXTRA_OCCASIONS: LibraryOccasion[] = [
   {
     key: 'awards-ceremony',
     occasion: 'red-carpet inspired statement formalwear for an awards ceremony',
-    budget: { men: 280, women: 290 },
+    budget: { men: 500, women: 290 },
     wordings: [
       'industry awards show night',
       'red carpet vibe formal outfit',

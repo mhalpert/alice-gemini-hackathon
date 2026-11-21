@@ -2,12 +2,13 @@
 
 // Colour a shopper might say -> title words that count as that colour.
 export const COLOUR_WORDS: Record<string, string[]> = {
-  black: ['black', 'onyx', 'jet', 'charcoal'],
+  black: ['black', 'onyx', 'jet'],
   white: ['white', 'ivory', 'cream', 'bone', 'off-white', 'ecru'],
   brown: ['brown', 'tan', 'cognac', 'chocolate', 'camel', 'taupe', 'mocha', 'espresso', 'chestnut', 'coffee', 'walnut', 'whiskey', 'saddle'],
   tan: ['tan', 'camel', 'cognac', 'sand', 'khaki', 'beige'],
   navy: ['navy', 'midnight'],
   blue: ['blue', 'navy', 'denim', 'indigo', 'cobalt', 'sky'],
+  charcoal: ['charcoal', 'graphite', 'slate'],
   grey: ['grey', 'gray', 'charcoal', 'heather', 'slate'],
   gray: ['grey', 'gray', 'charcoal', 'heather', 'slate'],
   green: ['green', 'olive', 'sage', 'khaki', 'forest', 'emerald'],
@@ -39,11 +40,28 @@ export function titleHas(title: string, words: string[]): boolean {
   return words.some((w) => new RegExp(`(^|[^a-z])${w.replace(/-/g, '\\-')}([^a-z]|$)`).test(t));
 }
 
-// First colour word found in a title, for keeping a look's colour story on a "cheaper" swap.
+const COLOUR_OF_ALIASES: Record<string, string[]> = {
+  navy: ['navy', 'midnight'],
+  grey: ['grey', 'gray'],
+};
+
+// First colour word found in a title (preferring the colour suffix after " - " or " | "),
+// for keeping a look's colour story on a "cheaper" swap or matching a suit's jacket and trousers.
 export function colourOf(title: string): string | null {
+  const find = (text: string): string | null => {
+    for (const [word, matches] of Object.entries(COLOUR_WORDS)) {
+      const check = COLOUR_OF_ALIASES[word] ?? [word, ...matches.slice(0, 1)];
+      if (titleHas(text, check)) return word === 'gray' ? 'grey' : word;
+    }
+    return null;
+  };
   const t = (title ?? '').toLowerCase();
-  for (const [word, matches] of Object.entries(COLOUR_WORDS)) if (titleHas(t, [word, ...matches.slice(0, 1)])) return word;
-  return null;
+  const parts = t.split(/\s+[-|]\s+/);
+  if (parts.length > 1) {
+    const fromSuffix = find(parts[parts.length - 1]);
+    if (fromSuffix) return fromSuffix;
+  }
+  return find(t);
 }
 
 // Product types by slot: [canonical word, other title words that mean it].
@@ -130,10 +148,11 @@ export function fixNameColours(name: string, titles: string[]): string {
 // Hard dress-code filters that a model must not be trusted with.
 const BRIDAL = /\b(bride|bridal|bachelorette|wedding dress|veil|just married)\b/i;
 const WHITES = ['white', 'ivory', 'off-white', 'cream', 'ecru', 'bone'];
-const FORMAL_TIE_OCCASION = /black tie|gala|formal|tux|interview|funeral|memorial|opera|award|charity dinner/i;
+const FORMAL_TIE_OCCASION = /black tie|white tie|gala|formal|tux|interview|funeral|memorial|opera|award|charity (dinner|ball)/i;
 const TIE_TITLE = /\b(tie|necktie)\b/i;
 const NOT_A_TIE = /tie[- ]?(dye|front|waist|up)/i;
-const NOVELTY_TIE = /\b(knicks|nba|nfl|mlb|nhl|team|logo|graphic|printed|print|novelty|cartoon|character|paisley|floral|pattern(ed)?|stripe[sd]?|polka|dots?)\b/i;
+const NOVELTY_TIE_TITLE = /\b(knicks|nba|nfl|mlb|nhl|team|logo|graphic|printed|print|novelty|cartoon|character|paisley|floral|pattern(ed)?|stripe[sd]?|polka|dots?)\b/i;
+const NOVELTY_TIE_DESC = /\b(knicks|nba|nfl|mlb|nhl|team|logo|graphic|printed|print|novelty|cartoon|character|paisley|floral|pattern(ed)?|polka|dots?)\b/i;
 export function isWeddingGuest(occasion: string): boolean {
   const o = (occasion ?? '').toLowerCase();
   return /wedding|reception|rehearsal dinner/.test(o) && !/\b(my|our) (own )?wedding\b|i'?m getting married|\bmy bridal\b/.test(o);
@@ -151,7 +170,7 @@ export function breaksDressCode(item: { title: string; description?: string }, s
     FORMAL_TIE_OCCASION.test(brief.occasion ?? '') &&
     TIE_TITLE.test(title) &&
     !NOT_A_TIE.test(title) &&
-    (NOVELTY_TIE.test(title) || NOVELTY_TIE.test(desc))
+    (NOVELTY_TIE_TITLE.test(title) || NOVELTY_TIE_DESC.test(desc))
   ) {
     return true;
   }
