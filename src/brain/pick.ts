@@ -86,6 +86,7 @@ function resolve(raw: any, slots: SlotCandidates[]): { pieces: Piece[]; bad: str
 async function pickWith(model: string, idea: PlanIdea, slots: SlotCandidates[], brief: Brief, others: PlanIdea[], ownPiece: string | undefined, timeoutMs: number, signal: AbortSignal): Promise<Picked> {
   const thinking = ((model === MODELS.stylist() ? process.env.ALICE_PICK_THINKING : undefined) || 'low').toLowerCase() as 'low';
   const reply = await generateJson<any>({
+    job: 'brain_pick',
     model, system: SYSTEM, user: userPrompt(idea, slots, brief, others, ownPiece), schema: SCHEMA,
     temperature: 0.7, thinkingLevel: thinking, timeoutMs, signal,
   });

@@ -1,5 +1,6 @@
 // Small Gemini REST client for the stylist brain: one JSON-in, JSON-out call with a timeout.
-// Plain fetch keeps the brain free of extra dependencies.
+// Plain fetch keeps the brain free of extra dependencies. Every call lands in the cost ledger.
+import { recordCost } from '../ledger.ts';
 
 const BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -17,6 +18,7 @@ export interface JsonCall {
   thinkingLevel?: 'low' | 'medium' | 'high';
   timeoutMs?: number;
   signal?: AbortSignal;
+  job?: string;                 // cost ledger label, e.g. brain_plan
 }
 
 export interface JsonReply<T> { data: T; model: string; ms: number; tokens: { in: number; out: number } }
@@ -71,10 +73,13 @@ export async function generateJson<T>(call: JsonCall): Promise<JsonReply<T>> {
   } catch {
     throw new GeminiError(`${call.model}: reply was not JSON`, 200);
   }
+  const tokens = { in: body?.usageMetadata?.promptTokenCount ?? 0, out: (body?.usageMetadata?.candidatesTokenCount ?? 0) + (body?.usageMetadata?.thoughtsTokenCount ?? 0) };
+  const ms = Math.round(performance.now() - started);
+  recordCost({ model: call.model, job: call.job ?? 'brain', input_tokens: tokens.in, output_tokens: tokens.out, ms }).catch(() => {});
   return {
     data,
     model: call.model,
-    ms: Math.round(performance.now() - started),
-    tokens: { in: body?.usageMetadata?.promptTokenCount ?? 0, out: (body?.usageMetadata?.candidatesTokenCount ?? 0) + (body?.usageMetadata?.thoughtsTokenCount ?? 0) },
+    ms,
+    tokens,
   };
 }

@@ -4,6 +4,7 @@
 // says so plainly, so Alice never pitches something that is not in the look.
 import type { Brief, Gender, Item, Outfit, Piece, SearchResult } from '../types.ts';
 import { scoreItem, NEVER } from './build.ts';
+import { breaksDressCode } from './words.ts';
 import { pieceCeiling, type Slot } from './plan.ts';
 import { generateJson, MODELS } from './gemini.ts';
 import { COLOUR_WORDS, TYPES, wantedColour, titleHas, colourOf, typeIn, SLOT_NOUN, type TypeMatch } from './words.ts';
@@ -90,7 +91,8 @@ export async function swapLive(outfit: Outfit, slot: string, request: string, br
     (!ask.colour || titleHas(i.title, ask.colour.matches)) &&
     (!ask.typeAsked || !ask.type || titleHas(i.title, ask.type.matches)) &&
     (!ask.cheaper || i.price < current.item.price) &&
-    inSlot(i.title, slot);
+    inSlot(i.title, slot) &&
+    !breaksDressCode(i, slot, brief);
 
   const tried: string[] = [];
   let pick: Item | null = null;
@@ -151,6 +153,7 @@ async function rewriteLook(look: Outfit, old: Piece, now: Piece, brief: Brief) {
   const pieces = look.pieces.map((p) => `- ${p.slot}: ${p.item.title} ($${p.item.price}, ${p.item.store})`).join('\n');
   const reply = await generateJson<{ why: string; name_still_fits: boolean; name: string; difference: string; story: string }>({
     model: MODELS.fast(),
+    job: 'brain_swap',
     system: 'You are Alice, a New York personal stylist. A client just swapped one piece of an outfit. Write in plain, warm, specific language. Use only the product title words given; never invent materials or colours.',
     user: [
       `Occasion: ${brief.occasion}. Budget $${brief.budget_usd}.`,

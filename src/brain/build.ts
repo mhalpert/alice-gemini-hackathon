@@ -8,6 +8,7 @@ import { planOutfits, pieceCeiling, type PlanIdea, type PlanSlot, type Slot } fr
 import { stylistPick, CANDIDATES_SHOWN, type SlotCandidates } from './pick.ts';
 import { gateOutfit, prefetchThumbs, type GateResult } from './gate.ts';
 import { calllog } from '../calllog.ts';
+import { breaksDressCode, fixNameColours } from './words.ts';
 
 const SHOWN = 3;
 const CANDIDATES_PER_SLOT = 12;
@@ -196,7 +197,7 @@ export async function buildLive(brief: Brief, opts: LiveBuildOptions = {}): Prom
     if (s.own) return Promise.resolve([] as Item[]);
     if (!searches.has(s.query)) {
       searches.set(s.query, searchMixed(s.query, brief.gender, { limit: CANDIDATES_PER_SLOT * 2, maxPrice: ceiling })
-        .then((r) => r.items.filter((i) => usable(i, brief, ceiling)))
+        .then((r) => r.items.filter((i) => usable(i, brief, ceiling) && !breaksDressCode(i, s.slot, brief)))
         .catch((err) => { problems.push(`search "${s.query}" failed: ${(err as Error).message}`); return [] as Item[]; }));
     }
     return searches.get(s.query)!.then((items) => {
@@ -251,6 +252,8 @@ export async function buildLive(brief: Brief, opts: LiveBuildOptions = {}): Prom
     }
     pieces = fitBudget(name, pieces, ranked, brief, taken, problems);
     if (!complete(pieces)) { problems.push(`${name}: incomplete, skipped`); return; }
+    const fixed = fixNameColours(name, pieces.map((p) => p.item.title));
+    if (fixed !== name) { problems.push(`renamed "${name}" to "${fixed}": no piece has that colour`); name = fixed; }
 
     const outfit: Outfit = { name, difference, story: story || storyFor(idea, pieces), pieces: ordered(pieces), total: total(pieces) };
     const gate = await gateOutfit(outfit, brief);

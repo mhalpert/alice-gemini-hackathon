@@ -3,6 +3,7 @@
 // and how cohesive is it (0-4). It ranks well but rarely rejects, so it orders looks more than
 // it filters them. It never throws: on any failure the look passes with a note.
 import type { Brief, Outfit } from '../types.ts';
+import { recordCost } from '../ledger.ts';
 
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/decisions';
 export const PASS_FITS = 0.5;
@@ -69,6 +70,7 @@ export async function gateOutfit(outfit: Outfit, brief: Brief): Promise<GateResu
     });
     const body = await res.json().catch(() => ({})) as any;
     if (!res.ok) throw new Error(`${res.status}: ${body?.error?.message ?? 'decisions failed'}`.slice(0, 200));
+    recordCost({ model: process.env.ALICE_MODEL_GATE || 'gemini-decision-1', job: 'brain_gate', input_tokens: body?.usage?.input_tokens ?? body?.usageMetadata?.promptTokenCount ?? 0, output_tokens: 0, ms: ms() }).catch(() => {});
     const fits = Number(body?.answers?.fits?.noul ?? 0.5);
     const cohesion = Number(body?.answers?.cohesion?.score ?? 2);
     return { fits, cohesion, pass: fits >= PASS_FITS && cohesion >= PASS_COHESION, score: fits * (cohesion / 4), ms: ms() };
