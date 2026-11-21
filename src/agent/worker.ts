@@ -663,6 +663,12 @@ export default defineAgent({
       onSlowToolEnd: (ev) => toolFiller.onToolEnd(ev.callId),
       onToolResult: (ev) => resultNudger.onToolResult(ev),
       getSnapshot: () => vision?.latest() ?? null,
+      getLatestFrameJpeg: () => {
+        if (callState.get().camera !== 'on') return null;
+        const snap = vision?.latest();
+        if (!snap?.jpeg || snap.jpeg.byteLength === 0) return null;
+        return snap.jpeg;
+      },
     });
 
     const agent = new voice.Agent({
