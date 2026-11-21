@@ -185,7 +185,7 @@ async function loadPieceForTryOn(piece: Piece): Promise<Buffer | null> {
   }
 }
 
-function buildTryOnPrompt(hasShoes: boolean): string {
+function buildTryOnPrompt(hasShoes: boolean, hasBottom: boolean): string {
   const lines = [
     'Generate a single photorealistic full-body studio try-on photograph of the shopper from Image 0 dressed in ONLY the listed items.',
     'The product images are cut-outs of single items (some may still show part of a model). Use each product image ONLY for the specific item named in its label.',
@@ -193,8 +193,11 @@ function buildTryOnPrompt(hasShoes: boolean): string {
     "Keep the shopper's face, hair, skin tone, and build from Image 0 exactly; do not slim or change proportions.",
     'The label text wins over the product photo for sleeve length, fit, and length.',
     'Whole body head to toe, shoes fully in frame, standing facing the camera, on a clean white studio set with soft light, portrait 3:4.',
-    'Dress the person in ONLY the listed items. Do not invent or add unlisted garments or accessories.',
+    'Dress the person in ONLY the listed items. Do not add belts, bags, jewellery, hats, or any item that is not listed. If a product image shows other garments or props, ignore them.',
   ];
+  if (!hasBottom) {
+    lines.push('If the outfit has no bottom piece, keep the bottoms from Image 0 (the shopper photo).');
+  }
   if (!hasShoes) {
     lines.push('Wear plain white minimalist sneakers.');
   }
@@ -228,14 +231,19 @@ export async function renderTryOn(
   let imageNumber = 1;
   let loadedPieces = 0;
   let hasShoes = false;
+  let hasBottom = false;
 
   for (let i = 0; i < sortedPieces.length; i++) {
     const piece = sortedPieces[i];
     const buf = pieceBufs[i];
     if (!buf) continue;
     loadedPieces += 1;
-    if (piece.slot.trim().toLowerCase() === 'shoes') {
+    const slotKey = piece.slot.trim().toLowerCase();
+    if (slotKey === 'shoes') {
       hasShoes = true;
+    }
+    if (slotKey === 'bottom' || slotKey === 'dress' || slotKey === 'suit') {
+      hasBottom = true;
     }
     const desc = stripHtml(piece.item.description, 220);
     const label = desc
@@ -250,7 +258,7 @@ export async function renderTryOn(
     throw new Error('no product images could be loaded for try-on');
   }
 
-  parts.push({ text: buildTryOnPrompt(hasShoes) });
+  parts.push({ text: buildTryOnPrompt(hasShoes, hasBottom) });
 
   const generated = await generateImageWithRetry(parts, 'tryon');
   const outBuf =

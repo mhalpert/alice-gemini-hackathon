@@ -13,6 +13,7 @@ import {
   decideCrop,
   newTryonId,
   parsePickReply,
+  resolvePick,
   shotFileName,
   sortPiecesForTryOn,
   stripHtml,
@@ -103,24 +104,30 @@ describe('collectImageUrls and file naming', () => {
   });
 });
 
-describe('parsePickReply', () => {
-  it('parses a plain JSON object with chin_y', () => {
-    const res = parsePickReply('{"index":2,"has_person":true,"box_2d":[180,200,900,800],"chin_y":220}');
+describe('parsePickReply and resolvePick', () => {
+  it('parses a plain JSON object with chin_y, product_only, and back_view', () => {
+    const res = parsePickReply(
+      '{"index":2,"has_person":true,"box_2d":[180,200,900,800],"chin_y":220,"product_only":[0,3],"back_view":[1]}',
+    );
     assert.deepEqual(res, {
       index: 2,
       has_person: true,
       box_2d: [180, 200, 900, 800],
       chin_y: 220,
+      product_only: [0, 3],
+      back_view: [1],
     });
   });
 
-  it('parses a one-element JSON array without chin_y', () => {
+  it('parses a one-element JSON array without chin_y, product_only, or back_view', () => {
     const res = parsePickReply('[{"index":0,"has_person":false,"box_2d":[689,95,929,901]}]');
     assert.deepEqual(res, {
       index: 0,
       has_person: false,
       box_2d: [689, 95, 929, 901],
       chin_y: null,
+      product_only: [],
+      back_view: [],
     });
   });
 
@@ -131,6 +138,8 @@ describe('parsePickReply', () => {
       has_person: true,
       box_2d: null,
       chin_y: null,
+      product_only: [],
+      back_view: [],
     });
   });
 
@@ -141,6 +150,84 @@ describe('parsePickReply', () => {
     assert.equal(parsePickReply('{"has_person":false}'), null);
     assert.equal(parsePickReply(''), null);
     assert.equal(parsePickReply(undefined), null);
+  });
+
+  it('resolvePick prefers Image 0 whenever Image 0 is product-only', () => {
+    const chosen = resolvePick(
+      {
+        index: 3,
+        has_person: false,
+        box_2d: [100, 100, 500, 500],
+        chin_y: null,
+        product_only: [0, 3],
+        back_view: [],
+      },
+      5,
+    );
+    assert.deepEqual(chosen, { index: 0, has_person: false, box_2d: null, chin_y: null });
+
+    const chosenZeroDirect = resolvePick(
+      {
+        index: 0,
+        has_person: false,
+        box_2d: [200, 200, 600, 600],
+        chin_y: null,
+        product_only: [],
+        back_view: [],
+      },
+      5,
+    );
+    assert.deepEqual(chosenZeroDirect, { index: 0, has_person: false, box_2d: null, chin_y: null });
+  });
+
+  it('resolvePick overrides a person pick when a non-back product_only index is reported', () => {
+    const chosen = resolvePick(
+      {
+        index: 1,
+        has_person: true,
+        box_2d: [200, 100, 900, 900],
+        chin_y: 180,
+        product_only: [2, 4],
+        back_view: [2],
+      },
+      5,
+    );
+    assert.deepEqual(chosen, { index: 4, has_person: false, box_2d: null, chin_y: null });
+  });
+
+  it('resolvePick rejects a back_view on-model pick and falls back to Image 0', () => {
+    const chosen = resolvePick(
+      {
+        index: 2,
+        has_person: true,
+        box_2d: [150, 100, 900, 900],
+        chin_y: 120,
+        product_only: [],
+        back_view: [2],
+      },
+      4,
+    );
+    assert.deepEqual(chosen, { index: 0, has_person: true, box_2d: null, chin_y: null });
+  });
+
+  it('resolvePick keeps on-model pick with box and chin when non-back and no product_only exists', () => {
+    const chosen = resolvePick(
+      {
+        index: 0,
+        has_person: true,
+        box_2d: [220, 120, 880, 880],
+        chin_y: 190,
+        product_only: [],
+        back_view: [2],
+      },
+      4,
+    );
+    assert.deepEqual(chosen, {
+      index: 0,
+      has_person: true,
+      box_2d: [220, 120, 880, 880],
+      chin_y: 190,
+    });
   });
 });
 
@@ -155,7 +242,7 @@ describe('decideCrop', () => {
     expected: { left: number; top: number; width: number; height: number } | null;
   }> = [
     {
-      name: 'no person + big box (>= 80% area) -> no crop',
+      name: 'product-only (no person) + big box -> never cropped',
       w: 1000,
       h: 1000,
       hasPerson: false,
@@ -163,12 +250,12 @@ describe('decideCrop', () => {
       expected: null,
     },
     {
-      name: 'no person + tight box (< 80% area) -> crop with 3% pad',
+      name: 'product-only (no person) + tight box -> never cropped (box ignored)',
       w: 1000,
       h: 1000,
       hasPerson: false,
       box: [200, 200, 700, 700],
-      expected: { left: 170, top: 170, width: 560, height: 560 },
+      expected: null,
     },
     {
       name: 'person + box near edges (no chin_y) -> crop with 3% pad clamped to image bounds',
@@ -197,6 +284,33 @@ describe('decideCrop', () => {
       expected: { left: 70, top: 300, width: 860, height: 630 },
     },
     {
+      name: 'person + detail box (< 25% area for top) -> fallback below chin, full width to bottom',
+      w: 1000,
+      h: 1000,
+      hasPerson: true,
+      box: [250, 250, 650, 650], // 16% area < 25%
+      opts: { chinY: 180, slot: 'top' },
+      expected: { left: 0, top: 195, width: 1000, height: 805 },
+    },
+    {
+      name: 'person + detail box (< 6% area for shoes) -> fallback lower 55%',
+      w: 1000,
+      h: 1000,
+      hasPerson: true,
+      box: [700, 400, 900, 600], // 4% area < 6%
+      opts: { slot: 'shoes' },
+      expected: { left: 0, top: 450, width: 1000, height: 550 },
+    },
+    {
+      name: 'person + usable small box (12% area >= 6% for shoes) -> uses padded box',
+      w: 1000,
+      h: 1000,
+      hasPerson: true,
+      box: [600, 300, 900, 700], // 12% area >= 6%
+      opts: { slot: 'shoes' },
+      expected: { left: 270, top: 570, width: 460, height: 360 },
+    },
+    {
       name: 'person + no box -> crop top 20% off',
       w: 1000,
       h: 1000,
@@ -205,7 +319,7 @@ describe('decideCrop', () => {
       expected: { left: 0, top: 200, width: 1000, height: 800 },
     },
     {
-      name: 'person + no box + shoes slot -> crop top 45% off',
+      name: 'person + no box + shoes slot -> crop top 45% off (lower 55%)',
       w: 1000,
       h: 1000,
       hasPerson: true,
@@ -214,7 +328,7 @@ describe('decideCrop', () => {
       expected: { left: 0, top: 450, width: 1000, height: 550 },
     },
     {
-      name: 'person + tiny box + bottom slot -> crop top 45% off',
+      name: 'person + tiny box + bottom slot -> crop top 45% off (lower 55%)',
       w: 1000,
       h: 1000,
       hasPerson: true,
@@ -268,10 +382,10 @@ describe('whitenBackground (raw RGB Uint8Array, no sharp)', () => {
     return buf;
   }
 
-  it('turns a light grey border pure white while leaving a dark centre square untouched', () => {
+  it('normalises a pale grey 238 border to 255 and keeps a white square at 255', () => {
     const w = 32;
     const h = 32;
-    const rgb = makeSyntheticRgb(w, h, [220, 222, 225], [30, 40, 50]);
+    const rgb = makeSyntheticRgb(w, h, [238, 238, 238], [255, 255, 255]);
 
     const ran = whitenBackground(rgb, w, h);
     assert.equal(ran, true);
@@ -280,31 +394,48 @@ describe('whitenBackground (raw RGB Uint8Array, no sharp)', () => {
     const bgOff = (5 * w + 5) * 3;
     assert.deepEqual([rgb[bgOff], rgb[bgOff + 1], rgb[bgOff + 2]], [255, 255, 255]);
     const fgOff = (16 * w + 16) * 3;
-    assert.deepEqual([rgb[fgOff], rgb[fgOff + 1], rgb[fgOff + 2]], [30, 40, 50]);
+    assert.deepEqual([rgb[fgOff], rgb[fgOff + 1], rgb[fgOff + 2]], [255, 255, 255]);
   });
 
-  it('leaves a white square on a near-white border completely untouched', () => {
+  it('normalises a pale grey border while keeping a dark product within 15% of original', () => {
     const w = 32;
     const h = 32;
-    const rgb = makeSyntheticRgb(w, h, [242, 242, 244], [250, 249, 248]);
-    const before = new Uint8Array(rgb);
-
-    const ran = whitenBackground(rgb, w, h);
-    assert.equal(ran, false);
-    assert.deepEqual(rgb, before);
-  });
-
-  it('keeps a white square interior untouched on a mid-grey border', () => {
-    const w = 32;
-    const h = 32;
-    const rgb = makeSyntheticRgb(w, h, [200, 200, 200], [248, 246, 244]);
+    const origFg: [number, number, number] = [40, 60, 80];
+    const rgb = makeSyntheticRgb(w, h, [230, 232, 236], origFg);
 
     const ran = whitenBackground(rgb, w, h);
     assert.equal(ran, true);
 
     assert.deepEqual([rgb[0], rgb[1], rgb[2]], [255, 255, 255]);
     const fgOff = (16 * w + 16) * 3;
-    assert.deepEqual([rgb[fgOff], rgb[fgOff + 1], rgb[fgOff + 2]], [248, 246, 244]);
+    for (let c = 0; c < 3; c++) {
+      const diff = Math.abs(rgb[fgOff + c] - origFg[c]);
+      assert.ok(
+        diff <= origFg[c] * 0.15 + 1,
+        `channel ${c} changed from ${origFg[c]} to ${rgb[fgOff + c]} (> 15%)`,
+      );
+    }
+  });
+
+  it('flood-fills a mid-grey border and lifts near-background shades while keeping dark centre dark', () => {
+    const w = 32;
+    const h = 32;
+    const rgb = makeSyntheticRgb(w, h, [200, 200, 200], [30, 40, 50]);
+    // Add a near-background halo pixel just outside tolerance 14 (218 - 200 = 18 > 14)
+    const haloOff = (9 * w + 16) * 3;
+    rgb[haloOff] = 218;
+    rgb[haloOff + 1] = 218;
+    rgb[haloOff + 2] = 218;
+
+    const ran = whitenBackground(rgb, w, h);
+    assert.equal(ran, true);
+
+    assert.deepEqual([rgb[0], rgb[1], rgb[2]], [255, 255, 255]);
+    // Near-background halo lifted to pure white by post-fill gain
+    assert.deepEqual([rgb[haloOff], rgb[haloOff + 1], rgb[haloOff + 2]], [255, 255, 255]);
+    // Dark centre remains dark
+    const fgOff = (16 * w + 16) * 3;
+    assert.ok(rgb[fgOff] < 60 && rgb[fgOff + 1] < 70 && rgb[fgOff + 2] < 80);
   });
 
   it('skips dark-border images without modifying pixels', () => {

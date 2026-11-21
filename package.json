@@ -20,7 +20,9 @@
     "start:lan": "HOST=0.0.0.0 PORT=3443 ALICE_TLS_CERT=data/certs/alice.crt ALICE_TLS_KEY=data/certs/alice.key node server.ts",
     "drill": "node scripts/store-drill.ts",
     "warm": "node scripts/store-warm.ts",
-    "bag:matrix": "node scripts/bag-matrix.ts"
+    "bag:matrix": "node scripts/bag-matrix.ts",
+    "cost": "node scripts/cost.ts",
+    "media:check": "node scripts/media-check.ts"
   },
   "dependencies": {
     "@google/genai": "3.6.1",
