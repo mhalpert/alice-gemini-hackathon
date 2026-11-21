@@ -66,7 +66,7 @@ function positiveEnvMs(name: string, fallback: number): number {
 export async function renderTryOnScene(
   studio: { path: string },
   outfit: Outfit,
-  opts: { setting: string; label?: string },
+  opts: { setting: string; label?: string; prewarm?: boolean },
 ): Promise<TryOnExtraRender | null> {
   const t0 = Date.now();
   const capMs = positiveEnvMs('ALICE_TRYON_SCENE_CAP_MS', DEFAULT_SCENE_CAP_MS);
@@ -74,6 +74,13 @@ export async function renderTryOnScene(
 
   try {
     if (!studio?.path) return null;
+
+    const limiter = getRenderLimiter();
+    const limiterStats = limiter.stats();
+    if (limiterStats.imagesTotal >= limiterStats.maxImagesTotal) {
+      await limiter.run('image', async () => null);
+    }
+
     const rawStudio = await fs.promises.readFile(studio.path);
     const studioBuf = await sharp(rawStudio)
       .rotate()
@@ -128,6 +135,7 @@ export async function renderTryOnScene(
       job: 'tryon-scene',
       images: 1,
       ms: genMs,
+      ...(opts?.prewarm ? { prewarm: true } : {}),
     });
 
     const rawScene = Buffer.from(part.inlineData.data, 'base64');

@@ -1,11 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { ledgerTotal } from '../src/ledger.ts';
+import { ledgerPath, ledgerTotal } from '../src/ledger.ts';
 import { stopMedia } from '../src/media/client.ts';
 import { warmMedia } from '../src/media/index.ts';
 import { REPO_ROOT } from '../src/media/pure.ts';
 import { search } from '../src/store/index.ts';
-import { tryOn, tryOnExtras } from '../src/tryon.ts';
+import { prewarmScene, tryOn, tryOnExtras } from '../src/tryon.ts';
 import type { Gender, Item, Outfit } from '../src/types.ts';
 
 if (!process.env.GOOGLE_API_KEY) {
@@ -75,7 +75,114 @@ async function pickFirst(query: string, gender: Gender): Promise<Item> {
   return found;
 }
 
+function readLedgerLines(): string[] {
+  try {
+    return fs
+      .readFileSync(ledgerPath(), 'utf8')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+async function runPrewarmCheck(): Promise<void> {
+  try {
+    console.log('Warming media child and loading one men’s look for --prewarm check...');
+    const [, menShirt, menChino, menLoafers] = await Promise.all([
+      warmMedia(),
+      pickFirst("men's oxford shirt", 'men'),
+      pickFirst("men's chino pants", 'men'),
+      pickFirst("men's leather loafers", 'men'),
+    ]);
+
+    const outfit: Outfit = {
+      number: 1,
+      name: 'Rooftop Classic',
+      difference: '',
+      story: '',
+      pieces: [
+        { slot: 'top', why: '', item: menShirt },
+        { slot: 'bottom', why: '', item: menChino },
+        { slot: 'shoes', why: '', item: menLoafers },
+      ],
+      total: menShirt.price + menChino.price + menLoafers.price,
+    };
+
+    const brief = {
+      occasion: "a friend's rooftop birthday",
+      where: 'New York',
+      when: 'Saturday evening',
+      weather: 'cool, clear',
+    };
+
+    const studio = await tryOn(null, outfit, { label: 'prewarm-check' });
+    console.log(
+      `Studio ready in ${(studio.ms / 1000).toFixed(2)}s -> ${path.relative(REPO_ROOT, studio.path)}`,
+    );
+
+    const ledgerCountBefore = readLedgerLines().length;
+
+    const tPrewarm = Date.now();
+    const prewarmRes = await prewarmScene({ path: studio.path }, outfit, brief);
+    const prewarmWallMs = Date.now() - tPrewarm;
+    console.log(
+      `prewarmScene finished in ${(prewarmWallMs / 1000).toFixed(2)}s: ${JSON.stringify(prewarmRes)}`,
+    );
+
+    let sceneOnRenderWallMs: number | null = null;
+    let sceneReused: boolean | undefined;
+    let videoOnRenderWallMs: number | null = null;
+
+    const tExtras = Date.now();
+    const extras = await tryOnExtras({ path: studio.path }, outfit, {
+      ...brief,
+      onRender: (ev) => {
+        const wall = Date.now() - tExtras;
+        if (ev.kind === 'scene') {
+          sceneOnRenderWallMs = wall;
+          sceneReused = ev.reused;
+        } else if (ev.kind === 'video') {
+          videoOnRenderWallMs = wall;
+        }
+        console.log(
+          `[extras-check --prewarm] onRender: kind=${ev.kind} ok=${ev.ok} reused=${Boolean(ev.reused)} wall=${wall}ms ev.ms=${ev.ms} url=${ev.url ?? 'null'}`,
+        );
+      },
+    });
+    const extrasWallMs = Date.now() - tExtras;
+    const mp4Info = extras.video?.path ? inspectMp4(extras.video.path) : null;
+
+    // Wait briefly so async ledger writes from child process flush
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const newLedgerLines = readLedgerLines().slice(ledgerCountBefore);
+
+    console.log('\n--- SCENE PREWARM CHECK RESULTS ---');
+    console.log(`setting: "${extras.setting}"`);
+    console.log(`prewarm: ${(prewarmWallMs / 1000).toFixed(2)} s (ok=${prewarmRes.ok})`);
+    console.log(
+      `tryOnExtras -> scene onRender: ${sceneOnRenderWallMs !== null ? `${(sceneOnRenderWallMs / 1000).toFixed(3)} s` : 'n/a'} (reused=${Boolean(sceneReused)})`,
+    );
+    console.log(
+      `video: ${videoOnRenderWallMs !== null ? `${(videoOnRenderWallMs / 1000).toFixed(2)} s` : 'FAILED'} (extras wall=${(extrasWallMs / 1000).toFixed(2)} s)${mp4Info ? ` [${mp4Info.durationS}s, ${mp4Info.width}x${mp4Info.height}, ${(mp4Info.sizeBytes / 1024 / 1024).toFixed(2)} MiB, audio=${mp4Info.hasAudio}]` : ''}`,
+    );
+    console.log(`still file path: ${extras.scene?.path ?? 'null'}`);
+    console.log(`ledger lines written (${newLedgerLines.length}):`);
+    for (const line of newLedgerLines) {
+      console.log(`  ${line}`);
+    }
+  } finally {
+    stopMedia();
+  }
+}
+
 async function main(): Promise<void> {
+  if (process.argv.includes('--prewarm')) {
+    await runPrewarmCheck();
+    return;
+  }
+
   const ledgerBefore = await ledgerTotal();
 
   try {
