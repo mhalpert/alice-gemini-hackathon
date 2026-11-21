@@ -18,6 +18,8 @@ export interface VadConfig {
   prefixPaddingMs: number | undefined;
 }
 
+export const DEFAULT_PURCHASE_MAX_USD = 150;
+
 export interface AgentConfig {
   googleApiKey: string | undefined;
   agentName: string;
@@ -33,6 +35,8 @@ export interface AgentConfig {
   noiseCancel: NoiseCancelMode;
   roomMode: RoomMode;
   vad: VadConfig;
+  purchase: boolean;
+  purchaseMaxUsd: number;
 }
 
 export interface ResolvedTavusConfig {
@@ -73,6 +77,19 @@ function parsePositiveIntEnv(raw: string | undefined, defaultValue: number): num
   if (!/^\d+$/.test(trimmed)) return defaultValue;
   const parsed = Number.parseInt(trimmed, 10);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : defaultValue;
+}
+
+function parsePositiveNumberEnv(raw: string | undefined, defaultValue: number): number {
+  if (raw === undefined || raw.trim() === '') return defaultValue;
+  const trimmed = raw.trim();
+  if (!/^\d+(?:\.\d+)?$/.test(trimmed)) return defaultValue;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultValue;
+}
+
+function parsePurchaseSwitchEnv(raw: string | undefined): boolean {
+  if (raw === undefined) return false;
+  return raw.trim().toLowerCase() === 'on';
 }
 
 function parseOptionalNonNegativeIntEnv(
@@ -223,6 +240,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AgentConfig {
     ),
   };
 
+  const purchase = parsePurchaseSwitchEnv(env.ALICE_PURCHASE);
+  const purchaseMaxUsd = parsePositiveNumberEnv(
+    env.ALICE_PURCHASE_MAX_USD,
+    DEFAULT_PURCHASE_MAX_USD,
+  );
+
   return {
     googleApiKey,
     agentName,
@@ -238,5 +261,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AgentConfig {
     noiseCancel,
     roomMode,
     vad,
+    purchase,
+    purchaseMaxUsd,
   };
 }

@@ -38,8 +38,9 @@ import { createExtraAnnouncer } from './extras.ts';
 import { createToolFiller } from './filler.ts';
 import { applyRealtimeSessionPatches, sendInterimToolNote } from './patches.ts';
 import { createToolResultNudger } from './nudge.ts';
+import { createOrderController } from './order.ts';
 import { createPageSender } from './page.ts';
-import { ALICE_SYSTEM_PROMPT, GREETING_INSTRUCTIONS } from './prompt.ts';
+import { GREETING_INSTRUCTIONS, buildSystemPrompt } from './prompt.ts';
 import { createSilenceCheckIn } from './silence.ts';
 import { createCallStateStore } from './state.ts';
 import {
@@ -147,6 +148,128 @@ export function attachCameraStatusWatcher(params: {
 
 export interface StoreRoomModuleLike {
   setCallRoom?: (room: string | null) => void;
+  endCall?: () => void | Promise<void>;
+}
+
+export async function endStoreCall(
+  roomName: string,
+  opts?: {
+    reason?: string;
+    clearReviewState?: () => void;
+    endCall?: () => void | Promise<void>;
+    loadStoreModule?: () => Promise<StoreRoomModuleLike | null>;
+    log?: (room: string, ev: string, data?: Record<string, unknown>) => void;
+  },
+): Promise<boolean> {
+  const logFn = opts?.log ?? calllog;
+
+  try {
+    opts?.clearReviewState?.();
+  } catch {
+    // Clearing local review state must never prevent store endCall or throw.
+  }
+
+  let endCallFn: (() => void | Promise<void>) | undefined;
+  if (opts && 'endCall' in opts) {
+    endCallFn = opts.endCall;
+  } else {
+    const loadStore =
+      opts?.loadStoreModule ??
+      (async () => {
+        const modPath = '../store/index.ts';
+        return (await import(modPath)) as StoreRoomModuleLike;
+      });
+    try {
+      const storeMod = await loadStore();
+      if (typeof storeMod?.endCall === 'function') {
+        endCallFn = storeMod.endCall;
+      }
+    } catch {
+      endCallFn = undefined;
+    }
+  }
+
+  if (typeof endCallFn !== 'function') {
+    logFn(roomName, 'store_end_call', {
+      ...(opts?.reason ? { reason: opts.reason } : {}),
+      called: false,
+    });
+    return false;
+  }
+
+  try {
+    await endCallFn();
+    logFn(roomName, 'store_end_call', {
+      ...(opts?.reason ? { reason: opts.reason } : {}),
+      called: true,
+      ok: true,
+    });
+    return true;
+  } catch (err) {
+    logFn(roomName, 'store_end_call', {
+      ...(opts?.reason ? { reason: opts.reason } : {}),
+      called: true,
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
+export interface EndCallRoomLike {
+  on(event: RoomEvent, listener: (...args: any[]) => void): unknown;
+  off(event: RoomEvent, listener: (...args: any[]) => void): unknown;
+}
+
+export interface EndCallSessionLike {
+  on(event: string, listener: (...args: any[]) => void): unknown;
+  off?(event: string, listener: (...args: any[]) => void): unknown;
+}
+
+export function attachEndCallCleanup(params: {
+  roomName: string;
+  room: EndCallRoomLike;
+  session: EndCallSessionLike;
+  getShopperIdentity: () => string | null;
+  isSessionStarted?: () => boolean;
+  clearReviewState?: () => void;
+  endCall?: () => void | Promise<void>;
+  loadStoreModule?: () => Promise<StoreRoomModuleLike | null>;
+  log?: (room: string, ev: string, data?: Record<string, unknown>) => void;
+}): {
+  trigger: (reason: string) => Promise<boolean>;
+  cleanup: () => void;
+} {
+  const trigger = (reason: string): Promise<boolean> =>
+    endStoreCall(params.roomName, {
+      reason,
+      clearReviewState: params.clearReviewState,
+      ...('endCall' in params ? { endCall: params.endCall } : {}),
+      ...(params.loadStoreModule ? { loadStoreModule: params.loadStoreModule } : {}),
+      log: params.log,
+    });
+
+  const onParticipantDisconnected = (participant: RemoteParticipant) => {
+    const shopperId = params.getShopperIdentity();
+    if (!shopperId || participant?.identity !== shopperId) return;
+    void trigger('participant_disconnected');
+  };
+
+  const onSessionClose = () => {
+    if (params.isSessionStarted && !params.isSessionStarted()) return;
+    void trigger('session_close');
+  };
+
+  params.room.on(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
+  params.session.on(voice.AgentSessionEventTypes.Close, onSessionClose);
+
+  return {
+    trigger,
+    cleanup: () => {
+      params.room.off(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
+      params.session.off?.(voice.AgentSessionEventTypes.Close, onSessionClose);
+    },
+  };
 }
 
 export async function bindStoreCallRoom(
@@ -482,12 +605,29 @@ export default defineAgent({
       log: calllog,
     });
 
+    const orderController = createOrderController({
+      room: roomName,
+      purchaseEnabled: config.purchase,
+      purchaseMaxUsd: config.purchaseMaxUsd,
+      page,
+      stateStore: callState,
+      log: calllog,
+      onToolStart: (ev) => silenceCheckIn.onToolStart(ev.callId),
+      onToolEnd: (ev) => silenceCheckIn.onToolEnd(ev.callId),
+      onToolResult: (ev) => resultNudger.onToolResult(ev),
+    });
+
+    const purchaseReady = orderController.purchaseReady;
+
     const tools = createAgentTools({
       room: roomName,
       page,
       state: callState,
       bitPicker,
       signal: toolAbort.signal,
+      purchaseEnabled: config.purchase,
+      purchaseMaxUsd: config.purchaseMaxUsd,
+      orderController,
       sendWorkingNote: (params) => sendInterimToolNote(activeRealtimeSession, params),
       onToolStart: (ev) => {
         silenceCheckIn.onToolStart(ev.callId);
@@ -505,7 +645,7 @@ export default defineAgent({
     });
 
     const agent = new voice.Agent({
-      instructions: ALICE_SYSTEM_PROMPT,
+      instructions: buildSystemPrompt({ purchaseEnabled: purchaseReady }),
       tools,
     });
 
@@ -599,6 +739,16 @@ export default defineAgent({
     let activeTavusAvatar: TavusAvatarHandle | null = null;
     let cleanupTavusWatcher: (() => void) | undefined;
 
+    const endCallCleanup = attachEndCallCleanup({
+      roomName,
+      room: ctx.room,
+      session,
+      getShopperIdentity: () => shopperIdentity,
+      isSessionStarted: () => sessionStarted,
+      clearReviewState: () => orderController.invalidateReview(),
+      log: calllog,
+    });
+
     session.on(voice.AgentSessionEventTypes.Close, (ev) => {
       if (!sessionStarted) {
         return;
@@ -620,6 +770,7 @@ export default defineAgent({
 
     let cleanupCameraWatcher: (() => void) | undefined;
     ctx.addShutdownCallback(async () => {
+      endCallCleanup.cleanup();
       toolAbort.abort();
       resultNudger.dispose();
       extraAnnouncer.dispose();

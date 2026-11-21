@@ -31,8 +31,13 @@ export interface PageSenderOptions {
   now?: () => number;
 }
 
+export interface PageSenderReply extends PageActionReply {
+  confirmed?: boolean;
+  order_id?: string;
+}
+
 export interface PageSender {
-  send<K extends PageActionName>(action: K, payload: PageActions[K]): Promise<PageActionReply>;
+  send<K extends PageActionName>(action: K, payload: PageActions[K]): Promise<PageSenderReply>;
 }
 
 export interface TrimPayloadResult {
@@ -177,7 +182,7 @@ export function trimPayloadToLimit(
   return { json, bytes, originalBytes, trimmed: true };
 }
 
-function parsePageReply(raw: string): PageActionReply {
+function parsePageReply(raw: string): PageSenderReply {
   if (typeof raw !== 'string') {
     return { ok: false, error: 'non-string page reply' };
   }
@@ -186,11 +191,24 @@ function parsePageReply(raw: string): PageActionReply {
     return { ok: false, error: 'empty page reply' };
   }
   try {
-    const parsed = JSON.parse(trimmed) as { ok?: unknown; error?: unknown };
+    const parsed = JSON.parse(trimmed) as {
+      ok?: unknown;
+      error?: unknown;
+      confirmed?: unknown;
+      order_id?: unknown;
+    };
     if (parsed && typeof parsed === 'object' && typeof parsed.ok === 'boolean') {
-      return parsed.error !== undefined
-        ? { ok: parsed.ok, error: String(parsed.error) }
-        : { ok: parsed.ok };
+      const reply: PageSenderReply = { ok: parsed.ok };
+      if (parsed.error !== undefined) {
+        reply.error = String(parsed.error);
+      }
+      if (typeof parsed.confirmed === 'boolean') {
+        reply.confirmed = parsed.confirmed;
+      }
+      if (typeof parsed.order_id === 'string') {
+        reply.order_id = parsed.order_id;
+      }
+      return reply;
     }
     return { ok: false, error: 'malformed page reply' };
   } catch {
@@ -210,7 +228,7 @@ export function createPageSender(options: PageSenderOptions): PageSender {
     async send<K extends PageActionName>(
       action: K,
       payload: PageActions[K],
-    ): Promise<PageActionReply> {
+    ): Promise<PageSenderReply> {
       const started = nowFn();
       const roomName = getRoomName();
 
