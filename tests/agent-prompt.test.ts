@@ -31,6 +31,7 @@ const BANNED_CORPORATE_PHRASES: readonly string[] = [
 ];
 
 const REQUIRED_TOOLS = [
+  'show_rack',
   'set_department',
   'build_outfits',
   'pick_outfit',
@@ -237,6 +238,16 @@ test('ALICE_SYSTEM_PROMPT encodes polish6 voice: NY stylist attitude, slang limi
   // 5. Bag what can be bagged immediately without holding back over one missing/unavailable piece.
   assert.match(ALICE_SYSTEM_PROMPT, /call add_to_bag straight away with every known size/i);
   assert.match(ALICE_SYSTEM_PROMPT, /never hold back the whole bag/i);
+});
+
+test('ALICE_SYSTEM_PROMPT encodes opening rack flow: one-sentence read, show_rack, no new arrivals claim, and occasion vs item fork', () => {
+  assert.match(ALICE_SYSTEM_PROMPT, /one sentence.*what they are wearing/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /in the same turn call show_rack/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /pulled a few things off the racks that go with what they have on/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never claim new arrivals or just in/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /dressing for an occasion or looking for one specific item\?/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /camera off or cannot see them: skip the rack/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /specific item: use search_products/i);
 });
 
 test('banned corporate phrases never appear in prompt, greeting, filler bits, silence check-ins, nudges, or tool result texts', () => {

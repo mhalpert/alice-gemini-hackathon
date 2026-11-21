@@ -259,10 +259,11 @@ async function flushMicrotasks(): Promise<void> {
   }
 }
 
-test('createAgentTools builds 11 anonymous tools accepted by LiveKit ToolContext', () => {
+test('createAgentTools builds 12 anonymous tools accepted by LiveKit ToolContext', () => {
   const tools = createAgentTools({ room: 'test-room', log: () => {} });
   const expectedNames = [
     'remember',
+    'show_rack',
     'set_department',
     'build_outfits',
     'pick_outfit',

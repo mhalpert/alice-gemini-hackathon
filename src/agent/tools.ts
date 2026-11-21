@@ -73,6 +73,8 @@ export const MAX_BUDGET_USD = 10_000;
 export const DEFAULT_TRYON_WAIT_MS = 45_000;
 export const DEFAULT_HIGHLIGHT_WALK_MS = 2_200;
 export const DEFAULT_WEATHER_TIMEOUT_MS = 2_500;
+export const DEFAULT_RACK_QUERY_TIMEOUT_MS = 3_500;
+export const MAX_RACK_ITEMS = 12;
 
 export const SLOW_TOOL_NOTES: Readonly<Record<string, string>> = {
   build_outfits: 'Pulling three killer outfits together now.',
@@ -104,6 +106,12 @@ export interface TimerLike {
   unref?: () => unknown;
 }
 
+export type SearchByPhotoFn = (
+  jpeg: Uint8Array,
+  gender: Gender,
+  opts?: SearchOpts,
+) => Promise<SearchResult>;
+
 export interface StoreModuleLike {
   searchMixed?: (
     query: string,
@@ -115,6 +123,7 @@ export interface StoreModuleLike {
     gender: Gender,
     opts?: SearchOpts,
   ) => Promise<SearchResult>;
+  searchByPhoto?: SearchByPhotoFn;
   addToBag?: (
     outfit: Outfit,
     sizes: Record<string, string>,
@@ -122,6 +131,16 @@ export interface StoreModuleLike {
   ) => Promise<BagOut>;
   productImages?: (item: Item) => Promise<string[]>;
   setCallRoom?: (room: string | null) => void;
+}
+
+/**
+ * Guarded dynamic lookup of the optional `searchByPhoto` export on the store module.
+ * Returns undefined when the store layer does not export it.
+ */
+export function resolveSearchByPhoto(mod: unknown): SearchByPhotoFn | undefined {
+  if (!mod || typeof mod !== 'object') return undefined;
+  const candidate = (mod as StoreModuleLike).searchByPhoto;
+  return typeof candidate === 'function' ? candidate : undefined;
 }
 
 export interface WeatherResultLike {
@@ -246,6 +265,7 @@ export interface ToolDeps {
     gender: Gender,
     opts?: SearchOpts,
   ) => Promise<SearchResult>;
+  searchByPhoto?: SearchByPhotoFn | null;
   addToBag?: (
     outfit: Outfit,
     sizes: Record<string, string>,
@@ -269,6 +289,7 @@ export interface ToolRuntimeOptions {
   tryOnTimeoutMs?: number;
   walkIntervalMs?: number;
   weatherTimeoutMs?: number;
+  rackTimeoutMs?: number;
   workingNoteDelayMs?: number;
   purchaseEnabled?: boolean;
   purchaseMaxUsd?: number;
@@ -283,6 +304,7 @@ export interface ToolRuntimeOptions {
   onToolResult?: (params: { name: string; callId: string; text: string }) => void;
   getShopperTurns?: () => readonly string[];
   getSnapshot?: () => CameraSnapshot | null;
+  getLatestFrameJpeg?: () => Uint8Array | null;
   page?: PageSender;
   state?: CallStateStore;
   deps?: ToolDeps;
@@ -577,6 +599,7 @@ export interface ToolWrapperContext {
   wrap<TArgs extends Record<string, unknown>>(
     name: string,
     handler: (args: TArgs, opts: { toolCallId: string }) => Promise<string> | string,
+    wrapOpts?: { dedupe?: boolean },
   ): (args: TArgs, opts?: { toolCallId?: string }) => Promise<string>;
   invalidate(exceptToolName?: string): void;
 }
@@ -611,22 +634,26 @@ export function createToolWrapper(options: ToolRuntimeOptions): ToolWrapperConte
     wrap<TArgs extends Record<string, unknown>>(
       name: string,
       handler: (args: TArgs, opts: { toolCallId: string }) => Promise<string> | string,
+      wrapOpts?: { dedupe?: boolean },
     ) {
+      const useDedupe = wrapOpts?.dedupe !== false;
       return (args: TArgs, opts?: { toolCallId?: string }): Promise<string> => {
         const callId = opts?.toolCallId ?? '';
         const startedAt = nowFn();
         pruneExpired(startedAt);
 
-        const dedupKey = `${name}:${stableStringify(args ?? {})}`;
-        const existing = recentCalls.get(dedupKey);
-        if (existing && startedAt - existing.startedAt < windowMs) {
-          logFn(options.room, 'tool_duplicate', {
-            name,
-            args,
-            call_id: callId,
-            original_call_id: existing.callId,
-          });
-          return existing.promise;
+        const dedupKey = useDedupe ? `${name}:${stableStringify(args ?? {})}` : '';
+        if (useDedupe) {
+          const existing = recentCalls.get(dedupKey);
+          if (existing && startedAt - existing.startedAt < windowMs) {
+            logFn(options.room, 'tool_duplicate', {
+              name,
+              args,
+              call_id: callId,
+              original_call_id: existing.callId,
+            });
+            return existing.promise;
+          }
         }
 
         logFn(options.room, 'tool_call', {
@@ -663,7 +690,9 @@ export function createToolWrapper(options: ToolRuntimeOptions): ToolWrapperConte
           }
         })();
 
-        recentCalls.set(dedupKey, { startedAt, callId, promise });
+        if (useDedupe) {
+          recentCalls.set(dedupKey, { startedAt, callId, promise });
+        }
         return promise;
       };
     },
@@ -1043,6 +1072,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
   const tryOnTimeoutMs = options.tryOnTimeoutMs ?? DEFAULT_TRYON_WAIT_MS;
   const walkIntervalMs = options.walkIntervalMs ?? DEFAULT_HIGHLIGHT_WALK_MS;
   const weatherTimeoutMs = options.weatherTimeoutMs ?? DEFAULT_WEATHER_TIMEOUT_MS;
+  const rackTimeoutMs = Math.max(0, options.rackTimeoutMs ?? DEFAULT_RACK_QUERY_TIMEOUT_MS);
   const workingNoteDelayMs = Math.max(
     0,
     options.workingNoteDelayMs ?? DEFAULT_FILLER_INITIAL_DELAY_MS,
@@ -1120,6 +1150,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
   const pendingBagReservations = new Map<symbol, { key: string; amount: number }>();
   let buildGen = 0;
   let activeBuild: ActiveBuild | null = null;
+  let rackCalled = false;
   let lastBriefNotes: string | undefined;
   let lastBriefWeather: string | undefined;
 
@@ -1657,6 +1688,38 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       error: outcome.error,
     });
     return undefined;
+  }
+
+  async function runRackQueryWithTimeout(run: () => Promise<SearchResult>): Promise<Item[]> {
+    const task = (async (): Promise<Item[]> => {
+      try {
+        const res = await run();
+        return Array.isArray(res?.items) ? res.items : [];
+      } catch {
+        return [];
+      }
+    })();
+
+    if (rackTimeoutMs <= 0) {
+      return [];
+    }
+
+    return await new Promise<Item[]>((resolve) => {
+      let settled = false;
+      const timer = scheduleTimer(() => {
+        if (settled) return;
+        settled = true;
+        resolve([]);
+      }, rackTimeoutMs);
+
+      void task.then((items) => {
+        if (settled) return;
+        settled = true;
+        clearTimeoutFn(timer);
+        activeTimers.delete(timer);
+        resolve(items);
+      });
+    });
   }
 
   function currentBrief(): Brief {
@@ -2312,6 +2375,172 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           ? 'Showing all looks side by side on screen.'
           : 'Switched back to all looks, though the page did not confirm.';
       }),
+    }),
+
+    show_rack: llm.tool({
+      description:
+        'Pull up single items matching the style the shopper is currently wearing on camera. Call at most once per call right after your opening one-sentence read of their outfit.',
+      parameters: z.object({
+        style: z
+          .string()
+          .describe('2 to 5 words naming the vibe you see, e.g. "relaxed streetwear"'),
+        queries: z
+          .array(z.string())
+          .describe(
+            '2 or 3 short store search queries for single items in that style, e.g. ["oversized grey hoodie", "washed cargo pants"]',
+          ),
+        department: z
+          .enum(['men', 'women'])
+          .describe('Which department the clothes they are wearing come from'),
+      }),
+      execute: wrapper.wrap(
+        'show_rack',
+        async ({ style, queries, department }) => {
+          if (rackCalled) {
+            return 'Rack already shown.';
+          }
+          rackCalled = true;
+
+          const started = nowFn();
+          const cleanStyle = style.trim();
+          const cleanQueries = (Array.isArray(queries) ? queries : [])
+            .map((q) => (typeof q === 'string' ? q.trim() : ''))
+            .filter(Boolean);
+
+          let cachedStoreMod: StoreModuleLike | null | undefined;
+          const getStoreMod = async (): Promise<StoreModuleLike | null> => {
+            if (cachedStoreMod === undefined) {
+              try {
+                cachedStoreMod = await loadStoreModuleFn();
+              } catch {
+                cachedStoreMod = null;
+              }
+            }
+            return cachedStoreMod;
+          };
+
+          let searchFn = options.deps?.searchProducts;
+          if (!searchFn) {
+            const storeMod = await getStoreMod();
+            if (typeof storeMod?.searchMixed === 'function') {
+              searchFn = storeMod.searchMixed;
+            } else if (typeof storeMod?.search === 'function') {
+              searchFn = storeMod.search;
+            }
+          }
+
+          let searchByPhotoFn: SearchByPhotoFn | undefined;
+          if (options.deps && 'searchByPhoto' in options.deps) {
+            searchByPhotoFn = options.deps.searchByPhoto ?? undefined;
+          } else {
+            const storeMod = await getStoreMod();
+            searchByPhotoFn = resolveSearchByPhoto(storeMod);
+          }
+
+          let frameJpeg: Uint8Array | null = null;
+          if (typeof options.getLatestFrameJpeg === 'function') {
+            try {
+              const candidate = options.getLatestFrameJpeg();
+              if (candidate && candidate.byteLength > 0) {
+                frameJpeg = candidate;
+              }
+            } catch {
+              frameJpeg = null;
+            }
+          }
+
+          const usePhoto = Boolean(searchByPhotoFn && frameJpeg);
+
+          logFn(options.room, 'rack_start', {
+            style: cleanStyle,
+            queries: cleanQueries,
+            department,
+            photo: usePhoto,
+          });
+
+          const textPromises = cleanQueries.map((q) =>
+            searchFn
+              ? runRackQueryWithTimeout(() => searchFn(q, department, { limit: 8 }))
+              : Promise.resolve<Item[]>([]),
+          );
+
+          const photoPromise: Promise<Item[]> =
+            usePhoto && searchByPhotoFn && frameJpeg
+              ? runRackQueryWithTimeout(() =>
+                  searchByPhotoFn(frameJpeg, department, { limit: MAX_RACK_ITEMS }),
+                )
+              : Promise.resolve<Item[]>([]);
+
+          const [photoItems, ...queryItemLists] = await Promise.all([
+            photoPromise,
+            ...textPromises,
+          ]);
+
+          const merged: Item[] = [];
+          const seenIds = new Set<string>();
+          const seenUrls = new Set<string>();
+
+          const tryAdd = (item: Item | undefined | null): boolean => {
+            if (!item || typeof item !== 'object') return false;
+            if (sanitizePageMediaUrl(item.image) === null) return false;
+            const id = typeof item.id === 'string' ? item.id.trim() : '';
+            const url = typeof item.url === 'string' ? item.url.trim().toLowerCase() : '';
+            if ((id && seenIds.has(id)) || (url && seenUrls.has(url))) {
+              return false;
+            }
+            if (id) seenIds.add(id);
+            if (url) seenUrls.add(url);
+            merged.push(item);
+            return true;
+          };
+
+          for (const item of photoItems) {
+            if (merged.length >= MAX_RACK_ITEMS) break;
+            tryAdd(item);
+          }
+
+          const cursors = queryItemLists.map(() => 0);
+          while (merged.length < MAX_RACK_ITEMS) {
+            let addedInRound = false;
+            for (let qi = 0; qi < queryItemLists.length && merged.length < MAX_RACK_ITEMS; qi += 1) {
+              const list = queryItemLists[qi]!;
+              while (cursors[qi]! < list.length) {
+                const candidate = list[cursors[qi]!]!;
+                cursors[qi] = cursors[qi]! + 1;
+                if (tryAdd(candidate)) {
+                  addedInRound = true;
+                  break;
+                }
+              }
+            }
+            if (!addedInRound) break;
+          }
+
+          const perQueryCounts = queryItemLists.map((list) => list.length);
+          const ms = Math.max(0, Math.round(nowFn() - started));
+
+          logFn(options.room, 'rack_done', {
+            items: merged.length,
+            ms,
+            per_query: perQueryCounts,
+            photo_items: photoItems.length,
+          });
+
+          if (merged.length === 0) {
+            return 'NOT DONE: nothing came back. Skip the rack and ask what the occasion is.';
+          }
+
+          await page.send('showSearch', {
+            query: cleanStyle,
+            items: merged,
+            title: 'On the racks for you',
+            rack: true,
+          });
+
+          return `Rack is on screen: ${merged.length} items in ${cleanStyle}. Say one short line that you pulled a few things off the racks that go with what they have on, then ask: dressing for an occasion, or hunting for one specific item?`;
+        },
+        { dedupe: false },
+      ),
     }),
 
     search_products: llm.tool({
