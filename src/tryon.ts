@@ -1,4 +1,5 @@
 import { mediaRequest } from './media/client.ts';
+import type { TryOnCheck } from './media/pure.ts';
 import { logEvent } from './store/log.ts';
 import type { Outfit } from './types.ts';
 
@@ -6,7 +7,7 @@ export async function tryOn(
   personJpeg: Buffer | null,
   outfit: Outfit,
   opts?: { label?: string },
-): Promise<{ url: string; path: string; ms: number; id: string }> {
+): Promise<{ url: string; path: string; ms: number; id: string; check?: TryOnCheck }> {
   const t0 = Date.now();
   const outfitTag = outfit?.number ?? opts?.label ?? null;
   const piecesCount = Array.isArray(outfit?.pieces) ? outfit.pieces.length : 0;
@@ -14,11 +15,20 @@ export async function tryOn(
   logEvent('tryon_start', { outfit: outfitTag, pieces: piecesCount });
 
   try {
-    const res = await mediaRequest<{ url: string; path: string; ms: number; id: string }>(
-      'tryOn',
-      { personJpeg, outfit, opts },
-      120_000,
-    );
+    const res = await mediaRequest<{
+      url: string;
+      path: string;
+      ms: number;
+      id: string;
+      check?: TryOnCheck;
+    }>('tryOn', { personJpeg, outfit, opts }, 120_000);
+    if (res.check) {
+      logEvent('tryon_check', {
+        outfit: outfitTag,
+        id: res.id,
+        ...res.check,
+      });
+    }
     logEvent('tryon_ready', {
       outfit: outfitTag,
       id: res.id,
