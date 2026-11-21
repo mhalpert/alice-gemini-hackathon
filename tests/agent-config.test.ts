@@ -26,14 +26,14 @@ test('loadConfig returns expected defaults when env is empty', () => {
     room: 'noisy',
     startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
     endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
-    silenceDurationMs: 500,
+    silenceDurationMs: 1000,
     prefixPaddingMs: 150,
   });
   assert.deepEqual(buildAutomaticActivityDetection(cfg.vad), {
     disabled: false,
     startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
     endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
-    silenceDurationMs: 500,
+    silenceDurationMs: 1000,
     prefixPaddingMs: 150,
   });
 });
@@ -64,7 +64,7 @@ test('loadConfig reads and normalizes env overrides', () => {
     room: 'quiet',
     startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
     endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
-    silenceDurationMs: 500,
+    silenceDurationMs: 1000,
     prefixPaddingMs: undefined,
   });
   const aad = buildAutomaticActivityDetection(cfg.vad);
@@ -72,7 +72,7 @@ test('loadConfig reads and normalizes env overrides', () => {
     disabled: false,
     startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
     endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
-    silenceDurationMs: 500,
+    silenceDurationMs: 1000,
   });
   assert.equal('prefixPaddingMs' in aad, false);
 });
@@ -136,7 +136,7 @@ test('loadConfig handles invalid numeric, boolean, noise cancel, and VAD env val
     room: 'noisy',
     startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
     endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
-    silenceDurationMs: 500,
+    silenceDurationMs: 1000,
     prefixPaddingMs: 150,
   });
 });
