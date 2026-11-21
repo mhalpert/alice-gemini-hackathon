@@ -81,6 +81,7 @@ export interface PurchaseClient {
 const CHECKOUT_TIMEOUT_MS = 6000;
 const COMPLETE_TIMEOUT_MS = 12_000;
 const ORDER_REVIEW_MAX_AGE_MS = 2 * 60 * 1000;
+const PREPARE_REUSE_WINDOW_MS = 8000;
 const DEFAULT_RECONCILE_DELAYS_MS = [2000, 3000, 3000, 3000, 4000];
 const VALID_ROOM_RE = /^alice-[0-9a-f]{10}$/;
 const loggedInvalidCapVars = new Set<string>();
@@ -628,20 +629,90 @@ function cloneCheckoutForUpdate(checkout: any): Record<string, any> {
   return copy;
 }
 
+function extractCheckoutLineItemIds(checkout: any): string[] {
+  const lines = Array.isArray(checkout?.line_items) ? checkout.line_items : [];
+  const ids: string[] = [];
+  for (const l of lines) {
+    const id = typeof l?.id === 'string' ? l.id.trim() : '';
+    if (id) ids.push(id);
+  }
+  return ids;
+}
+
+function hasNonEmptyStringArray(val: unknown): boolean {
+  return (
+    Array.isArray(val) &&
+    val.length > 0 &&
+    val.every((item) => typeof item === 'string' && item.trim().length > 0)
+  );
+}
+
+interface CheckoutUpdatePayload {
+  doc: Record<string, any>;
+  hadMethods: boolean;
+  filledLineItemIds: boolean;
+}
+
+function ensureMethodsHaveLineItemIds(
+  doc: Record<string, any>,
+  sourceCheckout: any,
+): { ok: boolean; filledLineItemIds: boolean } {
+  const methods = doc?.fulfillment?.methods;
+  if (!Array.isArray(methods) || methods.length === 0) {
+    return { ok: false, filledLineItemIds: false };
+  }
+  const allLineItemIds = extractCheckoutLineItemIds(sourceCheckout);
+  let filledLineItemIds = false;
+  for (const method of methods) {
+    if (!method || typeof method !== 'object') {
+      return { ok: false, filledLineItemIds: false };
+    }
+    if (hasNonEmptyStringArray(method.line_item_ids)) {
+      // Addendum A: keep the store's own non-empty line_item_ids unchanged (even if partial; never widen).
+      continue;
+    }
+    if (allLineItemIds.length === 0) {
+      return { ok: false, filledLineItemIds: false };
+    }
+    method.line_item_ids = [...allLineItemIds];
+    filledLineItemIds = true;
+  }
+  return { ok: true, filledLineItemIds };
+}
+
 function applySavedAddressToCheckout(
   checkout: any,
   savedAddress: Record<string, unknown>,
-): Record<string, any> {
+): CheckoutUpdatePayload | null {
   const doc = cloneCheckoutForUpdate(checkout);
   const addressId = String(savedAddress.id ?? '');
+  const hadMethods =
+    Array.isArray(doc.fulfillment?.methods) && doc.fulfillment.methods.length > 0;
+  let filledLineItemIds = false;
+
   if (!doc.fulfillment || typeof doc.fulfillment !== 'object') {
     doc.fulfillment = { methods: [] };
   }
-  if (!Array.isArray(doc.fulfillment.methods) || doc.fulfillment.methods.length === 0) {
-    doc.fulfillment.methods = [{ type: 'shipping', destinations: [] }];
+  if (!hadMethods) {
+    const allLineItemIds = extractCheckoutLineItemIds(checkout);
+    if (allLineItemIds.length === 0) {
+      return null;
+    }
+    const createdMethod: Record<string, any> = {
+      type: 'shipping',
+      line_item_ids: [...allLineItemIds],
+      destinations: [JSON.parse(JSON.stringify(savedAddress))],
+      ...(addressId ? { selected_destination_id: addressId } : {}),
+    };
+    doc.fulfillment.methods = [createdMethod];
+    filledLineItemIds = true;
+    return { doc, hadMethods: false, filledLineItemIds };
   }
 
   const method = doc.fulfillment.methods[0];
+  if (!method || typeof method !== 'object') {
+    return null;
+  }
   if (!Array.isArray(method.destinations)) {
     method.destinations = [];
   }
@@ -655,10 +726,16 @@ function applySavedAddressToCheckout(
   if (addressId) {
     method.selected_destination_id = addressId;
   }
-  return doc;
+
+  const check = ensureMethodsHaveLineItemIds(doc, checkout);
+  if (!check.ok) {
+    return null;
+  }
+  filledLineItemIds = check.filledLineItemIds;
+  return { doc, hadMethods: true, filledLineItemIds };
 }
 
-function trySelectSingleDeliveryOption(checkout: any): Record<string, any> | null {
+function trySelectSingleDeliveryOption(checkout: any): CheckoutUpdatePayload | null {
   const methods = checkout?.fulfillment?.methods;
   if (!Array.isArray(methods) || methods.length === 0) return null;
   const groups = methods[0]?.groups;
@@ -676,7 +753,27 @@ function trySelectSingleDeliveryOption(checkout: any): Record<string, any> | nul
       }
     }
   }
-  return changed ? doc : null;
+  if (!changed) return null;
+
+  const check = ensureMethodsHaveLineItemIds(doc, checkout);
+  if (!check.ok) {
+    return null;
+  }
+  return { doc, hadMethods: true, filledLineItemIds: check.filledLineItemIds };
+}
+
+function buildPrepareReuseKey(room: string, carts: readonly CartResult[]): string {
+  const cartKeys = carts.map((c) => {
+    const domain = normalizeStoreDomain(c?.store_domain);
+    const cartId = typeof c?.cart_id === 'string' ? c.cart_id.trim() : '';
+    const itemsKey = buildBagVariantQtyKey(c);
+    return `${domain}|${cartId}|${itemsKey}`;
+  });
+  return `${room.trim()}::${cartKeys.join('###')}`;
+}
+
+function hashTokenForReuse(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
 }
 
 function extractCheckoutNote(checkout: any): string | undefined {
@@ -810,6 +907,26 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
   const supersededOrderIds = new Set<string>();
   let sessionSpentCents = 0;
 
+  // FIX 2: short-lived reuse of unchanged prepareOrder calls (in-flight join + 8s window).
+  let prepareAuthGen = 0;
+  let inFlightPrepare: {
+    key: string;
+    tokenHash: string;
+    promise: Promise<PrepareOrderResult>;
+  } | null = null;
+  let recentPrepare: {
+    key: string;
+    tokenHash: string;
+    orderId: string;
+    completedAtMs: number;
+    result: PrepareOrderResult;
+  } | null = null;
+
+  function clearPrepareReuse(): void {
+    inFlightPrepare = null;
+    recentPrepare = null;
+  }
+
   function purgeOrderRecord(orderId: string): void {
     const rec = reviewedOrders.get(orderId);
     if (!rec) return;
@@ -818,12 +935,16 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
     }
     rec.stores = [];
     reviewedOrders.delete(orderId);
+    if (recentPrepare && recentPrepare.orderId === orderId) {
+      recentPrepare = null;
+    }
   }
 
   function purgeAllReviews(): void {
     for (const id of [...reviewedOrders.keys()]) {
       purgeOrderRecord(id);
     }
+    clearPrepareReuse();
   }
 
   function purgeExpiredOrders(exceptOrderId?: string): void {
@@ -839,11 +960,13 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
   // M2 & L3: signOut clears every reviewed order and resets per-sign-in spend,
   // while sentCartIds / sentCheckoutIds intentionally remain.
   auth.onSignOut(() => {
+    prepareAuthGen += 1;
     purgeAllReviews();
     sessionSpentCents = 0;
   });
 
   function endCall(): void {
+    prepareAuthGen += 1;
     auth.signOut();
     purgeAllReviews();
     supersededOrderIds.clear();
@@ -925,7 +1048,9 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
     }
 
     const currentRoom = getRoom();
-    if (auth.signInStatus() !== 'signed_in' || !auth.getToken()) {
+    const activeToken = auth.getToken();
+    if (auth.signInStatus() !== 'signed_in' || !activeToken) {
+      clearPrepareReuse();
       return buildSignInResponse();
     }
 
@@ -939,8 +1064,41 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
       );
     }
 
-    // H1: supersede every earlier unplaced reviewed order that shares any cart_id with this bag.
     const carts = Array.isArray(bag?.carts) ? bag.carts : [];
+    const reuseKey = buildPrepareReuseKey(currentRoom, carts);
+    const tokenHash = hashTokenForReuse(activeToken);
+
+    // FIX 2: join an identical in-flight prepareOrder for the same room, token, carts, and line items.
+    if (
+      inFlightPrepare &&
+      inFlightPrepare.key === reuseKey &&
+      inFlightPrepare.tokenHash === tokenHash
+    ) {
+      return inFlightPrepare.promise;
+    }
+
+    // FIX 2: within 8s of an unchanged prepareOrder result, reuse it (keeping original createdAtMs)
+    // unless sign-in/sign-out changed, bag changed, or placeOrder for that order_id has started.
+    if (recentPrepare) {
+      const cachedRec = reviewedOrders.get(recentPrepare.orderId);
+      const stillValid =
+        recentPrepare.key === reuseKey &&
+        recentPrepare.tokenHash === tokenHash &&
+        t0 - recentPrepare.completedAtMs < PREPARE_REUSE_WINDOW_MS &&
+        cachedRec !== undefined &&
+        t0 - cachedRec.createdAtMs < ORDER_REVIEW_MAX_AGE_MS &&
+        !inProgressAttempts.has(recentPrepare.orderId) &&
+        !placedResults.has(recentPrepare.orderId) &&
+        !supersededOrderIds.has(recentPrepare.orderId);
+      if (stillValid) {
+        return recentPrepare.result;
+      }
+      recentPrepare = null;
+    }
+
+    const myAuthGen = prepareAuthGen;
+    const runPromise = (async (): Promise<PrepareOrderResult> => {
+    // H1: supersede every earlier unplaced reviewed order that shares any cart_id with this bag.
     const incomingCartIds = new Set(
       carts
         .map((c) => (typeof c?.cart_id === 'string' ? c.cart_id.trim() : ''))
@@ -1205,30 +1363,42 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
         const hasDestination = Boolean(getSelectedCheckoutDestination(checkout));
         if (defaultAddress && (checkout.status === 'incomplete' || !hasDestination)) {
           const edited = applySavedAddressToCheckout(checkout, defaultAddress);
-          checkout = await mcp.call(
-            'update_checkout',
-            {
-              shop: cart.store_domain,
-              id: checkoutId,
-              checkout: edited,
-              meta: {
-                'idempotency-key': randomId(),
+          if (edited) {
+            logEvent('order_checkout_update', {
+              store: cart.store,
+              had_methods: edited.hadMethods,
+              filled_line_item_ids: edited.filledLineItemIds,
+            });
+            checkout = await mcp.call(
+              'update_checkout',
+              {
+                shop: cart.store_domain,
+                id: checkoutId,
+                checkout: edited.doc,
+                meta: {
+                  'idempotency-key': randomId(),
+                },
               },
-            },
-            { timeoutMs: CHECKOUT_TIMEOUT_MS, authenticated: true },
-          );
+              { timeoutMs: CHECKOUT_TIMEOUT_MS, authenticated: true },
+            );
+          }
         }
 
         // If still incomplete only because a single unambiguous shipping option isn't selected
         if (checkout?.status === 'incomplete') {
           const withOption = trySelectSingleDeliveryOption(checkout);
           if (withOption) {
+            logEvent('order_checkout_update', {
+              store: cart.store,
+              had_methods: withOption.hadMethods,
+              filled_line_item_ids: withOption.filledLineItemIds,
+            });
             checkout = await mcp.call(
               'update_checkout',
               {
                 shop: cart.store_domain,
                 id: checkoutId,
-                checkout: withOption,
+                checkout: withOption.doc,
                 meta: {
                   'idempotency-key': randomId(),
                 },
@@ -1404,16 +1574,47 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
       ms,
     });
 
-    return {
+    const result: PrepareOrderResult = {
       order_id: orderId,
       stores: reviewStores,
       total,
       ...(derivedAddressLabel ? { address_label: derivedAddressLabel } : {}),
     };
+
+    if (
+      myAuthGen === prepareAuthGen &&
+      reviewedOrders.has(orderId) &&
+      !inProgressAttempts.has(orderId) &&
+      !placedResults.has(orderId) &&
+      !supersededOrderIds.has(orderId)
+    ) {
+      recentPrepare = {
+        key: reuseKey,
+        tokenHash,
+        orderId,
+        completedAtMs: now(),
+        result,
+      };
+    }
+
+    return result;
+    })();
+
+    inFlightPrepare = { key: reuseKey, tokenHash, promise: runPromise };
+    try {
+      return await runPromise;
+    } finally {
+      if (inFlightPrepare?.promise === runPromise) {
+        inFlightPrepare = null;
+      }
+    }
   }
 
   async function placeOrder(orderId: string, opts: PlaceOrderOptions): Promise<OrderReview> {
     const t0 = now();
+    if (recentPrepare && recentPrepare.orderId === orderId) {
+      recentPrepare = null;
+    }
     purgeExpiredOrders(orderId);
 
     // 1. One attempt per order_id, ever: return the first call's result with zero new calls.
