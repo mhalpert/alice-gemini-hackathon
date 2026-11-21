@@ -76,9 +76,9 @@ test('ALICE_SYSTEM_PROMPT mentions CALL STATE and CAMERA STATUS', () => {
   assert.match(ALICE_SYSTEM_PROMPT, /\bCAMERA STATUS\b/);
 });
 
-test('ALICE_SYSTEM_PROMPT word count is within 450 to 1300 words and avoids tables/emoji', () => {
+test('ALICE_SYSTEM_PROMPT word count is within 450 to 1320 words and avoids tables/emoji', () => {
   const words = countWords(ALICE_SYSTEM_PROMPT);
-  assert.ok(words >= 450 && words <= 1300, `expected word count between 450 and 1300, got ${words}`);
+  assert.ok(words >= 450 && words <= 1320, `expected word count between 450 and 1320, got ${words}`);
 
   assert.equal(ALICE_SYSTEM_PROMPT.includes('|---'), false, 'prompt must not contain markdown tables');
   assert.equal(/\p{Extended_Pictographic}/u.test(ALICE_SYSTEM_PROMPT), false, 'prompt must not contain emoji');
@@ -249,6 +249,10 @@ test('ALICE_SYSTEM_PROMPT enforces add_to_bag stop-before-result and immediate r
   assert.match(
     ALICE_SYSTEM_PROMPT,
     /when the shopper gives a missing size after PARTLY DONE or NOT DONE, call add_to_bag again immediately with all known sizes, no question first/i,
+  );
+  assert.match(
+    ALICE_SYSTEM_PROMPT,
+    /after swap_piece on a bagged look, call add_to_bag again—never say it is in the bag or give a bag total until add_to_bag returns/i,
   );
 });
 

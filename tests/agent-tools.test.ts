@@ -3387,3 +3387,275 @@ test('add_to_bag closes budget ceiling holes: concurrent calls, partial re-bag w
   assert.match(nullLook2, /\$10500/);
   assert.equal(nullStoreCalls, 1, 'null cart total must fall back to added item prices so Look 2 is blocked before cart creation');
 });
+
+test('swap_piece on a partly or fully bagged look warns NOT IN THE BAG YET and allows immediate repeat add_to_bag with the new real bag', async () => {
+  const clock = createFakeClock(50_000);
+  const { page, calls } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-swap-after-bag', log: () => {} });
+  let bagCalls = 0;
+  let lastBaggedOutfit: Outfit | null = null;
+  let lastBaggedSizes: Record<string, string> | null = null;
+
+  const topItem = makeItem({
+    id: 'top-1',
+    variant_id: 'v-top-1',
+    title: 'Merino Knit Polo',
+    price: 100,
+    store: 'Everlane',
+    store_domain: 'everlane.myshopify.com',
+    sizes: ['S', 'M', 'L'],
+    variants_by_size: { S: 'v-top-s', M: 'v-top-m', L: 'v-top-l' },
+  });
+  const bottomItem = makeItem({
+    id: 'bot-1',
+    variant_id: 'v-bot-1',
+    title: 'Pleated Wool Trouser',
+    price: 150,
+    store: 'Everlane',
+    store_domain: 'everlane.myshopify.com',
+    sizes: ['30', '32', '34'],
+    variants_by_size: { '30': 'v-bot-30', '32': 'v-bot-32', '34': 'v-bot-34' },
+  });
+  const soldOutShoes = makeItem({
+    id: 'shoe-soldout',
+    variant_id: 'v-shoe-soldout',
+    title: 'Suede Chelsea Boot',
+    price: 200,
+    store: 'Kith',
+    store_domain: 'kith.myshopify.com',
+    sizes: ['9', '10', '11'],
+    variants_by_size: { '9': 'v-shoe-9', '10': 'v-shoe-10', '11': 'v-shoe-11' },
+  });
+  const replacementShoes = makeItem({
+    id: 'shoe-new',
+    variant_id: 'v-shoe-new',
+    title: 'Pebbled Leather Derby',
+    price: 262.95,
+    store: 'Kith',
+    store_domain: 'kith.myshopify.com',
+    sizes: ['9', '10', '11'],
+    variants_by_size: { '9': 'v-new-9', '10': 'v-new-10', '11': 'v-new-11' },
+  });
+
+  const look1: Outfit = {
+    number: 1,
+    name: 'West Village Sharp',
+    difference: 'Clean knit and tailored trouser.',
+    story: 'Sharp dinner fit.',
+    pieces: [
+      { slot: 'top', why: 'Soft drape.', item: topItem },
+      { slot: 'bottom', why: 'Clean leg.', item: bottomItem },
+      { slot: 'shoes', why: 'Grounding boot.', item: soldOutShoes },
+    ],
+    total: 450,
+  };
+  const look2: Outfit = {
+    number: 2,
+    name: 'SoHo Relaxed',
+    difference: 'Relaxed alternate.',
+    story: 'Easy weekend fit.',
+    pieces: [
+      { slot: 'top', why: 'Easy knit.', item: topItem },
+      { slot: 'shoes', why: 'Classic derby.', item: replacementShoes },
+    ],
+    total: 362.95,
+  };
+
+  let swapSeq = 0;
+  const tools = createAgentTools({
+    room: 'r-swap-after-bag',
+    log: () => {},
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+    page,
+    state,
+    deps: makeFakeDeps({
+      async buildOutfits(_brief, opts) {
+        const outfits = [structuredClone(look1), structuredClone(look2)];
+        outfits.forEach((o, i) => opts?.onOutfit?.(o, i));
+        return {
+          outfits,
+          source: 'live',
+          timing: { first_outfit_ms: 10, total_ms: 15 },
+          problems: [],
+        };
+      },
+      async swapPiece(outfit, slot, _request) {
+        swapSeq += 1;
+        const newPiece =
+          slot === 'shoes'
+            ? { slot: 'shoes', why: 'In-stock replacement.', item: replacementShoes }
+            : {
+                slot,
+                why: 'Refreshed piece.',
+                item: makeItem({
+                  ...topItem,
+                  // Even if a swap kept the same id/variant_id, repeat add_to_bag must still run.
+                  title: `Swapped Top #${swapSeq}`,
+                  price: 110,
+                }),
+              };
+        const pieces = outfit.pieces.map((p) => (p.slot === slot ? newPiece : p));
+        const total = Math.round(pieces.reduce((s, p) => s + p.item.price, 0) * 100) / 100;
+        return { outfit: { ...outfit, pieces, total }, piece: newPiece };
+      },
+      async addToBag(bagOutfit, sizes): Promise<BagOut> {
+        bagCalls += 1;
+        lastBaggedOutfit = structuredClone(bagOutfit);
+        lastBaggedSizes = { ...sizes };
+        const hasSoldOut = bagOutfit.pieces.some((p) => p.item.id === 'shoe-soldout');
+        if (hasSoldOut) {
+          return {
+            carts: [
+              {
+                store: 'Everlane',
+                store_domain: 'everlane.myshopify.com',
+                cart_id: 'cart-ev-1',
+                continue_url: 'https://everlane.example/cart/1',
+                total_usd: 250,
+                added: [
+                  { variant_id: 'v-top-m', title: 'Merino Knit Polo', size: sizes.top ?? 'M' },
+                  { variant_id: 'v-bot-32', title: 'Pleated Wool Trouser', size: sizes.bottom ?? '32' },
+                ],
+                not_added: [],
+                ms: 15,
+              },
+              {
+                store: 'Kith',
+                store_domain: 'kith.myshopify.com',
+                cart_id: null,
+                continue_url: null,
+                total_usd: 0,
+                added: [],
+                not_added: [
+                  { variant_id: 'v-shoe-soldout', title: 'Suede Chelsea Boot', reason: 'sold out in size 10' },
+                ],
+                ms: 12,
+              },
+            ],
+            summary: 'PARTLY DONE: Suede Chelsea Boot sold out in size 10.',
+            total_usd: 250,
+          };
+        }
+        const total =
+          Math.round(bagOutfit.pieces.reduce((sum, p) => sum + p.item.price, 0) * 100) / 100;
+        return {
+          carts: [
+            {
+              store: 'Everlane',
+              store_domain: 'everlane.myshopify.com',
+              cart_id: `cart-ev-${bagCalls}`,
+              continue_url: `https://everlane.example/cart/${bagCalls}`,
+              total_usd: bagOutfit.pieces
+                .filter((p) => p.item.store === 'Everlane')
+                .reduce((s, p) => s + p.item.price, 0),
+              added: bagOutfit.pieces
+                .filter((p) => p.item.store === 'Everlane')
+                .map((p) => ({
+                  variant_id: p.item.variant_id,
+                  title: p.item.title,
+                  size: sizes[p.slot.toLowerCase()] ?? null,
+                })),
+              not_added: [],
+              ms: 15,
+            },
+            {
+              store: 'Kith',
+              store_domain: 'kith.myshopify.com',
+              cart_id: `cart-kith-${bagCalls}`,
+              continue_url: `https://kith.example/cart/${bagCalls}`,
+              total_usd: 262.95,
+              added: [
+                {
+                  variant_id: 'v-new-10',
+                  title: 'Pebbled Leather Derby',
+                  size: sizes.shoes ?? '10',
+                },
+              ],
+              not_added: [],
+              ms: 18,
+            },
+          ],
+          summary: `Added ${bagOutfit.pieces.length} pieces.`,
+          total_usd: total,
+        };
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute({ occasion: 'dinner', budget_usd: 600 }, fakeToolOpts('b1'));
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+
+  // 1) Initial add_to_bag is PARTLY DONE (shoes sold out).
+  const firstBag = await tools.add_to_bag.execute(
+    { outfit: 1, sizes: { top: 'M', bottom: '32', shoes: '10' } },
+    fakeToolOpts('bag-1'),
+  );
+  assert.match(firstBag, /^PARTLY DONE:/);
+  assert.match(firstBag, /Added 2 pieces, total \$250/);
+  assert.equal(bagCalls, 1);
+
+  // 2) Swapping on Look 2 (which has NO bag) does NOT warn NOT IN THE BAG YET.
+  const unbaggedSwap = await tools.swap_piece.execute(
+    { outfit: 2, slot: 'shoes', request: 'loafers' },
+    fakeToolOpts('swap-unbagged'),
+  );
+  assert.equal(unbaggedSwap.startsWith('NOT IN THE BAG YET:'), false);
+
+  // 3) Swapping sold-out shoes on partly-bagged Look 1 MUST begin with exact NOT IN THE BAG YET warning + instruction.
+  await clock.advance(1_000);
+  const swapAfterPartBag = await tools.swap_piece.execute(
+    { outfit: 1, slot: 'shoes', request: 'leather derbies' },
+    fakeToolOpts('swap-1'),
+  );
+  assert.equal(
+    swapAfterPartBag.startsWith('NOT IN THE BAG YET: the new shoes is only on screen.'),
+    true,
+    `expected NOT IN THE BAG YET prefix, got: ${swapAfterPartBag}`,
+  );
+  assert.match(swapAfterPartBag, /call add_to_bag again now with the sizes already known/i);
+  assert.match(swapAfterPartBag, /ask only for a size that is truly missing for the new piece/i);
+  assert.match(swapAfterPartBag, /never say it is in the bag or give a bag total until add_to_bag returns/i);
+
+  // 4) Immediate repeat add_to_bag (within 15s dedupe window, exact same sizes) MUST run and report the new real bag.
+  await clock.advance(1_000);
+  calls.length = 0;
+  const secondBag = await tools.add_to_bag.execute(
+    { outfit: 1, sizes: { top: 'M', bottom: '32', shoes: '10' } },
+    fakeToolOpts('bag-2'),
+  );
+  assert.equal(bagCalls, 2, 'repeat add_to_bag after swap must NOT be refused as duplicate');
+  assert.equal(secondBag.startsWith('Already in the bag.'), false);
+  assert.equal(secondBag.startsWith('PARTLY DONE:'), false);
+  assert.match(secondBag, /Added 3 pieces, total \$512\.95 for Look 1/);
+  assert.match(secondBag, /Pebbled Leather Derby/);
+  assert.ok(lastBaggedOutfit?.pieces.some((p) => p.item.id === 'shoe-new'));
+  assert.deepEqual(lastBaggedSizes, { top: 'M', bottom: '32', shoes: '10' });
+  assert.ok(calls.some((c) => c.action === 'bagReady'));
+  assert.equal(state.get().bag?.total, 512.95);
+  assert.equal(state.get().bag?.notAdded.length, 0);
+
+  // 5) Swapping on the now-fully-bagged Look 1 ALSO warns NOT IN THE BAG YET, and repeat add_to_bag works even if item id stayed the same.
+  await clock.advance(1_000);
+  const swapAfterFullBag = await tools.swap_piece.execute(
+    { outfit: 1, slot: 'top', request: 'cashmere polo' },
+    fakeToolOpts('swap-2'),
+  );
+  assert.equal(
+    swapAfterFullBag.startsWith('NOT IN THE BAG YET: the new top is only on screen.'),
+    true,
+    `expected NOT IN THE BAG YET prefix for top swap on fully bagged look, got: ${swapAfterFullBag}`,
+  );
+
+  await clock.advance(1_000);
+  const thirdBag = await tools.add_to_bag.execute(
+    { outfit: 1, sizes: { top: 'M', bottom: '32', shoes: '10' } },
+    fakeToolOpts('bag-3'),
+  );
+  assert.equal(bagCalls, 3, 'repeat add_to_bag after second swap must run even with unchanged item id');
+  assert.equal(thirdBag.startsWith('Already in the bag.'), false);
+  assert.match(thirdBag, /Added 3 pieces, total \$522\.95 for Look 1/);
+  assert.match(thirdBag, /Swapped Top #3/);
+});

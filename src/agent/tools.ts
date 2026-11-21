@@ -2262,8 +2262,14 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             ? `Updated Look ${lookNum} on screen`
             : `Updated Look ${lookNum} (page did not confirm the visual update)`;
           const notePart = swapResult.note ? ` Note: ${swapResult.note}` : '';
+          const baseResult = `${screenStatus}: ${targetSlot} is now ${pieceDesc}. New look total: ${formatPrice(updatedOutfit.total)}.${notePart} Try-on and flat-lay are refreshing.`;
 
-          return `${screenStatus}: ${targetSlot} is now ${pieceDesc}. New look total: ${formatPrice(updatedOutfit.total)}.${notePart} Try-on and flat-lay are refreshing.`;
+          const bagLookKey = `${buildGen}:${lookNum}`;
+          if (baggedLookTotals.has(bagLookKey)) {
+            return `NOT IN THE BAG YET: the new ${targetSlot} is only on screen. Call add_to_bag again now with the sizes already known (ask only for a size that is truly missing for the new piece), and never say it is in the bag or give a bag total until add_to_bag returns. ${baseResult}`;
+          }
+
+          return baseResult;
         } finally {
           finishSlowWork();
         }
@@ -2697,6 +2703,8 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         }
 
         const dedupeKey = stableStringify({
+          buildGen,
+          mediaVersion: mediaVersionByLook.get(lookNum) ?? 0,
           outfit: lookNum,
           pieces: outfit.pieces.map((p) => ({
             slot: p.slot,
