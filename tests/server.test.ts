@@ -258,6 +258,93 @@ describe('Alice server', () => {
     assert.equal(badExt.status, 404);
   });
 
+  it('supports byte ranges for /tryon/<name> (200 Accept-Ranges, 206 slices, 416, multiple-range fallback, HEAD, video/mp4)', async () => {
+    // 64-byte deterministic fake mp4 fixture
+    const fakeMp4 = Buffer.from(Array.from({ length: 64 }, (_, i) => i));
+    fs.writeFileSync(path.join(tryonDir, 'clip1.mp4'), fakeMp4);
+
+    // 1. Full file 200 with Accept-Ranges and video/mp4
+    const full = await fetch(`${baseUrl}/tryon/clip1.mp4`);
+    assert.equal(full.status, 200);
+    assert.equal(full.headers.get('content-type'), 'video/mp4');
+    assert.equal(full.headers.get('accept-ranges'), 'bytes');
+    assert.equal(full.headers.get('content-length'), '64');
+    assert.equal(full.headers.get('cache-control'), 'public, max-age=3600');
+    assert.equal(full.headers.get('access-control-allow-origin'), '*');
+    assert.deepEqual(Buffer.from(await full.arrayBuffer()), fakeMp4);
+
+    // 2. Closed range bytes=0-9 -> 206 with exactly 10 bytes
+    const rClosed = await fetch(`${baseUrl}/tryon/clip1.mp4`, {
+      headers: { Range: 'bytes=0-9' },
+    });
+    assert.equal(rClosed.status, 206);
+    assert.equal(rClosed.headers.get('content-type'), 'video/mp4');
+    assert.equal(rClosed.headers.get('accept-ranges'), 'bytes');
+    assert.equal(rClosed.headers.get('content-range'), 'bytes 0-9/64');
+    assert.equal(rClosed.headers.get('content-length'), '10');
+    const closedBytes = Buffer.from(await rClosed.arrayBuffer());
+    assert.equal(closedBytes.length, 10);
+    assert.deepEqual(closedBytes, fakeMp4.subarray(0, 10));
+
+    // 3. Open-ended range bytes=50- -> 206 with bytes 50..63 (14 bytes)
+    const rOpen = await fetch(`${baseUrl}/tryon/clip1.mp4`, {
+      headers: { Range: 'bytes=50-' },
+    });
+    assert.equal(rOpen.status, 206);
+    assert.equal(rOpen.headers.get('content-range'), 'bytes 50-63/64');
+    assert.equal(rOpen.headers.get('content-length'), '14');
+    assert.deepEqual(Buffer.from(await rOpen.arrayBuffer()), fakeMp4.subarray(50, 64));
+
+    // 4. Suffix range bytes=-12 -> 206 with last 12 bytes (52..63)
+    const rSuffix = await fetch(`${baseUrl}/tryon/clip1.mp4`, {
+      headers: { Range: 'bytes=-12' },
+    });
+    assert.equal(rSuffix.status, 206);
+    assert.equal(rSuffix.headers.get('content-range'), 'bytes 52-63/64');
+    assert.equal(rSuffix.headers.get('content-length'), '12');
+    assert.deepEqual(Buffer.from(await rSuffix.arrayBuffer()), fakeMp4.subarray(52, 64));
+
+    // 5. Unsatisfiable & malformed ranges -> 416 with Content-Range: bytes */64
+    for (const badRange of ['bytes=64-', 'bytes=100-200', 'bytes=20-10', 'bytes=-0', 'bytes=abc', 'items=0-5']) {
+      const res416 = await fetch(`${baseUrl}/tryon/clip1.mp4`, {
+        headers: { Range: badRange },
+      });
+      assert.equal(res416.status, 416, `expected 416 for Range: ${badRange}`);
+      assert.equal(res416.headers.get('content-range'), 'bytes */64');
+      assert.equal(res416.headers.get('accept-ranges'), 'bytes');
+    }
+
+    // 6. Multiple ranges -> ignore Range header and send 200 with full file
+    const rMulti = await fetch(`${baseUrl}/tryon/clip1.mp4`, {
+      headers: { Range: 'bytes=0-3, 10-15' },
+    });
+    assert.equal(rMulti.status, 200);
+    assert.equal(rMulti.headers.get('accept-ranges'), 'bytes');
+    assert.equal(rMulti.headers.get('content-range'), null);
+    assert.equal(rMulti.headers.get('content-length'), '64');
+    assert.deepEqual(Buffer.from(await rMulti.arrayBuffer()), fakeMp4);
+
+    // 7. HEAD with Range -> 206 with matching Content-Range & Content-Length and empty body
+    const rHead = await fetch(`${baseUrl}/tryon/clip1.mp4`, {
+      method: 'HEAD',
+      headers: { Range: 'bytes=0-9' },
+    });
+    assert.equal(rHead.status, 206);
+    assert.equal(rHead.headers.get('content-type'), 'video/mp4');
+    assert.equal(rHead.headers.get('accept-ranges'), 'bytes');
+    assert.equal(rHead.headers.get('content-range'), 'bytes 0-9/64');
+    assert.equal(rHead.headers.get('content-length'), '10');
+    assert.equal((await rHead.arrayBuffer()).byteLength, 0);
+
+    // 8. Static files from public/ stay unaffected (no 206 on Range)
+    const staticRange = await fetch(`${baseUrl}/app.css`, {
+      headers: { Range: 'bytes=0-3' },
+    });
+    assert.equal(staticRange.status, 200);
+    assert.equal(staticRange.headers.get('accept-ranges'), null);
+    assert.equal(await staticRange.text(), 'body { margin: 0; }');
+  });
+
   it('returns 503 on /api/token when LiveKit env is missing', async () => {
     delete env.LIVEKIT_URL;
     delete env.LIVEKIT_API_KEY;
