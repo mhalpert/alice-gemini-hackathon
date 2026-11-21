@@ -41,7 +41,7 @@ import { createToolResultNudger } from './nudge.ts';
 import { createOrderController } from './order.ts';
 import { createPageSender } from './page.ts';
 import { GREETING_INSTRUCTIONS, buildSystemPrompt } from './prompt.ts';
-import { createSilenceCheckIn } from './silence.ts';
+import { createSilenceCheckIn, type SilenceCheckIn } from './silence.ts';
 import { createCallStateStore } from './state.ts';
 import {
   endStaleTavusConversations,
@@ -572,6 +572,7 @@ export default defineAgent({
       : null;
 
     let sessionRef: voice.AgentSession | null = null;
+    let silenceCheckInRef: SilenceCheckIn | null = null;
     const bitPicker = createBitPicker({
       getUsedIds: () => callState.get().usedBitIds,
       markUsed: (bitId) => callState.dispatch({ type: 'record_bit_used', bitId }),
@@ -579,20 +580,29 @@ export default defineAgent({
 
     const resultNudger = createToolResultNudger({
       room: roomName,
-      generateReply: (opts) => sessionRef?.generateReply(opts),
+      generateReply: (opts) => {
+        silenceCheckInRef?.onExternalReply();
+        return sessionRef?.generateReply(opts);
+      },
       log: calllog,
     });
 
     const extraAnnouncer = createExtraAnnouncer({
       room: roomName,
-      generateReply: (opts) => sessionRef?.generateReply(opts),
+      generateReply: (opts) => {
+        silenceCheckInRef?.onExternalReply();
+        return sessionRef?.generateReply(opts);
+      },
       log: calllog,
     });
 
     const toolFiller = createToolFiller({
       room: roomName,
       bitPicker,
-      generateReply: (opts) => sessionRef?.generateReply(opts),
+      generateReply: (opts) => {
+        silenceCheckInRef?.onExternalReply();
+        return sessionRef?.generateReply(opts);
+      },
       sendWorkingNote: (params) => sendInterimToolNote(activeRealtimeSession, params),
       log: calllog,
     });
@@ -604,6 +614,7 @@ export default defineAgent({
         resultNudger.hasPending || toolFiller.isRunning || extraAnnouncer.hasPending,
       log: calllog,
     });
+    silenceCheckInRef = silenceCheckIn;
 
     const orderController = createOrderController({
       room: roomName,
@@ -692,7 +703,7 @@ export default defineAgent({
       if (ev.item.type === 'message' && ev.item.role === 'assistant') {
         const text = ev.item.textContent ?? '';
         resultNudger.onAssistantMessage(text);
-        silenceCheckIn.onAssistantMessage(text);
+        silenceCheckIn.onAssistantMessage(text, { interrupted: ev.item.interrupted });
         calllog(roomName, 'alice_said', { text, interrupted: ev.item.interrupted });
       } else if (ev.item.type === 'message' && ev.item.role === 'user') {
         const text = ev.item.textContent ?? '';
