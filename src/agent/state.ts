@@ -60,6 +60,7 @@ export interface CallState {
   secondOutfitOffered: boolean;
   camera: CameraStatusValue;
   facts: string[];
+  usedBitIds: string[];
 }
 
 export type CallStateAction =
@@ -83,7 +84,8 @@ export type CallStateAction =
   | { type: 'set_bag'; bag: BagState }
   | { type: 'set_second_outfit_offered'; offered: boolean }
   | { type: 'set_camera'; camera: CameraStatusValue }
-  | { type: 'add_fact'; fact: string };
+  | { type: 'add_fact'; fact: string }
+  | { type: 'record_bit_used'; bitId: string };
 
 const MAX_FACTS = 20;
 
@@ -104,6 +106,7 @@ export function createInitialCallState(overrides: Partial<CallState> = {}): Call
     secondOutfitOffered: false,
     camera: 'off',
     facts: [],
+    usedBitIds: [],
     ...overrides,
   };
 }
@@ -526,6 +529,18 @@ export function reduceCallState(
         changed,
       };
     }
+
+    case 'record_bit_used': {
+      const clean = action.bitId.trim();
+      if (!clean || state.usedBitIds.includes(clean)) return { state, changed };
+      return {
+        state: {
+          ...state,
+          usedBitIds: [...state.usedBitIds, clean],
+        },
+        changed: ['usedBitIds'],
+      };
+    }
   }
 }
 
@@ -659,7 +674,9 @@ export function createCallStateStore(options: CallStateStoreOptions): CallStateS
     if (changed.length === 0) return [];
     current = next;
     logFn(options.roomName, 'call_state', { changed });
-    pushSummary();
+    if (changed.some((key) => key !== 'usedBitIds')) {
+      pushSummary();
+    }
     return changed;
   }
 

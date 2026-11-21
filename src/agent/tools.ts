@@ -25,6 +25,12 @@ import type {
   Piece,
   SearchResult,
 } from '../types.ts';
+import {
+  type BitPicker,
+  createBitPicker,
+  formatWorkingNoteWithBit,
+} from './bits.ts';
+import { DEFAULT_FILLER_INITIAL_DELAY_MS } from './filler.ts';
 import type { PageSender } from './page.ts';
 import {
   type BagNotAdded,
@@ -58,6 +64,8 @@ export const SLOW_TOOL_NOTES: Readonly<Record<string, string>> = {
   build_outfits: 'Working on building three outfits now.',
   show_on_me: 'Working on rendering your try-on now.',
   swap_piece: 'Working on finding a replacement piece now.',
+  add_to_bag: 'Working on adding your look to the bag now.',
+  search_products: 'Working on searching for pieces now.',
 };
 
 export const TOOL_ERROR_FALLBACK =
@@ -153,7 +161,13 @@ export interface ToolRuntimeOptions {
   tryOnTimeoutMs?: number;
   walkIntervalMs?: number;
   weatherTimeoutMs?: number;
+  workingNoteDelayMs?: number;
+  bitPicker?: BitPicker;
   sendWorkingNote?: (params: WorkingNoteParams) => boolean | void;
+  onToolStart?: (params: { name: string; callId: string }) => void;
+  onToolEnd?: (params: { name: string; callId: string }) => void;
+  onSlowToolStart?: (params: { name: string; callId: string; baseNote: string }) => void;
+  onSlowToolEnd?: (params: { name: string; callId: string }) => void;
   onToolResult?: (params: { name: string; callId: string; text: string }) => void;
   getShopperTurns?: () => readonly string[];
   getSnapshot?: () => CameraSnapshot | null;
@@ -510,18 +524,8 @@ export function createToolWrapper(options: ToolRuntimeOptions): ToolWrapperConte
         });
 
         const promise = (async (): Promise<string> => {
+          options.onToolStart?.({ name, callId });
           try {
-            const note = SLOW_TOOL_NOTES[name];
-            if (note) {
-              const sent = options.sendWorkingNote?.({ callId, name, note }) ?? false;
-              logFn(options.room, 'tool_note', {
-                name,
-                call_id: callId,
-                note,
-                sent: Boolean(sent),
-              });
-            }
-
             const result = await handler(args, { toolCallId: callId });
             const text = typeof result === 'string' ? result : String(result);
             const durationMs = Math.max(0, nowFn() - startedAt);
@@ -542,6 +546,8 @@ export function createToolWrapper(options: ToolRuntimeOptions): ToolWrapperConte
               stack: errorObj.stack,
             });
             return TOOL_ERROR_FALLBACK;
+          } finally {
+            options.onToolEnd?.({ name, callId });
           }
         })();
 
@@ -742,9 +748,19 @@ export function createAgentTools(options: ToolRuntimeOptions) {
   const tryOnTimeoutMs = options.tryOnTimeoutMs ?? DEFAULT_TRYON_WAIT_MS;
   const walkIntervalMs = options.walkIntervalMs ?? DEFAULT_HIGHLIGHT_WALK_MS;
   const weatherTimeoutMs = options.weatherTimeoutMs ?? DEFAULT_WEATHER_TIMEOUT_MS;
+  const workingNoteDelayMs = Math.max(
+    0,
+    options.workingNoteDelayMs ?? DEFAULT_FILLER_INITIAL_DELAY_MS,
+  );
   const page = options.page ?? NOOP_PAGE_SENDER;
   const stateStore =
     options.state ?? createCallStateStore({ roomName: options.room, log: logFn });
+  const bitPicker =
+    options.bitPicker ??
+    createBitPicker({
+      getUsedIds: () => stateStore.get().usedBitIds,
+      markUsed: (bitId) => stateStore.dispatch({ type: 'record_bit_used', bitId }),
+    });
 
   const buildOutfitsFn = options.deps?.buildOutfits ?? defaultBuildOutfits;
   const swapPieceFn = options.deps?.swapPiece ?? defaultSwapPiece;
@@ -794,6 +810,65 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     handle.unref?.();
     activeTimers.add(handle);
     return handle;
+  }
+
+  let slowWorkSeq = 0;
+
+  function beginSlowWork(name: string, callId: string): () => void {
+    const baseNote = SLOW_TOOL_NOTES[name];
+    if (!baseNote) return () => {};
+
+    if (options.onSlowToolStart) {
+      let ended = false;
+      options.onSlowToolStart({ name, callId, baseNote });
+      return () => {
+        if (ended) return;
+        ended = true;
+        options.onSlowToolEnd?.({ name, callId });
+      };
+    }
+
+    if (!options.sendWorkingNote) {
+      return () => {};
+    }
+
+    const waitKey = callId || `${name}:${++slowWorkSeq}`;
+    let done = false;
+    let noteTimer: TimerLike | null = scheduleTimer(() => {
+      noteTimer = null;
+      if (done || options.signal?.aborted) return;
+      const bit = bitPicker.pick(waitKey);
+      const note = bit ? formatWorkingNoteWithBit(baseNote, bit) : baseNote;
+      const sent = Boolean(options.sendWorkingNote?.({ callId, name, note }));
+      logFn(options.room, 'tool_note', {
+        name,
+        call_id: callId,
+        note,
+        ...(bit ? { bit_id: bit.id } : {}),
+        sent,
+      });
+      if (bit) {
+        logFn(options.room, 'filler_bit', {
+          id: bit.id,
+          theme: bit.theme,
+          tool: name,
+          call_id: callId,
+          count: 1,
+          via: 'working_note',
+        });
+      }
+    }, workingNoteDelayMs);
+
+    return () => {
+      if (done) return;
+      done = true;
+      if (noteTimer !== null) {
+        clearTimeoutFn(noteTimer);
+        activeTimers.delete(noteTimer);
+        noteTimer = null;
+      }
+      bitPicker.clearWait(waitKey);
+    };
   }
 
   if (options.signal) {
@@ -1106,7 +1181,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       }),
       execute: wrapper.wrap(
         'build_outfits',
-        async ({ occasion, budget_usd, notes, own_piece, where, when }) => {
+        async ({ occasion, budget_usd, notes, own_piece, where, when }, { toolCallId }) => {
         const department = stateStore.get().department;
         if (!department) {
           return 'Department is not set yet. Decide men or women yourself, call set_department first, then call build_outfits.';
@@ -1161,6 +1236,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           budget: effectiveBudget,
         };
         const isCurrentBuild = () => myGen === buildGen && !options.signal?.aborted;
+        const finishSlowWork = beginSlowWork('build_outfits', toolCallId);
 
         try {
           lastBriefNotes = notes;
@@ -1337,6 +1413,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
           return [...headerLines, ...lookLines, ...footerLines].join('\n');
         } finally {
+          finishSlowWork();
           if (activeBuild?.gen === myGen) {
             activeBuild = null;
           }
@@ -1396,7 +1473,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       parameters: z.object({
         outfit: outfitNumberSchema.optional(),
       }),
-      execute: wrapper.wrap('show_on_me', async ({ outfit: requestedOutfit }) => {
+      execute: wrapper.wrap('show_on_me', async ({ outfit: requestedOutfit }, { toolCallId }) => {
         const resolved = resolveLook(requestedOutfit);
         if (!resolved) {
           return `No look selected to try on. ${availableLookHint()}`;
@@ -1419,11 +1496,16 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           : '';
 
         if (tryOnInfo?.status === 'rendering' && job) {
-          const outcome = await waitForJobWithTimeout(job, tryOnTimeoutMs);
-          if (outcome === 'timeout') {
-            return `The fitting room is jammed right now for Look ${lookNum} (${outfit.name}) and the try-on timed out. Keep it light and offer the flat-lay and individual pieces instead.${cameraOffFallbackNote}`;
+          const finishSlowWork = beginSlowWork('show_on_me', toolCallId);
+          try {
+            const outcome = await waitForJobWithTimeout(job, tryOnTimeoutMs);
+            if (outcome === 'timeout') {
+              return `The fitting room is jammed right now for Look ${lookNum} (${outfit.name}) and the try-on timed out. Keep it light and offer the flat-lay and individual pieces instead.${cameraOffFallbackNote}`;
+            }
+            tryOnInfo = stateStore.get().tryOn[lookNum];
+          } finally {
+            finishSlowWork();
           }
-          tryOnInfo = stateStore.get().tryOn[lookNum];
         }
 
         if (tryOnInfo?.status === 'ready' && tryOnInfo.url) {
@@ -1452,7 +1534,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         slot: slotSchema,
         request: z.string().describe('What the shopper wants instead for this piece'),
       }),
-      execute: wrapper.wrap('swap_piece', async ({ outfit: requestedOutfit, slot, request }) => {
+      execute: wrapper.wrap(
+        'swap_piece',
+        async ({ outfit: requestedOutfit, slot, request }, { toolCallId }) => {
         const resolved = resolveLook(requestedOutfit);
         if (!resolved) {
           return `No look selected for a swap. ${availableLookHint()}`;
@@ -1462,50 +1546,55 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         const existingPiece = findPieceInOutfit(outfit, slot);
         const targetSlot = existingPiece?.slot ?? slot;
         const started = nowFn();
+        const finishSlowWork = beginSlowWork('swap_piece', toolCallId);
 
-        const swapResult = await swapPieceFn(outfit, targetSlot, request, currentBrief(), {
-          room: options.room,
-        });
-        const ms = Math.max(0, Math.round(nowFn() - started));
+        try {
+          const swapResult = await swapPieceFn(outfit, targetSlot, request, currentBrief(), {
+            room: options.room,
+          });
+          const ms = Math.max(0, Math.round(nowFn() - started));
 
-        const updatedOutfit: Outfit = { ...swapResult.outfit, number: lookNum };
-        outfitsByNumber.set(lookNum, updatedOutfit);
-        stateStore.dispatch({
-          type: 'update_look',
-          look: outfitToStateLook(updatedOutfit, lookNum),
-        });
+          const updatedOutfit: Outfit = { ...swapResult.outfit, number: lookNum };
+          outfitsByNumber.set(lookNum, updatedOutfit);
+          stateStore.dispatch({
+            type: 'update_look',
+            look: outfitToStateLook(updatedOutfit, lookNum),
+          });
 
-        const reply = await page.send('updateOutfit', {
-          outfit: lookNum,
-          data: updatedOutfit,
-          slot: targetSlot,
-        });
+          const reply = await page.send('updateOutfit', {
+            outfit: lookNum,
+            data: updatedOutfit,
+            slot: targetSlot,
+          });
 
-        startBackgroundMediaForLook(updatedOutfit);
-        wrapper.invalidate('swap_piece');
+          startBackgroundMediaForLook(updatedOutfit);
+          wrapper.invalidate('swap_piece');
 
-        const newItem = swapResult.piece?.item;
-        logFn(options.room, 'swap', {
-          outfit: lookNum,
-          slot: targetSlot,
-          request,
-          ms,
-          title: newItem?.title ?? null,
-          price: newItem?.price ?? null,
-          store: newItem?.store ?? null,
-          total: updatedOutfit.total,
-          ...(swapResult.note ? { note: swapResult.note } : {}),
-        });
+          const newItem = swapResult.piece?.item;
+          logFn(options.room, 'swap', {
+            outfit: lookNum,
+            slot: targetSlot,
+            request,
+            ms,
+            title: newItem?.title ?? null,
+            price: newItem?.price ?? null,
+            store: newItem?.store ?? null,
+            total: updatedOutfit.total,
+            ...(swapResult.note ? { note: swapResult.note } : {}),
+          });
 
-        const pieceDesc = newItem
-          ? `${newItem.title} (${formatPrice(newItem.price)}, ${newItem.store})`
-          : targetSlot;
-        const screenStatus = reply.ok
-          ? `Updated Look ${lookNum} on screen`
-          : `Updated Look ${lookNum} (page did not confirm the visual update)`;
-        const notePart = swapResult.note ? ` Note: ${swapResult.note}` : '';
+          const pieceDesc = newItem
+            ? `${newItem.title} (${formatPrice(newItem.price)}, ${newItem.store})`
+            : targetSlot;
+          const screenStatus = reply.ok
+            ? `Updated Look ${lookNum} on screen`
+            : `Updated Look ${lookNum} (page did not confirm the visual update)`;
+          const notePart = swapResult.note ? ` Note: ${swapResult.note}` : '';
 
-        return `${screenStatus}: ${targetSlot} is now ${pieceDesc}. New look total: ${formatPrice(updatedOutfit.total)}.${notePart} Try-on and flat-lay are refreshing.`;
+          return `${screenStatus}: ${targetSlot} is now ${pieceDesc}. New look total: ${formatPrice(updatedOutfit.total)}.${notePart} Try-on and flat-lay are refreshing.`;
+        } finally {
+          finishSlowWork();
+        }
       }),
     }),
 
@@ -1621,44 +1710,49 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         query: z.string().describe('Product search query'),
         max_price: z.number().optional().describe('Optional maximum price in US dollars'),
       }),
-      execute: wrapper.wrap('search_products', async ({ query, max_price }) => {
-        let searchFn = options.deps?.searchProducts;
-        if (!searchFn) {
-          const storeMod = await loadStoreModuleFn();
-          if (typeof storeMod?.searchMixed === 'function') {
-            searchFn = storeMod.searchMixed;
-          } else if (typeof storeMod?.search === 'function') {
-            searchFn = storeMod.search;
+      execute: wrapper.wrap('search_products', async ({ query, max_price }, { toolCallId }) => {
+        const finishSlowWork = beginSlowWork('search_products', toolCallId);
+        try {
+          let searchFn = options.deps?.searchProducts;
+          if (!searchFn) {
+            const storeMod = await loadStoreModuleFn();
+            if (typeof storeMod?.searchMixed === 'function') {
+              searchFn = storeMod.searchMixed;
+            } else if (typeof storeMod?.search === 'function') {
+              searchFn = storeMod.search;
+            }
           }
+
+          if (!searchFn) {
+            return 'Standalone product search is not available yet. Steer back to the curated looks or offer to swap a piece in one of them.';
+          }
+
+          const gender: Gender = stateStore.get().department ?? 'women';
+          const searchOpts: SearchOpts = { limit: 8 };
+          if (max_price !== undefined) {
+            searchOpts.maxPrice = max_price;
+          }
+
+          const res = await searchFn(query, gender, searchOpts);
+          const items = Array.isArray(res?.items) ? res.items : [];
+          const reply = await page.send('showSearch', { query, items });
+
+          if (items.length === 0) {
+            return `Nothing in stock matched "${query}"${max_price !== undefined ? ` under ${formatPrice(max_price)}` : ''}. Steer back to the curated looks.`;
+          }
+
+          const list = items
+            .slice(0, 8)
+            .map((item) => `${item.title} (${formatPrice(item.price)}, ${item.store})`)
+            .join('; ');
+          const screenNote = reply.ok
+            ? `Shown ${items.length} results for "${query}" on screen:`
+            : `Found ${items.length} results for "${query}" (page did not confirm displaying them):`;
+
+          return `${screenNote} ${list}`;
+        } finally {
+          finishSlowWork();
         }
-
-        if (!searchFn) {
-          return 'Standalone product search is not available yet. Steer back to the curated looks or offer to swap a piece in one of them.';
-        }
-
-        const gender: Gender = stateStore.get().department ?? 'women';
-        const searchOpts: SearchOpts = { limit: 8 };
-        if (max_price !== undefined) {
-          searchOpts.maxPrice = max_price;
-        }
-
-        const res = await searchFn(query, gender, searchOpts);
-        const items = Array.isArray(res?.items) ? res.items : [];
-        const reply = await page.send('showSearch', { query, items });
-
-        if (items.length === 0) {
-          return `Nothing in stock matched "${query}"${max_price !== undefined ? ` under ${formatPrice(max_price)}` : ''}. Steer back to the curated looks.`;
-        }
-
-        const list = items
-          .slice(0, 8)
-          .map((item) => `${item.title} (${formatPrice(item.price)}, ${item.store})`)
-          .join('; ');
-        const screenNote = reply.ok
-          ? `Shown ${items.length} results for "${query}" on screen:`
-          : `Found ${items.length} results for "${query}" (page did not confirm displaying them):`;
-
-        return `${screenNote} ${list}`;
       }),
     }),
 
@@ -1673,7 +1767,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             'Map of piece slot to the exact size the shopper said—preserve half sizes, widths, and waist with inseam, e.g. {"top": "medium", "bottom": "30x34", "shoes": "8.5 wide"}. A new size for a slot replaces the remembered size for that slot.',
           ),
       }),
-      execute: wrapper.wrap('add_to_bag', async ({ outfit: requestedOutfit, sizes }) => {
+      execute: wrapper.wrap(
+        'add_to_bag',
+        async ({ outfit: requestedOutfit, sizes }, { toolCallId }) => {
         const resolved = resolveLook(requestedOutfit);
         if (!resolved) {
           return `NOT DONE: No look selected to add to the bag. ${availableLookHint()}`;
@@ -1784,7 +1880,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           return formatBagCeilingNotDone(estimatedLookTotal, estimatedRunningTotal);
         }
 
-        let addToBagFn = options.deps?.addToBag;
+        const finishSlowWork = beginSlowWork('add_to_bag', toolCallId);
+        try {
+          let addToBagFn = options.deps?.addToBag;
         let usedMock = false;
         let storeImportFailed = false;
         if (!addToBagFn) {
@@ -2019,6 +2117,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         const resultText = lines.join(' ');
         baggedResults.set(dedupeKey, resultText);
         return resultText;
+        } finally {
+          finishSlowWork();
+        }
       }),
     }),
   };

@@ -33,10 +33,13 @@ import {
   readInitialCameraStatus,
   sendRealtimeContext,
 } from './context.ts';
+import { createBitPicker } from './bits.ts';
+import { createToolFiller } from './filler.ts';
 import { applyRealtimeSessionPatches, sendInterimToolNote } from './patches.ts';
 import { createToolResultNudger } from './nudge.ts';
 import { createPageSender } from './page.ts';
 import { ALICE_SYSTEM_PROMPT, GREETING_INSTRUCTIONS } from './prompt.ts';
+import { createSilenceCheckIn } from './silence.ts';
 import { createCallStateStore } from './state.ts';
 import {
   endStaleTavusConversations,
@@ -442,9 +445,29 @@ export default defineAgent({
       : null;
 
     let sessionRef: voice.AgentSession | null = null;
+    const bitPicker = createBitPicker({
+      getUsedIds: () => callState.get().usedBitIds,
+      markUsed: (bitId) => callState.dispatch({ type: 'record_bit_used', bitId }),
+    });
+
     const resultNudger = createToolResultNudger({
       room: roomName,
       generateReply: (opts) => sessionRef?.generateReply(opts),
+      log: calllog,
+    });
+
+    const toolFiller = createToolFiller({
+      room: roomName,
+      bitPicker,
+      generateReply: (opts) => sessionRef?.generateReply(opts),
+      sendWorkingNote: (params) => sendInterimToolNote(activeRealtimeSession, params),
+      log: calllog,
+    });
+
+    const silenceCheckIn = createSilenceCheckIn({
+      room: roomName,
+      generateReply: (opts) => sessionRef?.generateReply(opts),
+      isSuppressed: () => resultNudger.hasPending || toolFiller.isRunning,
       log: calllog,
     });
 
@@ -452,8 +475,13 @@ export default defineAgent({
       room: roomName,
       page,
       state: callState,
+      bitPicker,
       signal: toolAbort.signal,
       sendWorkingNote: (params) => sendInterimToolNote(activeRealtimeSession, params),
+      onToolStart: (ev) => silenceCheckIn.onToolStart(ev.callId),
+      onToolEnd: (ev) => silenceCheckIn.onToolEnd(ev.callId),
+      onSlowToolStart: (ev) => toolFiller.onToolStart(ev),
+      onSlowToolEnd: (ev) => toolFiller.onToolEnd(ev.callId),
       onToolResult: (ev) => resultNudger.onToolResult(ev),
       getSnapshot: () => vision?.latest() ?? null,
     });
@@ -477,17 +505,22 @@ export default defineAgent({
     session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev) => {
       appContext.setAgentState(ev.newState);
       resultNudger.onAgentStateChanged(ev.newState);
+      toolFiller.onAgentStateChanged(ev.newState);
+      silenceCheckIn.onAgentStateChanged(ev.newState);
       calllog(roomName, 'agent_state', { old: ev.oldState, state: ev.newState });
     });
 
     session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
       resultNudger.onUserStateChanged(ev.newState);
+      toolFiller.onUserStateChanged(ev.newState);
+      silenceCheckIn.onUserStateChanged(ev.newState);
       calllog(roomName, 'user_state', { old: ev.oldState, state: ev.newState });
     });
 
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
       if (ev.isFinal && ev.transcript) {
         callState.recordShopperTurn(ev.transcript, ev.itemId);
+        silenceCheckIn.onShopperActivity();
         if (ev.itemId) {
           loggedUserItemIds.add(ev.itemId);
         }
@@ -499,11 +532,13 @@ export default defineAgent({
       if (ev.item.type === 'message' && ev.item.role === 'assistant') {
         const text = ev.item.textContent ?? '';
         resultNudger.onAssistantMessage(text);
+        silenceCheckIn.onAssistantMessage(text);
         calllog(roomName, 'alice_said', { text, interrupted: ev.item.interrupted });
       } else if (ev.item.type === 'message' && ev.item.role === 'user') {
         const text = ev.item.textContent ?? '';
         if (text.trim().length > 0) {
           callState.recordShopperTurn(text, ev.item.id);
+          silenceCheckIn.onShopperActivity();
           if (!ev.item.id || !loggedUserItemIds.has(ev.item.id)) {
             if (ev.item.id) {
               loggedUserItemIds.add(ev.item.id);
@@ -554,6 +589,8 @@ export default defineAgent({
       });
       toolAbort.abort();
       resultNudger.dispose();
+      toolFiller.dispose();
+      silenceCheckIn.dispose();
       cleanupTavusWatcher?.();
       void activeTavusAvatar?.shutdown().catch(() => {});
       void vision?.close().catch(() => {});
@@ -564,6 +601,8 @@ export default defineAgent({
     ctx.addShutdownCallback(async () => {
       toolAbort.abort();
       resultNudger.dispose();
+      toolFiller.dispose();
+      silenceCheckIn.dispose();
       cleanupCameraWatcher?.();
       cleanupTavusWatcher?.();
       await activeTavusAvatar?.shutdown();
