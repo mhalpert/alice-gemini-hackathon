@@ -58,6 +58,11 @@ export function estimateCostUsd(entry: {
       return (inTok * 0.1) / 1_000_000;
     case 'gemini-nano-banana-2.1':
       return imgs * 0.05;
+    case 'gemini-omni-1.2-flash':
+    case 'gemini-omni-1.1-flash':
+    case 'gemini-omni-flash-preview':
+      // Estimated ~$0.60 per video clip
+      return (entry.images ?? 1) * 0.6;
     default:
       return 0;
   }

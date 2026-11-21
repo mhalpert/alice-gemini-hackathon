@@ -10,6 +10,7 @@ import {
   TRYON_NAME_RE,
   boardFileName,
   buildGateCorrection,
+  buildSetting,
   classifyShotSource,
   collectImageUrls,
   cropRawRgb,
@@ -18,11 +19,14 @@ import {
   parseInspectorReply,
   parsePickReply,
   resolvePick,
+  runTryOnExtrasLoop,
   runTryOnVerifyLoop,
+  sceneFileName,
   shotFileName,
   sortPiecesForTryOn,
   stripHtml,
   tryonFileName,
+  videoFileName,
   whitenBackground,
   withWidth,
 } from '../src/media/pure.ts';
@@ -537,6 +541,9 @@ describe('ledger', () => {
     assert.ok(
       Math.abs(estimateCostUsd({ model: 'gemini-nano-banana-2.1', images: 3 }) - 0.15) < 1e-9,
     );
+    assert.ok(
+      Math.abs(estimateCostUsd({ model: 'gemini-omni-1.2-flash', images: 1 }) - 0.6) < 1e-9,
+    );
     assert.equal(estimateCostUsd({ model: 'some-unknown-model', input_tokens: 1000 }), 0);
     assert.equal(estimateCostUsd({ model: 'some-unknown-model', usd: 0.42 }), 0.42);
   });
@@ -1009,6 +1016,132 @@ describe('try-on verify loop, gate correction, and inspector parser', () => {
     assert.equal(out.check.path, 'pass');
     assert.equal(out.check.attempts, 1);
     assert.equal(out.check.passed, true);
+  });
+});
+
+describe('try-on extras: buildSetting, filenames, and parallel orchestrator', () => {
+  const delay = (ms: number): Promise<void> =>
+    new Promise((resolve) => {
+      setTimeout(resolve, ms);
+    });
+
+  it('buildSetting formats occasion, where, when, and weather naturally', () => {
+    assert.equal(
+      buildSetting({
+        occasion: "a friend's rooftop birthday",
+        where: 'New York',
+        when: 'Saturday evening',
+        weather: 'cool, overcast',
+      }),
+      "a friend's rooftop birthday in New York on a cool, overcast Saturday evening, city lights behind",
+    );
+    assert.equal(
+      buildSetting({
+        occasion: 'a beach wedding',
+        where: 'Malibu',
+        when: 'Sunday afternoon',
+        weather: 'overcast, breezy',
+      }),
+      'a beach wedding in Malibu on an overcast, breezy Sunday afternoon, soft ocean light and shoreline behind',
+    );
+    assert.equal(
+      buildSetting({ occasion: 'a gallery opening', where: 'Chelsea' }),
+      'a gallery opening in Chelsea',
+    );
+    assert.equal(buildSetting({ occasion: 'date night' }), 'date night');
+  });
+
+  it('generates server-safe scene and video filenames matching TRYON_NAME_RE', () => {
+    const id = newTryonId();
+    assert.match(sceneFileName(id), TRYON_NAME_RE);
+    assert.match(videoFileName(id), TRYON_NAME_RE);
+    assert.ok(videoFileName(id).endsWith('.mp4'));
+  });
+
+  it('starts scene and video in parallel and invokes onRender in arrival order', async () => {
+    const events: string[] = [];
+    const arrivals: Array<{ kind: 'scene' | 'video'; ok: boolean; url?: string }> = [];
+
+    const out = await runTryOnExtrasLoop({
+      setting: 'rooftop dinner in New York',
+      sceneEnabled: true,
+      videoEnabled: true,
+      runScene: async () => {
+        events.push('scene_start');
+        await delay(25);
+        events.push('scene_end');
+        return { url: '/tryon/scene-1.jpg', path: '/tmp/scene-1.jpg', ms: 25 };
+      },
+      runVideo: async () => {
+        events.push('video_start');
+        await delay(70);
+        events.push('video_end');
+        return { url: '/tryon/video-1.mp4', path: '/tmp/video-1.mp4', ms: 70 };
+      },
+      onRender: (r) => {
+        arrivals.push({ kind: r.kind, ok: r.ok, url: r.url });
+      },
+    });
+
+    // Both started before either finished
+    assert.deepEqual(events.slice(0, 2), ['scene_start', 'video_start']);
+    // Scene arrived first, then video
+    assert.deepEqual(arrivals, [
+      { kind: 'scene', ok: true, url: '/tryon/scene-1.jpg' },
+      { kind: 'video', ok: true, url: '/tryon/video-1.mp4' },
+    ]);
+    assert.equal(out.scene?.url, '/tryon/scene-1.jpg');
+    assert.equal(out.video?.url, '/tryon/video-1.mp4');
+    assert.equal(out.setting, 'rooftop dinner in New York');
+  });
+
+  it('degrades a failed part to null while returning the other part without throwing', async () => {
+    const arrivals: Array<{ kind: 'scene' | 'video'; ok: boolean }> = [];
+    const out = await runTryOnExtrasLoop({
+      setting: 'dinner in SoHo',
+      sceneEnabled: true,
+      videoEnabled: true,
+      runScene: async () => {
+        throw new Error('scene boom');
+      },
+      runVideo: async () => {
+        await delay(20);
+        return { url: '/tryon/video-2.mp4', path: '/tmp/video-2.mp4', ms: 20 };
+      },
+      onRender: (r) => {
+        arrivals.push({ kind: r.kind, ok: r.ok });
+      },
+    });
+
+    assert.equal(out.scene, null);
+    assert.equal(out.video?.url, '/tryon/video-2.mp4');
+    assert.deepEqual(arrivals, [
+      { kind: 'scene', ok: false },
+      { kind: 'video', ok: true },
+    ]);
+  });
+
+  it('honors sceneEnabled / videoEnabled switches without calling disabled renders', async () => {
+    let sceneCalls = 0;
+    let videoCalls = 0;
+    const out = await runTryOnExtrasLoop({
+      setting: 'coffee walk',
+      sceneEnabled: false,
+      videoEnabled: false,
+      runScene: async () => {
+        sceneCalls += 1;
+        return { url: '/tryon/scene-x.jpg', path: '/tmp/x.jpg', ms: 10 };
+      },
+      runVideo: async () => {
+        videoCalls += 1;
+        return { url: '/tryon/video-x.mp4', path: '/tmp/x.mp4', ms: 10 };
+      },
+    });
+
+    assert.equal(sceneCalls, 0);
+    assert.equal(videoCalls, 0);
+    assert.equal(out.scene, null);
+    assert.equal(out.video, null);
   });
 });
 
