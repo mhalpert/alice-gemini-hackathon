@@ -4,8 +4,11 @@
 import { mountStore } from './store.js';
 import { mountCall } from './call.js';
 
-const store = mountStore(document.getElementById('store'));
-const call = mountCall(document.getElementById('call'), { handlers: store.handlers });
+let call;
+const store = mountStore(document.getElementById('store'), {
+  onTalk: () => call?.start(),
+});
+call = mountCall(document.getElementById('call'), { handlers: store.handlers });
 
 const query = new URLSearchParams(location.search);
 if (query.has('demo')) {
