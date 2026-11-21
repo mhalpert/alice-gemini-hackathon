@@ -94,11 +94,20 @@ export interface OrderReviewRecord {
   order: OrderReview;
 }
 
+export type OrderLatchOutcome = OrderPlacedOutcome;
+
+export interface OrderLatchState {
+  closed: true;
+  outcome: OrderLatchOutcome;
+  order_id: string;
+}
+
 export interface OrderMachineState {
   settledBag: BagOut | null;
   settledBagFingerprint: string | null;
   activeReview: OrderReviewRecord | null;
   attemptedOrderIds: Readonly<Record<string, string>>;
+  latch: OrderLatchState | null;
 }
 
 export type OrderMachineAction =
@@ -106,7 +115,8 @@ export type OrderMachineAction =
   | { type: 'bag_cleared' }
   | { type: 'invalidate_review' }
   | { type: 'review_recorded'; review: OrderReviewRecord }
-  | { type: 'order_attempt_recorded'; order_id: string; result: string };
+  | { type: 'order_attempt_recorded'; order_id: string; result: string }
+  | { type: 'close_latch'; outcome: OrderLatchOutcome; order_id: string };
 
 export function createInitialOrderMachineState(): OrderMachineState {
   return {
@@ -114,7 +124,21 @@ export function createInitialOrderMachineState(): OrderMachineState {
     settledBagFingerprint: null,
     activeReview: null,
     attemptedOrderIds: {},
+    latch: null,
   };
+}
+
+export function formatOrderLatchRefusal(outcome: OrderLatchOutcome): string {
+  switch (outcome) {
+    case 'unknown':
+      return 'NOT DONE: ordering is finished for this call. Check your Shop app or email before trying again in a new call.';
+    case 'all_placed':
+      return 'NOT DONE: ordering is finished for this call; your order is already placed. Anything else can be finished with the store links on screen.';
+    case 'partial':
+      return 'NOT DONE: ordering is finished for this call; part of your order is already placed. Anything else can be finished with the store links on screen.';
+    case 'handoff':
+      return 'NOT DONE: ordering is finished for this call. Anything else can be finished with the store links on screen.';
+  }
 }
 
 function stableJson(value: unknown): string {
@@ -236,6 +260,19 @@ export function reduceOrderState(
           [action.order_id]: action.result,
         },
       };
+
+    case 'close_latch':
+      if (state.latch !== null) {
+        return state;
+      }
+      return {
+        ...state,
+        latch: {
+          closed: true,
+          outcome: action.outcome,
+          order_id: action.order_id,
+        },
+      };
   }
 }
 
@@ -295,6 +332,15 @@ export function evaluatePlaceOrderGates(params: {
       ok: false,
       reason: 'purchase_disabled',
       message: 'NOT DONE: in-call purchasing is not enabled.',
+    };
+  }
+
+  if (state.latch?.closed) {
+    return {
+      ok: false,
+      reason: 'order_latch_closed',
+      order_id: state.latch.order_id,
+      message: formatOrderLatchRefusal(state.latch.outcome),
     };
   }
 
@@ -645,6 +691,19 @@ export function createOrderController(options: OrderToolsOptions): OrderControll
     options.stateStore.dispatch({ type: 'set_order_review', review: null });
   }
 
+  function closeLatch(outcome: OrderLatchOutcome, orderId: string): void {
+    if (machine.latch?.closed) return;
+    machine = reduceOrderState(machine, {
+      type: 'close_latch',
+      outcome,
+      order_id: orderId,
+    });
+    logFn(options.room, 'order_latch_closed', {
+      outcome,
+      order_id: orderId,
+    });
+  }
+
   function wrapOrderTool<TArgs extends Record<string, unknown>>(
     name: string,
     handler: (args: TArgs) => Promise<string>,
@@ -694,6 +753,20 @@ export function createOrderController(options: OrderToolsOptions): OrderControll
     description:
       'Prepare an in-call order review for the current settled shopping bag and display it on screen so the shopper can check totals, payment, and address before confirming. No money moves.',
     execute: wrapOrderTool('review_order', async () => {
+      if (machine.latch?.closed) {
+        logFn(options.room, 'order_blocked', {
+          reason: 'order_latch_closed',
+          outcome: machine.latch.outcome,
+          order_id: machine.latch.order_id,
+        });
+        return formatOrderLatchRefusal(machine.latch.outcome);
+      }
+
+      if (inFlightByOrderId.size > 0) {
+        logFn(options.room, 'order_blocked', { reason: 'order_in_flight' });
+        return 'NOT DONE: an order is already being sent in this call.';
+      }
+
       if (!machine.settledBag) {
         return ORDER_NOT_DONE_NO_BAG;
       }
@@ -872,6 +945,7 @@ export function createOrderController(options: OrderToolsOptions): OrderControll
             confirmedByTap,
           });
         } catch {
+          closeLatch('unknown', orderId);
           machine = reduceOrderState(machine, {
             type: 'order_attempt_recorded',
             order_id: orderId,
@@ -885,6 +959,8 @@ export function createOrderController(options: OrderToolsOptions): OrderControll
             ? placed.order_id
             : orderId;
         const stores = Array.isArray(placed?.stores) ? placed.stores : [];
+        const outcome = classifyOrderPlacedOutcome(stores);
+        closeLatch(outcome, placedOrderId);
 
         try {
           await options.page.send('orderPlaced', {

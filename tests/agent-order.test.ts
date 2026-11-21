@@ -798,17 +798,19 @@ test('happy path reviews bag, checks Confirm on page, calls placeOrder once with
     ],
   });
 
-  // Second call for the same order_id returns first result and does NOT call confirmOrder or placeOrder again.
+  // Second call for the same order_id is refused by the per-call latch and does NOT call confirmOrder or placeOrder again.
   const secondRes = await h.tools.place_order!.execute(
     { spoken_confirmation: true },
     fakeToolOpts('place-2'),
   );
-  assert.equal(secondRes, placeRes);
+  assert.match(secondRes, /^NOT DONE: ordering is finished for this call/);
+  assert.match(secondRes, /store links on screen/i);
   assert.equal(h.placeCalls.length, 1);
   assert.equal(h.pageCalls.filter((c) => c.action === 'confirmOrder').length, 1);
   assert.ok(
-    h.logs.some((l) => l.ev === 'order_blocked' && l.data?.reason === 'already_attempted'),
+    h.logs.some((l) => l.ev === 'order_blocked' && l.data?.reason === 'order_latch_closed'),
   );
+  assert.equal(h.logs.filter((l) => l.ev === 'order_latch_closed').length, 1);
 });
 
 test('idempotencyKey is a fresh random UUID per review and the SAME key is reused across repeated place_order attempts for that review', async () => {
@@ -860,23 +862,27 @@ test('idempotencyKey is a fresh random UUID per review and the SAME key is reuse
     assert.equal(g2.idempotencyKey, key1);
   }
 
-  // Shopper taps Confirm -> second place_order uses the EXACT SAME key1.
-  tapConfirmed = true;
-  const placed = await h.tools.place_order!.execute({ spoken_confirmation: true }, fakeToolOpts('p-ok'));
-  assert.match(placed, /Order ord-idem-1:/);
-  assert.equal(h.placeCalls.length, 1);
-  assert.equal(h.placeCalls[0]!.idempotencyKey, key1);
-
-  // Third place_order for the same review still calls placeOrder at most once and returns first result.
-  const repeat = await h.tools.place_order!.execute({ spoken_confirmation: true }, fakeToolOpts('p-repeat'));
-  assert.equal(repeat, placed);
-  assert.equal(h.placeCalls.length, 1);
-
-  // A new review_order generates a DIFFERENT fresh UUID.
+  // A fresh review_order BEFORE placing generates a DIFFERENT fresh UUID.
   await h.tools.review_order!.execute({}, fakeToolOpts('rev-2'));
   const key2 = h.orderController.getState().activeReview!.idempotencyKey;
   assert.match(key2, UUID_V4_RE);
   assert.notEqual(key2, key1);
+
+  // Shopper taps Confirm -> place_order uses the EXACT SAME key2.
+  tapConfirmed = true;
+  const placed = await h.tools.place_order!.execute({ spoken_confirmation: true }, fakeToolOpts('p-ok'));
+  assert.match(placed, /Order ord-idem-2:/);
+  assert.equal(h.placeCalls.length, 1);
+  assert.equal(h.placeCalls[0]!.idempotencyKey, key2);
+
+  // Third place_order and any later review_order are refused by the per-call latch with zero store calls.
+  const repeat = await h.tools.place_order!.execute({ spoken_confirmation: true }, fakeToolOpts('p-repeat'));
+  assert.match(repeat, /^NOT DONE: ordering is finished for this call/);
+  assert.equal(h.placeCalls.length, 1);
+
+  const lateReview = await h.tools.review_order!.execute({}, fakeToolOpts('rev-3'));
+  assert.match(lateReview, /^NOT DONE: ordering is finished for this call/);
+  assert.equal(reviewSeq, 2);
 });
 
 test('payment-processing failure tells shopper to check Shop app and gives no link or retry offer', async () => {
@@ -1288,16 +1294,20 @@ test('placeOrder throwing returns unknown-outcome wording without link/retry, do
   assert.equal(placeAttempts, 1);
   assert.equal(h.pageCalls.filter((c) => c.action === 'orderPlaced').length, 0);
 
-  // Second call for the same order_id must NOT retry placeOrder and must return the first result.
+  // Second call for the same order_id must NOT retry placeOrder and is refused by the per-call latch.
   const second = await h.tools.place_order!.execute(
     { spoken_confirmation: true },
     fakeToolOpts('place-throw-2'),
   );
-  assert.equal(second, ORDER_PLACE_UNCONFIRMED_ERROR);
+  assert.match(second, /^NOT DONE: ordering is finished for this call/);
+  assert.match(second, /Shop app or email before trying again in a new call/i);
   assert.equal(placeAttempts, 1);
   assert.ok(
-    h.logs.some((l) => l.ev === 'order_blocked' && l.data?.reason === 'already_attempted'),
+    h.logs.some((l) => l.ev === 'order_blocked' && l.data?.reason === 'order_latch_closed'),
   );
+  const latchLogs = h.logs.filter((l) => l.ev === 'order_latch_closed');
+  assert.equal(latchLogs.length, 1);
+  assert.equal(latchLogs[0]!.data?.outcome, 'unknown');
 });
 
 test('concurrent place_order calls for the same order_id invoke placeOrder only once', async () => {
@@ -1754,4 +1764,286 @@ test('place_order starts with the exact fixed outcome sentence for all four outc
     assert.equal(noTap.startsWith(ORDER_OUTCOME_HANDOFF), false);
     assert.equal(noTap.startsWith(ORDER_OUTCOME_UNKNOWN), false);
   }
+});
+
+test('per-call order latch: unknown outcome closes latch even after bag re-made with new cart id, swap, remove, invalidateReview, and new look (zero store calls)', async () => {
+  let prepareCalls = 0;
+  let placeCalls = 0;
+  const h = await setupHarness({
+    bagOut: makeRealBagOut({
+      carts: [
+        {
+          store: 'Everlane',
+          store_domain: 'everlane.myshopify.com',
+          cart_id: 'cart-everlane-1',
+          continue_url: 'https://everlane.example/cart/1',
+          total_usd: 60,
+          added: [{ variant_id: 'var-top-m', title: 'Merino Knit Polo', size: 'M' }],
+          not_added: [],
+          ms: 20,
+        },
+      ],
+      total_usd: 60,
+    }),
+    prepareOrder: async () => {
+      prepareCalls += 1;
+      return makeOrderReview({ order_id: `ord-unk-${prepareCalls}`, total: 60 });
+    },
+    placeOrder: async (orderId) => {
+      placeCalls += 1;
+      return makePlacedReview(orderId, [
+        {
+          store: 'Everlane',
+          items: [],
+          total: 60,
+          payment_label: CANARY_PAYMENT_LABEL,
+          ready: true,
+          status: 'failed',
+          note: 'Payment may still be processing. Check your Shop app or email.',
+        },
+      ]);
+    },
+  });
+
+  await h.bagLook();
+  await h.tools.review_order!.execute({}, fakeToolOpts('rev-1'));
+  assert.equal(prepareCalls, 1);
+
+  const firstPlace = await h.tools.place_order!.execute(
+    { spoken_confirmation: true },
+    fakeToolOpts('pl-1'),
+  );
+  assert.equal(firstPlace.startsWith(ORDER_OUTCOME_UNKNOWN), true);
+  assert.equal(placeCalls, 1);
+
+  const latchLogs = h.logs.filter((l) => l.ev === 'order_latch_closed');
+  assert.equal(latchLogs.length, 1);
+  assert.equal(latchLogs[0]!.data?.outcome, 'unknown');
+
+  // Re-make bag with a brand-new cart id, invalidateReview, remove, swap, re-add, and build a new look.
+  h.orderController.invalidateReview();
+  await h.tools.remove_from_bag.execute({ outfit: 1, slot: 'all' }, fakeToolOpts('rm-1'));
+  await h.tools.swap_piece.execute({ outfit: 1, slot: 'top', request: 'cashmere crewneck' }, fakeToolOpts('sw-1'));
+  h.setBagOut(
+    makeRealBagOut({
+      carts: [
+        {
+          store: 'Everlane',
+          store_domain: 'everlane.myshopify.com',
+          cart_id: 'cart-everlane-new-2',
+          continue_url: 'https://everlane.example/cart/2',
+          total_usd: 70,
+          added: [{ variant_id: 'var-top-2-m', title: 'Cashmere Crewneck', size: 'M' }],
+          not_added: [],
+          ms: 20,
+        },
+      ],
+      total_usd: 70,
+    }),
+  );
+  await h.tools.add_to_bag.execute({ outfit: 1, sizes: { top: 'M', shoes: '10' } }, fakeToolOpts('bag-2'));
+  assert.equal(h.orderController.getState().settledBag?.carts[0]?.cart_id, 'cart-everlane-new-2');
+
+  // Both review_order and place_order are refused with zero additional store calls.
+  const revAfter = await h.tools.review_order!.execute({}, fakeToolOpts('rev-after'));
+  assert.match(revAfter, /^NOT DONE:/);
+  assert.match(revAfter, /ordering is finished for this call/i);
+  assert.match(revAfter, /Shop app or email before trying again in a new call/i);
+  assert.equal(revAfter.includes('store links'), false);
+
+  const placeAfter = await h.tools.place_order!.execute(
+    { spoken_confirmation: true },
+    fakeToolOpts('pl-after'),
+  );
+  assert.match(placeAfter, /^NOT DONE:/);
+  assert.match(placeAfter, /ordering is finished for this call/i);
+  assert.match(placeAfter, /Shop app or email before trying again in a new call/i);
+
+  assert.equal(prepareCalls, 1, 'prepareOrder must never be called after latch closes');
+  assert.equal(placeCalls, 1, 'placeOrder must never be called after latch closes');
+  assert.equal(
+    h.logs.filter((l) => l.ev === 'order_latch_closed').length,
+    1,
+    'order_latch_closed must be logged only once',
+  );
+});
+
+test('per-call order latch: placed outcome closes latch across bag re-make, swap, and new look with zero store calls', async () => {
+  let prepareCalls = 0;
+  let placeCalls = 0;
+  const h = await setupHarness({
+    bagOut: makeRealBagOut({
+      carts: [
+        {
+          store: 'Everlane',
+          store_domain: 'everlane.myshopify.com',
+          cart_id: 'cart-placed-1',
+          continue_url: 'https://everlane.example/cart/1',
+          total_usd: 60,
+          added: [{ variant_id: 'var-top-m', title: 'Merino Knit Polo', size: 'M' }],
+          not_added: [],
+          ms: 20,
+        },
+      ],
+      total_usd: 60,
+    }),
+    prepareOrder: async () => {
+      prepareCalls += 1;
+      return makeOrderReview({ order_id: `ord-pl-${prepareCalls}`, total: 60 });
+    },
+    placeOrder: async (orderId) => {
+      placeCalls += 1;
+      return makePlacedReview(orderId, [
+        {
+          store: 'Everlane',
+          items: [],
+          total: 60,
+          payment_label: CANARY_PAYMENT_LABEL,
+          ready: true,
+          status: 'placed',
+          order_number: '#EV-5555',
+        },
+      ]);
+    },
+  });
+
+  await h.bagLook();
+  await h.tools.review_order!.execute({}, fakeToolOpts('rev-1'));
+  const placedRes = await h.tools.place_order!.execute(
+    { spoken_confirmation: true },
+    fakeToolOpts('pl-1'),
+  );
+  assert.equal(placedRes.startsWith(ORDER_OUTCOME_ALL_PLACED), true);
+  assert.equal(prepareCalls, 1);
+  assert.equal(placeCalls, 1);
+  assert.equal(h.logs.filter((l) => l.ev === 'order_latch_closed').length, 1);
+  assert.equal(h.logs.find((l) => l.ev === 'order_latch_closed')?.data?.outcome, 'all_placed');
+
+  // Re-make bag with a fresh cart id, invalidateReview, remove, and build a new look.
+  h.orderController.invalidateReview();
+  await h.tools.remove_from_bag.execute({ outfit: 1, slot: 'all' }, fakeToolOpts('rm-pl'));
+  await h.tools.build_outfits.execute({ occasion: 'gala', budget_usd: 300 }, fakeToolOpts('build-2'));
+  await h.tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('pick-2'));
+  h.setBagOut(
+    makeRealBagOut({
+      carts: [
+        {
+          store: 'Everlane',
+          store_domain: 'everlane.myshopify.com',
+          cart_id: 'cart-placed-new-2',
+          continue_url: 'https://everlane.example/cart/2',
+          total_usd: 60,
+          added: [{ variant_id: 'var-top-s', title: 'Merino Knit Polo', size: 'S' }],
+          not_added: [],
+          ms: 20,
+        },
+      ],
+      total_usd: 60,
+    }),
+  );
+  await h.tools.add_to_bag.execute({ outfit: 1, sizes: { top: 'S', shoes: '9' } }, fakeToolOpts('bag-pl-2'));
+  assert.equal(h.orderController.getState().settledBag?.carts[0]?.cart_id, 'cart-placed-new-2');
+
+  const revAfter = await h.tools.review_order!.execute({}, fakeToolOpts('rev-pl-after'));
+  assert.match(revAfter, /^NOT DONE:/);
+  assert.match(revAfter, /ordering is finished for this call/i);
+  assert.match(revAfter, /order is already placed/i);
+  assert.match(revAfter, /store links on screen/i);
+
+  const placeAfter = await h.tools.place_order!.execute(
+    { spoken_confirmation: true },
+    fakeToolOpts('pl-pl-after'),
+  );
+  assert.match(placeAfter, /^NOT DONE:/);
+  assert.match(placeAfter, /ordering is finished for this call/i);
+  assert.match(placeAfter, /order is already placed/i);
+  assert.match(placeAfter, /store links on screen/i);
+
+  assert.equal(prepareCalls, 1, 'prepareOrder must never be called once latch is closed');
+  assert.equal(placeCalls, 1, 'placeOrder must never be called once latch is closed');
+  assert.equal(h.logs.filter((l) => l.ev === 'order_latch_closed').length, 1);
+});
+
+test('per-call order latch: blocked-before-sending (no tap, over limit, stale review) does NOT close the latch', async () => {
+  let tapConfirmed = false;
+  let reviewTotal = 999; // over limit initially
+  let prepareCalls = 0;
+  let placeCalls = 0;
+
+  const h = await setupHarness({
+    purchaseMaxUsd: 500,
+    confirmResponder: ({ order_id }) => ({
+      ok: true,
+      confirmed: tapConfirmed,
+      order_id,
+    }),
+    prepareOrder: async () => {
+      prepareCalls += 1;
+      return makeOrderReview({
+        order_id: `ord-open-${prepareCalls}`,
+        total: reviewTotal,
+      });
+    },
+    placeOrder: async (orderId) => {
+      placeCalls += 1;
+      return makePlacedReview(orderId, [
+        {
+          store: 'Everlane',
+          items: [],
+          total: 140,
+          payment_label: CANARY_PAYMENT_LABEL,
+          ready: true,
+          status: 'placed',
+          order_number: '#EV-7777',
+        },
+      ]);
+    },
+  });
+
+  await h.bagLook();
+
+  // 1) Over limit -> blocked before sending, latch stays open.
+  await h.tools.review_order!.execute({}, fakeToolOpts('rev-over'));
+  const overRes = await h.tools.place_order!.execute(
+    { spoken_confirmation: true },
+    fakeToolOpts('pl-over'),
+  );
+  assert.equal(overRes, ORDER_OVER_LIMIT);
+  assert.equal(placeCalls, 0);
+  assert.equal(h.orderController.getState().latch, null);
+
+  // 2) Under limit, no tap -> blocked before sending, latch stays open.
+  reviewTotal = 140;
+  await h.tools.review_order!.execute({}, fakeToolOpts('rev-notap'));
+  const noTapRes = await h.tools.place_order!.execute(
+    { spoken_confirmation: true },
+    fakeToolOpts('pl-notap'),
+  );
+  assert.match(noTapRes, /^NOT DONE:/);
+  assert.equal(placeCalls, 0);
+  assert.equal(h.orderController.getState().latch, null);
+
+  // 3) Stale review (> TTL) -> blocked before sending, latch stays open.
+  tapConfirmed = true;
+  h.advanceMs(ORDER_REVIEW_TTL_MS + 1_000);
+  const staleRes = await h.tools.place_order!.execute(
+    { spoken_confirmation: true },
+    fakeToolOpts('pl-stale'),
+  );
+  assert.match(staleRes, /^NOT DONE:/);
+  assert.equal(placeCalls, 0);
+  assert.equal(h.orderController.getState().latch, null);
+  assert.equal(h.logs.filter((l) => l.ev === 'order_latch_closed').length, 0);
+
+  // 4) Fresh review + valid confirmation succeeds and THEN closes the latch once.
+  await h.tools.review_order!.execute({}, fakeToolOpts('rev-final'));
+  const okRes = await h.tools.place_order!.execute(
+    { spoken_confirmation: true },
+    fakeToolOpts('pl-final'),
+  );
+  assert.equal(okRes.startsWith(ORDER_OUTCOME_ALL_PLACED), true);
+  assert.equal(prepareCalls, 3);
+  assert.equal(placeCalls, 1);
+  assert.equal(h.orderController.getState().latch?.outcome, 'all_placed');
+  assert.equal(h.logs.filter((l) => l.ev === 'order_latch_closed').length, 1);
 });

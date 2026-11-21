@@ -8,6 +8,42 @@ export interface FillerBit {
 }
 
 export const MAX_BITS_PER_WAIT = 3;
+export const LONG_BIT_WORD_LIMIT = 12;
+
+export function countBitWords(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+export function isLongBit(bit: Pick<FillerBit, 'text'>): boolean {
+  return countBitWords(bit.text) > LONG_BIT_WORD_LIMIT;
+}
+
+export const SHORT_FILLER_BITS: readonly FillerBit[] = [
+  {
+    id: 'short-narrowing',
+    title: 'Final Rack Edit',
+    theme: 'new_york',
+    text: 'Still editing the final rack—no boring pieces allowed.',
+  },
+  {
+    id: 'short-shoes',
+    title: 'Shoe Check',
+    theme: 'ai_life',
+    text: 'Hang tight, making sure every shoe earns its spot.',
+  },
+  {
+    id: 'short-kevin',
+    title: 'No Beige Allowed',
+    theme: 'boyfriend',
+    text: 'Almost there—Kevin tried sneaking in beige, hard pass.',
+  },
+  {
+    id: 'short-cuts',
+    title: 'Cut Double-Check',
+    theme: 'clients',
+    text: 'Two more seconds, double-checking every cut for this lineup.',
+  },
+];
 
 export const FILLER_BITS: readonly FillerBit[] = [
   {
@@ -193,9 +229,13 @@ export function createBitPicker(options: BitPickerOptions = {}): BitPicker {
 
 export function formatWorkingNoteWithBit(baseNote: string, bit: FillerBit): string {
   const cleanBase = baseNote.trim().replace(/\.*$/, '.');
-  return `${cleanBase} Drop one punchy line that you are on it, then keep the energy up. While this runs, tell this in your own words: ${bit.text} Deliver it with fast New York sass. Do not claim anything is ready, do not describe looks, prices, or products, and do not ask the shopper a question that needs an answer.`;
+  return `${cleanBase} Drop one punchy line that you are on it, then keep the energy up. While this runs, tell this in your own words: ${bit.text} Deliver it with fast New York sass. Do not claim anything is ready, do not describe looks, prices, or products, and do not ask the shopper a question that needs an answer. If the tool result arrives mid-sentence, finish your sentence and switch straight to the result—start no new bit.`;
 }
 
 export function formatFillerBitInstruction(toolName: string, bit: FillerBit): string {
-  return `Still waiting on ${toolName}. While this runs, tell this in your own words: ${bit.text} Deliver it with fast New York sass and keep it punchy and brief (two or three sentences). Do not claim anything is ready, do not describe looks, prices, or products, and do not ask the shopper a question that needs an answer. Finish your sentence and switch cleanly the moment the result arrives.`;
+  return `Still waiting on ${toolName}. While this runs, tell this in your own words: ${bit.text} Deliver it with fast New York sass and keep it punchy and brief (two or three sentences). Do not claim anything is ready, do not describe looks, prices, or products, and do not ask the shopper a question that needs an answer. Finish your sentence and switch cleanly the moment the result arrives—start no new bit once the result lands.`;
+}
+
+export function formatShortFillerBitInstruction(toolName: string, bit: FillerBit): string {
+  return `Still waiting on ${toolName}. While this runs, tell this in your own words: ${bit.text} Keep it to ONE quick sentence (at most ${LONG_BIT_WORD_LIMIT} words). Do not claim anything is ready, do not describe looks, prices, or products, and do not ask the shopper a question that needs an answer. Finish your sentence and switch cleanly the moment the result arrives—start no new bit once the result lands.`;
 }

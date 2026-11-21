@@ -4127,3 +4127,35 @@ test('polish11: fast build_outfits (<4s) begins with ALREADY on screen prefix, l
     sizes: { top: 'M', bottom: '32x30', shoes: '10.5' },
   });
 });
+
+test('pick_outfit caps at TWO sentences ending with "Want to see it on you?" and show_on_me leads directly with the reaction', async () => {
+  const { page } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-p12-pick-show', log: () => {} });
+  const snap: CameraSnapshot = {
+    jpeg: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+    width: 640,
+    height: 480,
+    at: 1_000,
+  };
+
+  const tools = createAgentTools({
+    room: 'r-p12-pick-show',
+    log: () => {},
+    getSnapshot: () => snap,
+    page,
+    state,
+    deps: makeFakeDeps(),
+  });
+
+  await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute({ occasion: 'formal wedding', budget_usd: 400 }, fakeToolOpts('b1'));
+  await flushMicrotasks();
+
+  const pickRes = await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+  assert.match(pickRes, /at most TWO sentences about the look/i);
+  assert.match(pickRes, /same turn MUST end with the question: "Want to see it on you\?"/i);
+
+  const showRes = await tools.show_on_me.execute({ outfit: 1 }, fakeToolOpts('s1'));
+  assert.match(showRes, /first words the reaction itself/i);
+  assert.match(showRes, /zero lead-in/i);
+});

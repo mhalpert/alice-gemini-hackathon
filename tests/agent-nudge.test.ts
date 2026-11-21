@@ -359,11 +359,30 @@ test('add_to_bag nudge is not cancelled by pre-result speech or a short "adding 
   clock.advance(10_000);
   assert.equal(replies.length, 3);
 
-  // Case 6: show_on_me nudge preserves "do not ask for sizes yet" when more reveal beats are coming.
+  // Case 6: show_on_me nudge preserves "do not ask for sizes yet" when more reveal beats are coming,
+  // and instructs making the first words the reaction itself with zero wind-up.
   const studioNudge = buildNudgeInstruction(
     'show_on_me',
     'Try-on for Look 1 is now revealed on screen. React to the studio shot in ONE short line, and do not ask for sizes yet—more views are coming.',
   );
   assert.match(studioNudge ?? '', /ONE short line/i);
   assert.match(studioNudge ?? '', /do not ask for sizes yet/i);
+  assert.match(studioNudge ?? '', /first words the reaction itself/i);
+
+  // Case 7: show_rack never triggers a result nudge or "they're in".
+  assert.equal(
+    buildNudgeInstruction(
+      'show_rack',
+      'Rack is on screen: 12 items in relaxed streetwear.',
+    ),
+    null,
+  );
+  nudger.onToolResult({
+    name: 'show_rack',
+    callId: 'rk-no-nudge',
+    text: 'Rack is on screen: 12 items in relaxed streetwear.',
+  });
+  assert.equal(nudger.hasPending, false);
+  clock.advance(10_000);
+  assert.equal(replies.length, 3);
 });

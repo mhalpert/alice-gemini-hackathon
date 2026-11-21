@@ -944,18 +944,21 @@ function buildShowOnMeSizeNextStep(
     return `Express mode: react in ONE short line and ask only for their ${missingPhrase} in one short question (<=14 words).`;
   }
 
+  const reactionLead =
+    'Make your very first words the reaction itself—zero lead-in or "let\'s see how this comes together" wind-up. React to the studio shot in ONE short line with loud, hype New York friend energy';
+
   if (missing.length === 0) {
     if (knownSummary) {
-      return `React to the studio shot in ONE short line with loud, hype New York friend energy. You already have all sizes needed for this look (${knownSummary}); do not ask for sizes again—offer to add it to their bag in those sizes.`;
+      return `${reactionLead}. You already have all sizes needed for this look (${knownSummary}); do not ask for sizes again—offer to add it to their bag in those sizes.`;
     }
-    return 'React to the studio shot in ONE short line with loud, hype New York friend energy, then offer to add this look to their bag.';
+    return `${reactionLead}, then offer to add this look to their bag.`;
   }
 
   const missingPhrase = formatMissingSizesPhrase(missing);
   if (knownSummary) {
-    return `React to the studio shot in ONE short line with loud, hype New York friend energy. You already have ${knownSummary}; ask only for their ${missingPhrase} in one question.`;
+    return `${reactionLead}. You already have ${knownSummary}; ask only for their ${missingPhrase} in one question.`;
   }
-  return `React to the studio shot in ONE short line with loud, hype New York friend energy, then ask for their ${missingPhrase} in one question.`;
+  return `${reactionLead}, then ask for their ${missingPhrase} in one question.`;
 }
 
 /**
@@ -2399,7 +2402,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
         const pickGuidance = st.express
           ? 'Express mode: call show_on_me as soon as the try-on is ready without asking, no extra talk.'
-          : "Give one line naming the look's idea, then make the one or two hero pieces sound special with that real detail in a sentence each—do not list the other pieces (they are on screen)—then ask about seeing it on them. Total about ten seconds. Never invent materials. If it is the weaker look, push back once before backing their choice.";
+          : 'Say at most TWO sentences about the look (highlight the hero piece detail, do not list the other pieces on screen, never invent materials; total about ten seconds), and this same turn MUST end with the question: "Want to see it on you?" (ask about seeing it on them). If it is the weaker look, push back once before backing their choice.';
 
         return [
           `${statusLine} ${tryOnText}`,
@@ -2504,9 +2507,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
             if (moreBeatsComing) {
               if (renderedOnModel) {
-                return `Look ${lookNum} (${outfit.name}) is now revealed on screen on a model because the camera is off. Say the look is on screen on a model and that turning the camera on lets you show it on them; never say you cannot overlay it. Open with "${studioLine}" then react to the studio shot in ONE short line with loud New York friend energy, and do not ask for sizes yet—more views of this look are coming right up.`;
+                return `Look ${lookNum} (${outfit.name}) is now revealed on screen on a model because the camera is off. Say the look is on screen on a model and that turning the camera on lets you show it on them; never say you cannot overlay it. Open with "${studioLine}" as your very first words—zero lead-in or "let's see how this comes together" wind-up—then react to the studio shot in ONE short line with loud New York friend energy, and do not ask for sizes yet—more views of this look are coming right up.`;
               }
-              return `Try-on for Look ${lookNum} (${outfit.name}) is now revealed on screen. Open with "${studioLine}" then react to the studio shot in ONE short line with loud New York friend energy, and do not ask for sizes yet—more views of this look are coming right up.`;
+              return `Try-on for Look ${lookNum} (${outfit.name}) is now revealed on screen. Open with "${studioLine}" as your very first words—zero lead-in or "let's see how this comes together" wind-up—then react to the studio shot in ONE short line with loud New York friend energy, and do not ask for sizes yet—more views of this look are coming right up.`;
             }
 
             const sizeNextStep = buildShowOnMeSizeNextStep(outfit, stNow.sizes, stNow.express);
@@ -2944,7 +2947,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             rack: true,
           });
 
-          return `Rack is on screen: ${merged.length} items in ${cleanStyle}. Say one short line that you pulled a few things off the racks that go with what they have on, then ask: dressing for an occasion, or hunting for one specific item?`;
+          return `Rack is on screen: ${merged.length} items in ${cleanStyle}. Say one short line that you pulled a few things off the racks that go with what they have on (never say "they're in"), then ask: dressing for an occasion, or hunting for one specific item? If you already said this line or asked that question, stay silent and do not repeat it.`;
         },
         { dedupe: false },
       ),
