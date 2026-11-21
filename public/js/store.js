@@ -50,6 +50,74 @@ function formatSlot(slot) {
   return slot.charAt(0).toUpperCase() + slot.slice(1).toLowerCase();
 }
 
+// Validate normalized [x, y, w, h] flat-lay boxes (fractions from 0 to 1, positive size)
+function normalizeBoxes(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out = {};
+  let count = 0;
+  for (const [rawSlot, coords] of Object.entries(raw)) {
+    const slot = typeof rawSlot === 'string' ? rawSlot.trim() : '';
+    if (!slot || !Array.isArray(coords) || coords.length !== 4) continue;
+    const [x, y, w, h] = coords;
+    if (
+      !Number.isFinite(x) ||
+      !Number.isFinite(y) ||
+      !Number.isFinite(w) ||
+      !Number.isFinite(h)
+    ) {
+      continue;
+    }
+    if (x < 0 || x >= 1 || y < 0 || y >= 1 || w <= 0 || w > 1 || h <= 0 || h > 1) {
+      continue;
+    }
+    const clampedW = Math.min(w, 1 - x);
+    const clampedH = Math.min(h, 1 - y);
+    if (clampedW <= 0 || clampedH <= 0) continue;
+    out[slot] = [x, y, clampedW, clampedH];
+    count += 1;
+  }
+  return count > 0 ? out : null;
+}
+
+function getBoxForSlot(boxes, slot) {
+  if (!boxes || !slot) return null;
+  if (boxes[slot]) return boxes[slot];
+  const lower = slot.toLowerCase();
+  if (boxes[lower]) return boxes[lower];
+  for (const [key, val] of Object.entries(boxes)) {
+    if (key.toLowerCase() === lower) return val;
+  }
+  return null;
+}
+
+function prefersReducedMotion() {
+  return (
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  );
+}
+
+// Bring an active note row into view inside its own scrolling list without moving the window
+function scrollRowIntoList(listEl, rowEl) {
+  if (!listEl || !rowEl) return;
+  if (listEl.scrollHeight <= listEl.clientHeight + 1) return;
+  const listRect = listEl.getBoundingClientRect();
+  const rowRect = rowEl.getBoundingClientRect();
+  const pad = 8;
+  let nextTop = listEl.scrollTop;
+  if (rowRect.top < listRect.top + pad) {
+    nextTop += rowRect.top - listRect.top - pad;
+  } else if (rowRect.bottom > listRect.bottom - pad) {
+    nextTop += rowRect.bottom - listRect.bottom + pad;
+  } else {
+    return;
+  }
+  listEl.scrollTo({
+    top: Math.max(0, nextTop),
+    behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+  });
+}
+
 // Cut plain text at maxLen characters on a word boundary
 function truncateAtWord(text, maxLen = 700) {
   if (typeof text !== 'string') return '';
@@ -268,7 +336,7 @@ export function mountStore(root, { onTalk } = {}) {
   const state = {
     view: 'boutique', // 'empty' | 'boutique' | 'looks' | 'picked' | 'search'
     outfits: new Map(), // look number -> Outfit
-    media: new Map(), // look number -> { tryOnStatus, tryOnUrl, collageUrl, revealed, preloads }
+    media: new Map(), // look number -> { tryOnStatus, tryOnUrl, collageUrl, collageBoxes, revealed, stageSwapped, preloads }
     subtitleMeta: { raw: '', cleanSubtitle: '', occasion: '', budget: null },
     pickedOutfit: null,
     highlightedSlot: null,
@@ -315,7 +383,9 @@ export function mountStore(root, { onTalk } = {}) {
         tryOnStatus: null,
         tryOnUrl: null,
         collageUrl: null,
+        collageBoxes: null,
         revealed: false,
+        stageSwapped: false,
         preloads: [],
       });
     }
@@ -1647,6 +1717,26 @@ export function mountStore(root, { onTalk } = {}) {
     }
   }
 
+  function applyLookCardCollage(visualEl, boardLayerEl, boardImgEl, collageUrl) {
+    if (!visualEl || !boardLayerEl || !boardImgEl) return;
+    if (collageUrl) {
+      const nextSrc = stageUrl(collageUrl, 900);
+      boardImgEl.hidden = false;
+      if (boardImgEl.getAttribute('src') !== nextSrc) {
+        boardImgEl.setAttribute('src', nextSrc);
+      }
+      visualEl.classList.add('has-collage');
+      boardLayerEl.tabIndex = 0;
+      boardLayerEl.setAttribute('aria-hidden', 'false');
+    } else {
+      visualEl.classList.remove('has-collage');
+      boardImgEl.removeAttribute('src');
+      boardImgEl.hidden = true;
+      boardLayerEl.tabIndex = -1;
+      boardLayerEl.setAttribute('aria-hidden', 'true');
+    }
+  }
+
   function renderLooksView() {
     boutiqueRefs = null;
     const looks = sortedOutfits();
@@ -1701,6 +1791,7 @@ export function mountStore(root, { onTalk } = {}) {
       { className: 'looks-grid', 'aria-label': 'Curated looks' },
       looks.map((look) => {
         const media = getMedia(look.number);
+        const lookLabel = look.name || `Look ${look.number}`;
         const badge = el('span', {
           className: 'tryon-badge',
           dataset: { tryonBadge: look.number },
@@ -1715,18 +1806,70 @@ export function mountStore(root, { onTalk } = {}) {
           )
         );
 
+        let visualBox;
+        let boardLayer;
+        const boardImg = el('img', {
+          className: 'look-board-img',
+          alt: `${lookLabel} flat lay`,
+          decoding: 'async',
+          hidden: true,
+          onError: () => {
+            if (visualBox && boardLayer) {
+              visualBox.classList.remove('has-collage');
+              boardLayer.tabIndex = -1;
+              boardLayer.setAttribute('aria-hidden', 'true');
+            }
+            boardImg.hidden = true;
+          },
+        });
+
+        boardLayer = el(
+          'button',
+          {
+            type: 'button',
+            className: 'look-board-layer',
+            'aria-label': `Shop ${lookLabel}`,
+            'aria-hidden': 'true',
+            tabindex: '-1',
+            onClick: (e) => {
+              e.stopPropagation();
+              handlers.highlight({ outfit: look.number, piece: null });
+            },
+          },
+          boardImg
+        );
+
+        visualBox = el(
+          'div',
+          {
+            className: 'look-card-visual',
+            dataset: { lookVisual: look.number },
+          },
+          piecesGrid,
+          boardLayer
+        );
+
+        applyLookCardCollage(visualBox, boardLayer, boardImg, media.collageUrl);
+
         return el(
           'article',
-          { className: 'look-card', dataset: { lookCard: look.number } },
+          {
+            className: 'look-card',
+            dataset: { lookCard: look.number },
+            onClick: (e) => {
+              if (e.target.closest('.product-card, button, a')) return;
+              handlers.highlight({ outfit: look.number, piece: null });
+            },
+          },
           el(
             'div',
             { className: 'look-card-top' },
             el('span', { className: 'look-eyebrow' }, `Look ${look.number}`),
             badge
           ),
-          el('h2', { className: 'look-name' }, look.name || `Look ${look.number}`),
+          visualBox,
+          el('h2', { className: 'look-name' }, lookLabel),
           el('p', { className: 'look-difference' }, look.difference || ''),
-          piecesGrid,
           el(
             'div',
             { className: 'look-card-footer' },
@@ -1754,59 +1897,207 @@ export function mountStore(root, { onTalk } = {}) {
     updateNavActive();
   }
 
+  // Match the inner board frame to the loaded image aspect ratio so percentage boxes align cleanly
+  function syncBoardFrameAspect(boardLayer, boardFrame, img) {
+    if (!boardLayer || !boardFrame || !img) return;
+    const nw = img.naturalWidth;
+    const nh = img.naturalHeight;
+    if (!nw || !nh) return;
+    const imgRatio = nw / nh;
+    const cw = boardLayer.clientWidth;
+    const ch = boardLayer.clientHeight;
+    const containerRatio = cw > 0 && ch > 0 ? cw / ch : 0.75;
+    boardFrame.style.aspectRatio = `${nw} / ${nh}`;
+    if (imgRatio >= containerRatio) {
+      boardFrame.style.width = '100%';
+      boardFrame.style.height = 'auto';
+    } else {
+      boardFrame.style.height = '100%';
+      boardFrame.style.width = 'auto';
+    }
+  }
+
+  function resetBoardFrameAspect(boardFrame) {
+    if (!boardFrame) return;
+    boardFrame.style.aspectRatio = '';
+    boardFrame.style.width = '';
+    boardFrame.style.height = '';
+  }
+
+  function updateBoardPointerRing(refs, media, slot) {
+    if (!refs || !refs.pointerRing) return;
+    const ring = refs.pointerRing;
+    const normalized = typeof slot === 'string' && slot.trim() ? slot.trim() : null;
+    const box =
+      media && media.collageUrl && normalized ? getBoxForSlot(media.collageBoxes, normalized) : null;
+
+    if (!box) {
+      ring.classList.remove('is-visible');
+      ring.setAttribute('aria-hidden', 'true');
+      return;
+    }
+
+    const [x, y, w, h] = box;
+    const wasVisible = ring.classList.contains('is-visible');
+
+    ring.classList.toggle('is-tag-inside', y < 0.09);
+    ring.classList.toggle('is-tag-right', x > 0.55);
+
+    if (!wasVisible) {
+      ring.classList.add('is-snapping');
+    }
+    ring.style.left = `${x * 100}%`;
+    ring.style.top = `${y * 100}%`;
+    ring.style.width = `${w * 100}%`;
+    ring.style.height = `${h * 100}%`;
+
+    if (!wasVisible) {
+      void ring.offsetWidth;
+      ring.classList.remove('is-snapping');
+      ring.classList.add('is-visible');
+    }
+    ring.setAttribute('aria-hidden', 'false');
+  }
+
   function applyStageState(panelRefs, media, { deferReveal = false } = {}) {
-    const { collagePanel, collageImg, tryOnPanel, tryOnImg, tryOnText, tryOnSub } = panelRefs;
+    const {
+      stagePanel,
+      boardLayer,
+      boardFrame,
+      collageImg,
+      tryOnImg,
+      stageCaption,
+      thumbBtn,
+      thumbImg,
+      thumbLabel,
+      tryOnStatusEl,
+    } = panelRefs;
 
     // Flat-lay board state
     if (media.collageUrl) {
       const nextSrc = stageUrl(media.collageUrl, 900);
+      collageImg.hidden = false;
       if (collageImg.getAttribute('src') !== nextSrc) {
+        resetBoardFrameAspect(boardFrame);
         collageImg.setAttribute('src', nextSrc);
       }
-      collagePanel.classList.add('has-collage');
+      stagePanel.classList.add('has-collage');
+      if (collageImg.complete && collageImg.naturalWidth > 0) {
+        syncBoardFrameAspect(boardLayer, boardFrame, collageImg);
+      }
     } else {
-      collagePanel.classList.remove('has-collage');
+      stagePanel.classList.remove('has-collage');
       collageImg.removeAttribute('src');
+      collageImg.hidden = true;
+      resetBoardFrameAspect(boardFrame);
     }
 
-    // Try-on panel state
-    tryOnPanel.classList.remove('is-tryon-ready');
-    if (media.tryOnUrl) {
+    // Try-on stays hidden until reveal; on reveal it takes the main stage unless swapped
+    const hasReveal = Boolean(media.revealed && media.tryOnUrl);
+    const showingTryOn = hasReveal && !media.stageSwapped;
+
+    if (hasReveal) {
       const nextTryOn = stageUrl(media.tryOnUrl, 900);
+      tryOnImg.hidden = false;
       if (tryOnImg.getAttribute('src') !== nextTryOn) {
         tryOnImg.setAttribute('src', nextTryOn);
       }
     } else {
       tryOnImg.removeAttribute('src');
+      tryOnImg.hidden = true;
     }
 
-    if (media.tryOnStatus === 'ready' && media.tryOnUrl) {
-      tryOnText.textContent = "Try-on ready: say 'show me'";
-      tryOnSub.textContent = 'Prepared for you';
-      tryOnPanel.classList.add('is-tryon-ready');
-    } else if (media.tryOnStatus === 'failed') {
-      tryOnText.textContent = 'Try-on unavailable for this look';
-      tryOnSub.textContent = '';
-    } else {
-      tryOnText.textContent = 'Rendering your try-on…';
-      tryOnSub.textContent = 'Fitting each piece';
-    }
-
-    if (media.revealed && media.tryOnUrl) {
+    if (showingTryOn) {
       if (deferReveal) {
-        tryOnPanel.classList.remove('is-revealed');
-        void tryOnPanel.offsetWidth;
+        stagePanel.classList.remove('is-showing-tryon');
+        void stagePanel.offsetWidth;
         requestAnimationFrame(() => {
-          if (state.view === 'picked') {
-            tryOnPanel.classList.add('is-revealed');
+          if (
+            state.view === 'picked' &&
+            activePickedRefs === panelRefs &&
+            media.revealed &&
+            !media.stageSwapped
+          ) {
+            stagePanel.classList.add('is-showing-tryon');
           }
         });
       } else {
-        tryOnPanel.classList.add('is-revealed');
+        stagePanel.classList.add('is-showing-tryon');
       }
     } else {
-      tryOnPanel.classList.remove('is-revealed');
+      stagePanel.classList.remove('is-showing-tryon');
     }
+
+    stageCaption.textContent = showingTryOn ? 'On you' : 'The flat lay';
+
+    // Corner swap thumbnail appears once revealed so the shopper can toggle between try-on and flat lay
+    if (hasReveal) {
+      thumbBtn.hidden = false;
+      if (showingTryOn) {
+        thumbBtn.classList.add('is-thumb-collage');
+        thumbBtn.classList.remove('is-thumb-tryon');
+        thumbBtn.setAttribute('aria-label', 'Show the flat lay');
+        thumbLabel.textContent = 'Flat lay';
+        if (media.collageUrl) {
+          const thumbSrc = stageUrl(media.collageUrl, 900);
+          thumbImg.hidden = false;
+          if (thumbImg.getAttribute('src') !== thumbSrc) {
+            thumbImg.setAttribute('src', thumbSrc);
+          }
+        } else {
+          thumbImg.removeAttribute('src');
+          thumbImg.hidden = true;
+        }
+      } else {
+        thumbBtn.classList.add('is-thumb-tryon');
+        thumbBtn.classList.remove('is-thumb-collage');
+        thumbBtn.setAttribute('aria-label', 'Show on you');
+        thumbLabel.textContent = 'On you';
+        const thumbSrc = stageUrl(media.tryOnUrl, 900);
+        thumbImg.hidden = false;
+        if (thumbImg.getAttribute('src') !== thumbSrc) {
+          thumbImg.setAttribute('src', thumbSrc);
+        }
+      }
+      requestAnimationFrame(() => {
+        if (state.view === 'picked' && activePickedRefs === panelRefs && media.revealed) {
+          thumbBtn.classList.add('is-thumb-visible');
+        }
+      });
+    } else {
+      thumbBtn.classList.remove('is-thumb-visible', 'is-thumb-collage', 'is-thumb-tryon');
+      thumbBtn.hidden = true;
+      thumbImg.removeAttribute('src');
+      thumbImg.hidden = true;
+    }
+
+    // One-line try-on status below the bag control (nothing when failed or already revealed)
+    tryOnStatusEl.classList.remove('is-rendering', 'is-ready');
+    if (hasReveal) {
+      tryOnStatusEl.textContent = '';
+      tryOnStatusEl.hidden = true;
+    } else if (media.tryOnStatus === 'ready' && media.tryOnUrl) {
+      tryOnStatusEl.textContent = "Try-on ready: say 'show me'";
+      tryOnStatusEl.classList.add('is-ready');
+      tryOnStatusEl.hidden = false;
+    } else if (media.tryOnStatus === 'rendering') {
+      tryOnStatusEl.textContent = 'Rendering your try-on…';
+      tryOnStatusEl.classList.add('is-rendering');
+      tryOnStatusEl.hidden = false;
+    } else {
+      tryOnStatusEl.textContent = '';
+      tryOnStatusEl.hidden = true;
+    }
+
+    updateBoardPointerRing(panelRefs, media, state.highlightedSlot);
+  }
+
+  function isElementInView(node) {
+    if (!node) return true;
+    const rect = node.getBoundingClientRect();
+    const headerH = headerEl.offsetHeight || 0;
+    const vh = window.innerHeight || document.documentElement.clientHeight || 800;
+    return rect.top >= headerH - 16 && rect.bottom <= vh + 40;
   }
 
   let activePickedRefs = null;
@@ -1826,43 +2117,98 @@ export function mountStore(root, { onTalk } = {}) {
     }
 
     const media = getMedia(look.number);
+    const lookLabel = look.name || `Look ${look.number}`;
 
-    const headerBand = el(
-      'section',
-      { className: 'picked-header' },
+    const topBar = el(
+      'div',
+      { className: 'picked-top-bar' },
+      el(
+        'button',
+        {
+          type: 'button',
+          className: 'back-link',
+          onClick: () => handlers.showAll({}),
+        },
+        arrowLeftSvg(),
+        'All looks'
+      ),
       el(
         'div',
-        { className: 'picked-top-bar' },
-        el(
-          'button',
-          {
-            type: 'button',
-            className: 'back-link',
-            onClick: () => handlers.showAll({}),
-          },
-          arrowLeftSvg(),
-          'All looks'
-        ),
-        el(
-          'div',
-          { className: 'breadcrumb' },
-          el('span', null, 'Looks by Alice'),
-          el('span', { className: 'breadcrumb-sep', 'aria-hidden': 'true' }, '/'),
-          el('span', { className: 'breadcrumb-current' }, `Look ${look.number}`)
-        )
-      ),
-      el('span', { className: 'picked-kicker' }, 'Your look'),
-      el('h1', { className: 'picked-title' }, look.name || `Look ${look.number}`),
-      look.difference ? el('p', { className: 'picked-difference' }, look.difference) : null
+        { className: 'breadcrumb' },
+        el('span', null, 'Looks by Alice'),
+        el('span', { className: 'breadcrumb-sep', 'aria-hidden': 'true' }, '/'),
+        el('span', { className: 'breadcrumb-current' }, `Look ${look.number}`)
+      )
     );
+
+    let stagePanel;
+    let boardLayer;
+    let boardFrame;
 
     const collageImg = el('img', {
       className: 'stage-collage-img',
-      alt: `${look.name || 'Look'} flat lay`,
+      alt: `${lookLabel} flat lay`,
       decoding: 'async',
+      hidden: true,
+      onLoad: () => {
+        syncBoardFrameAspect(boardLayer, boardFrame, collageImg);
+      },
+      onError: () => {
+        if (stagePanel) stagePanel.classList.remove('has-collage');
+        collageImg.hidden = true;
+      },
     });
 
-    const collagePanel = el(
+    const pointerRing = el(
+      'div',
+      { className: 'board-pointer-ring', 'aria-hidden': 'true' },
+      el('span', { className: 'board-pointer-tag' }, 'Alice is on this')
+    );
+
+    boardFrame = el('div', { className: 'stage-board-frame' }, collageImg, pointerRing);
+    boardLayer = el('div', { className: 'stage-board-layer' }, boardFrame);
+
+    const tryOnImg = el('img', {
+      className: 'stage-tryon-img',
+      alt: `${lookLabel} try-on`,
+      decoding: 'async',
+      hidden: true,
+      onError: () => {
+        tryOnImg.hidden = true;
+      },
+    });
+    const tryOnLayer = el('div', { className: 'stage-tryon-layer' }, tryOnImg);
+
+    const thumbImg = el('img', {
+      className: 'stage-thumb-img',
+      alt: '',
+      decoding: 'async',
+      hidden: true,
+      onError: () => {
+        thumbImg.hidden = true;
+      },
+    });
+    const thumbLabel = el('span', { className: 'stage-thumb-label' }, 'Flat lay');
+    const thumbBtn = el(
+      'button',
+      {
+        type: 'button',
+        className: 'stage-thumb-btn',
+        hidden: true,
+        'aria-label': 'Show the flat lay',
+        onClick: () => {
+          if (!media.revealed || !media.tryOnUrl) return;
+          media.stageSwapped = !media.stageSwapped;
+          if (activePickedRefs && activePickedRefs.outfit === look.number) {
+            applyStageState(activePickedRefs, media);
+          }
+        },
+      },
+      thumbImg,
+      thumbLabel
+    );
+
+    stagePanel = el(
       'div',
       { className: 'stage-panel' },
       el(
@@ -1871,40 +2217,43 @@ export function mountStore(root, { onTalk } = {}) {
         el('p', { className: 'stage-placeholder-text' }, 'Laying it out…'),
         el('p', { className: 'stage-placeholder-sub' }, 'Styling board')
       ),
-      collageImg
+      boardLayer,
+      tryOnLayer,
+      thumbBtn
     );
 
-    const tryOnImg = el('img', {
-      className: 'stage-tryon-img',
-      alt: `${look.name || 'Look'} try-on`,
-      decoding: 'async',
+    const stageCaption = el('figcaption', { className: 'stage-caption' }, 'The flat lay');
+    const visualCol = el(
+      'div',
+      { className: 'stage-visual-col' },
+      el('figure', { className: 'stage-figure' }, stagePanel, stageCaption)
+    );
+
+    let hasActiveRow = false;
+    const pieceRows = (look.pieces || []).map((piece) => {
+      const isPointed = Boolean(state.highlightedSlot && piece.slot === state.highlightedSlot);
+      if (isPointed) hasActiveRow = true;
+      return el(
+        'li',
+        {
+          className: `piece-note-item${isPointed ? ' is-pointed' : ''}`,
+          dataset: { slot: piece.slot || '', outfit: look.number },
+        },
+        el(
+          'div',
+          { className: 'piece-note-top' },
+          el('span', { className: 'piece-slot-name' }, formatSlot(piece.slot)),
+          el('span', { className: 'piece-note-price' }, formatPrice(piece.item?.price))
+        ),
+        el('span', { className: 'piece-note-title' }, piece.item?.title || ''),
+        piece.why ? el('p', { className: 'piece-note-why' }, piece.why) : null
+      );
     });
 
-    const tryOnText = el('p', { className: 'stage-placeholder-text' }, 'Rendering your try-on…');
-    const tryOnSub = el('p', { className: 'stage-placeholder-sub' }, 'Fitting each piece');
-
-    const tryOnPanel = el(
-      'div',
-      { className: 'stage-panel' },
-      el('div', { className: 'stage-placeholder' }, tryOnText, tryOnSub),
-      tryOnImg
-    );
-
-    const stage = el(
-      'section',
-      { className: 'stage-grid', 'aria-label': 'Look preview stage' },
-      el(
-        'figure',
-        { className: 'stage-figure' },
-        collagePanel,
-        el('figcaption', { className: 'stage-caption' }, 'The flat lay')
-      ),
-      el(
-        'figure',
-        { className: 'stage-figure' },
-        tryOnPanel,
-        el('figcaption', { className: 'stage-caption' }, 'On you')
-      )
+    const pieceNotesList = el(
+      'ul',
+      { className: `piece-notes-list${hasActiveRow ? ' has-active' : ''}` },
+      pieceRows
     );
 
     const ctaStatus = el('span', { className: 'summary-cta-status', 'aria-live': 'polite' }, '');
@@ -1922,58 +2271,40 @@ export function mountStore(root, { onTalk } = {}) {
       },
       'Add the look to bag'
     );
+    const tryOnStatusEl = el('p', {
+      className: 'stage-tryon-status',
+      'aria-live': 'polite',
+      hidden: true,
+    });
 
-    const pieceNotesList = el(
-      'ul',
-      { className: 'piece-notes-list' },
-      (look.pieces || []).map((piece) => {
-        const isPointed = Boolean(state.highlightedSlot && piece.slot === state.highlightedSlot);
-        return el(
-          'li',
-          {
-            className: `piece-note-item${isPointed ? ' is-pointed' : ''}`,
-            dataset: { slot: piece.slot || '', outfit: look.number },
-          },
-          el('span', { className: 'piece-slot-name' }, formatSlot(piece.slot)),
-          el(
-            'div',
-            { className: 'piece-note-body' },
-            el('span', { className: 'piece-note-title' }, piece.item?.title || ''),
-            piece.why ? el('p', { className: 'piece-note-why' }, piece.why) : null
-          ),
-          el('span', { className: 'piece-note-price' }, formatPrice(piece.item?.price))
-        );
-      })
-    );
-
-    const summary = el(
-      'section',
-      { className: 'summary-panel', 'aria-label': 'Look details' },
+    const notesCol = el(
+      'aside',
+      { className: 'stage-notes-col', 'aria-label': "Alice's notes" },
       el(
         'div',
-        { className: 'summary-overview' },
+        { className: 'stage-notes-header' },
+        el('span', { className: 'section-label stage-notes-kicker' }, "Alice's notes"),
         el(
           'div',
-          { className: 'summary-head' },
-          el('h2', { className: 'summary-name' }, look.name || `Look ${look.number}`),
-          el('span', { className: 'summary-total' }, formatPrice(look.total))
-        ),
-        el('div', { className: 'summary-cta-row' }, addLookBtn, ctaStatus),
-        look.story
-          ? el(
-              'div',
-              { className: 'alice-notes' },
-              el('h3', { className: 'section-label' }, "Alice's notes"),
-              el('p', { className: 'alice-notes-text' }, look.story)
-            )
-          : null
+          { className: 'stage-notes-title-row' },
+          el('h1', { className: 'stage-look-name' }, lookLabel),
+          el('span', { className: 'stage-look-total' }, formatPrice(look.total))
+        )
       ),
+      pieceNotesList,
       el(
         'div',
-        { className: 'summary-pieces' },
-        el('h3', { className: 'section-label' }, 'Why each piece works'),
-        pieceNotesList
+        { className: 'stage-notes-footer' },
+        el('div', { className: 'summary-cta-row' }, addLookBtn, ctaStatus),
+        tryOnStatusEl
       )
+    );
+
+    const stage = el(
+      'section',
+      { className: 'picked-stage', 'aria-label': 'Look stage' },
+      visualCol,
+      notesCol
     );
 
     const piecesCount = (look.pieces || []).length;
@@ -2002,41 +2333,47 @@ export function mountStore(root, { onTalk } = {}) {
 
     activePickedRefs = {
       outfit: look.number,
-      collagePanel,
+      stagePanel,
+      boardLayer,
+      boardFrame,
       collageImg,
-      tryOnPanel,
+      pointerRing,
       tryOnImg,
-      tryOnText,
-      tryOnSub,
+      stageCaption,
+      thumbBtn,
+      thumbImg,
+      thumbLabel,
+      tryOnStatusEl,
       pieceNotesList,
       shopGrid,
     };
 
+    mainEl.replaceChildren(el('div', { className: 'picked-view' }, topBar, stage, shopSection));
     applyStageState(activePickedRefs, media, { deferReveal });
-    mainEl.replaceChildren(headerBand, stage, summary, shopSection);
     updateNavActive();
   }
 
   function applyPointerInPlace(slot) {
     if (!activePickedRefs) return;
     const normalized = typeof slot === 'string' && slot.trim() ? slot.trim() : null;
-    let targetCard = null;
 
     for (const card of activePickedRefs.shopGrid.querySelectorAll('.product-card')) {
       const match = Boolean(normalized && card.dataset.slot === normalized);
       card.classList.toggle('is-pointed', match);
-      if (match) targetCard = card;
     }
 
+    let activeRow = null;
     for (const row of activePickedRefs.pieceNotesList.querySelectorAll('.piece-note-item')) {
       const match = Boolean(normalized && row.dataset.slot === normalized);
       row.classList.toggle('is-pointed', match);
+      if (match) activeRow = row;
     }
+    activePickedRefs.pieceNotesList.classList.toggle('has-active', Boolean(activeRow));
 
-    if (targetCard) {
-      targetCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    } else if (activePickedRefs.tryOnPanel) {
-      activePickedRefs.tryOnPanel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    updateBoardPointerRing(activePickedRefs, getMedia(activePickedRefs.outfit), normalized);
+
+    if (activeRow) {
+      scrollRowIntoList(activePickedRefs.pieceNotesList, activeRow);
     }
   }
 
@@ -2050,13 +2387,26 @@ export function mountStore(root, { onTalk } = {}) {
       node.classList.add('is-updated-flash');
       setTimeout(() => node.classList.remove('is-updated-flash'), 1250);
     }
+    if (state.view === 'picked' && activePickedRefs && activePickedRefs.outfit === outfitNumber) {
+      const row = activePickedRefs.pieceNotesList.querySelector(
+        `.piece-note-item[data-slot="${CSS.escape(slot)}"]`
+      );
+      if (row) scrollRowIntoList(activePickedRefs.pieceNotesList, row);
+    }
   }
 
   function syncMediaInCurrentView(outfitNumber, { deferReveal = false } = {}) {
     const media = getMedia(outfitNumber);
     if (state.view === 'looks') {
-      const badge = mainEl.querySelector(`[data-tryon-badge="${CSS.escape(String(outfitNumber))}"]`);
+      const escaped = CSS.escape(String(outfitNumber));
+      const badge = mainEl.querySelector(`[data-tryon-badge="${escaped}"]`);
       if (badge) renderTryOnBadge(badge, media.tryOnStatus);
+      const visualEl = mainEl.querySelector(`[data-look-visual="${escaped}"]`);
+      if (visualEl) {
+        const boardLayer = visualEl.querySelector('.look-board-layer');
+        const boardImg = visualEl.querySelector('.look-board-img');
+        applyLookCardCollage(visualEl, boardLayer, boardImg, media.collageUrl);
+      }
     } else if (state.view === 'picked' && activePickedRefs && activePickedRefs.outfit === outfitNumber) {
       applyStageState(activePickedRefs, media, { deferReveal });
     }
@@ -2724,10 +3074,12 @@ export function mountStore(root, { onTalk } = {}) {
         applyPointerInPlace(nextSlot);
       } else {
         renderPickedView();
-        if (nextSlot) {
-          applyPointerInPlace(nextSlot);
-        } else {
-          window.scrollTo({ top: 0, behavior: 'smooth' });
+        window.scrollTo({ top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
+        if (nextSlot && activePickedRefs) {
+          const activeRow = activePickedRefs.pieceNotesList.querySelector(
+            '.piece-note-item.is-pointed'
+          );
+          if (activeRow) scrollRowIntoList(activePickedRefs.pieceNotesList, activeRow);
         }
       }
 
@@ -2751,12 +3103,18 @@ export function mountStore(root, { onTalk } = {}) {
       const updated = normalizeOutfit({ ...payload.data, number: payload.outfit }, payload.outfit);
       state.outfits.set(payload.outfit, updated);
 
-      // Reset try-on to rendering and clear flat-lay until a fresh collageReady arrives
+      // Reset try-on to rendering and clear flat-lay, boxes, ring and reveal until a fresh collageReady arrives
       const media = getMedia(payload.outfit);
       media.tryOnStatus = 'rendering';
       media.tryOnUrl = null;
       media.revealed = false;
+      media.stageSwapped = false;
       media.collageUrl = null;
+      media.collageBoxes = null;
+
+      if (state.pickedOutfit === payload.outfit) {
+        state.highlightedSlot = null;
+      }
 
       if (state.view === 'looks') {
         renderLooksView();
@@ -2785,6 +3143,7 @@ export function mountStore(root, { onTalk } = {}) {
       media.tryOnStatus = payload.status;
       if (payload.status === 'rendering' || payload.status === 'failed') {
         media.revealed = false;
+        media.stageSwapped = false;
       }
 
       syncMediaInCurrentView(payload.outfit);
@@ -2824,6 +3183,7 @@ export function mountStore(root, { onTalk } = {}) {
 
       const media = getMedia(payload.outfit);
       media.collageUrl = payload.url.trim();
+      media.collageBoxes = normalizeBoxes(payload.boxes);
       preloadImage(media, stageUrl(media.collageUrl, 900));
 
       syncMediaInCurrentView(payload.outfit);
@@ -2842,7 +3202,7 @@ export function mountStore(root, { onTalk } = {}) {
       } else {
         renderHomeView();
       }
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      window.scrollTo({ top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
       return { ok: true };
     }),
 
@@ -2864,8 +3224,9 @@ export function mountStore(root, { onTalk } = {}) {
 
       leaveSearchView();
       media.tryOnStatus = 'ready';
-      const wasAlreadyRevealed = media.revealed;
+      const wasAlreadyShowingTryOn = media.revealed && !media.stageSwapped;
       media.revealed = true;
+      media.stageSwapped = false;
       setHasProducts();
 
       const needsPick = state.view !== 'picked' || state.pickedOutfit !== payload.outfit;
@@ -2873,12 +3234,17 @@ export function mountStore(root, { onTalk } = {}) {
         state.view = 'picked';
         state.pickedOutfit = payload.outfit;
         state.highlightedSlot = null;
-        renderPickedView({ deferReveal: !wasAlreadyRevealed });
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+        renderPickedView({ deferReveal: !wasAlreadyShowingTryOn });
+        window.scrollTo({ top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
       } else {
-        syncMediaInCurrentView(payload.outfit, { deferReveal: !wasAlreadyRevealed });
-        if (activePickedRefs && activePickedRefs.tryOnPanel) {
-          activePickedRefs.tryOnPanel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        syncMediaInCurrentView(payload.outfit, { deferReveal: !wasAlreadyShowingTryOn });
+        if (activePickedRefs && activePickedRefs.stagePanel && !isElementInView(activePickedRefs.stagePanel)) {
+          const rect = activePickedRefs.stagePanel.getBoundingClientRect();
+          const headerH = headerEl.offsetHeight || 0;
+          window.scrollTo({
+            top: Math.max(0, window.scrollY + rect.top - headerH - 16),
+            behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+          });
         }
       }
 
