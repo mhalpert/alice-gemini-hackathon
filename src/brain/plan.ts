@@ -254,6 +254,7 @@ async function planWith(model: string, brief: Brief, signal: AbortSignal, timeou
   const isStylist = model === MODELS.stylist();
   const level = ((isStylist ? process.env.ALICE_PLAN_THINKING : undefined) || 'low').toLowerCase() as 'low';
   const reply = await generateJson<any>({
+    job: 'brain_plan',
     model,
     system: systemPrompt(),
     user: userPrompt(brief),

@@ -18,10 +18,11 @@ export const COLOUR_WORDS: Record<string, string[]> = {
   cream: ['cream', 'ivory', 'ecru', 'off-white', 'bone'],
   silver: ['silver', 'chrome', 'steel'],
   gold: ['gold', 'brass'],
-  pink: ['pink', 'blush', 'rose', 'fuchsia'],
+  pink: ['pink', 'blush', 'rose', 'fuchsia', 'coral', 'peach'],
   purple: ['purple', 'lavender', 'lilac', 'plum'],
   yellow: ['yellow', 'mustard', 'lemon'],
-  orange: ['orange', 'rust', 'terracotta'],
+  orange: ['orange', 'rust', 'terracotta', 'coral', 'peach'],
+  teal: ['teal', 'turquoise', 'aqua', 'mint'],
 };
 
 // The colour asked for: in "swap the black boots for brown boots" it is the last one named.
@@ -102,4 +103,41 @@ export function typeIn(text: string, slot: string, last = false): TypeMatch | nu
     }
   }
   return best?.m ?? null;
+}
+
+// Every colour word the brain knows, for checking a look's name against its pieces.
+const ALL_COLOURS = [...new Set([...Object.keys(COLOUR_WORDS), ...Object.values(COLOUR_WORDS).flat(), 'champagne', 'lilac', 'sage', 'emerald', 'mustard'])]
+  .filter((w) => !['denim', 'khaki', 'stone', 'bone', 'jet', 'sky', 'army', 'nude', 'heather', 'flat'].includes(w));
+
+// A colour in the name is real if some piece's title names it or a colour of the same family.
+function colourPresent(word: string, titles: string): boolean {
+  const family = new Set([word]);
+  for (const [k, list] of Object.entries(COLOUR_WORDS)) if (k === word || list.includes(word)) { family.add(k); list.forEach((w) => family.add(w)); }
+  return titleHas(titles, [...family]);
+}
+
+// "Coral Sunset Jumpsuit" over a sage jumpsuit -> "Sunset Jumpsuit". Returns the fixed name.
+export function fixNameColours(name: string, titles: string[]): string {
+  const all = titles.join(' | ');
+  const wrong = ALL_COLOURS.filter((w) => titleHas(name, [w]) && !colourPresent(w, all));
+  if (!wrong.length) return name;
+  let out = name;
+  for (const w of wrong) out = out.replace(new RegExp(`(^|[^a-z])${w}([^a-z]|$)`, 'ig'), '$1$2');
+  out = out.replace(/\s{2,}/g, ' ').replace(/^[\s&,-]+|[\s&,-]+$/g, '').trim();
+  return out || name;
+}
+
+// Hard dress-code filters that a model must not be trusted with.
+const BRIDAL = /\b(bride|bridal|bachelorette|wedding dress|veil|just married)\b/i;
+const WHITES = ['white', 'ivory', 'off-white', 'cream', 'ecru', 'bone'];
+export function isWeddingGuest(occasion: string): boolean {
+  const o = (occasion ?? '').toLowerCase();
+  return /wedding|reception|rehearsal dinner/.test(o) && !/\b(my|our) (own )?wedding\b|i'?m getting married|\bmy bridal\b/.test(o);
+}
+export function breaksDressCode(item: { title: string; description?: string }, slot: string, brief: { occasion: string; gender: string }): boolean {
+  if (!isWeddingGuest(brief.occasion)) return false;
+  if (BRIDAL.test(item.title) || BRIDAL.test(item.description ?? '')) return true;
+  // Guests never wear white: anything visible for women, the jacket or trousers for men.
+  const visible = brief.gender === 'women' ? ['dress', 'top', 'bottom', 'layer'] : ['layer', 'bottom'];
+  return visible.includes(slot) && titleHas(item.title, WHITES);
 }
