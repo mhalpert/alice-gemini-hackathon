@@ -14,10 +14,7 @@ logs/
 # OS
 .DS_Store
 
-# Planning docs and photos of people stay out of this public repo
-SPEC.md
-spec.md
-SPEC*.md
+# Photos of people never go in the repo
 photos/
 
 # Browser libraries copied in by npm install
