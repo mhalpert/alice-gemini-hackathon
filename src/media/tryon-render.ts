@@ -66,9 +66,11 @@ function isRateLimitOrUnavailable(err: unknown): boolean {
 export async function generateImageWithRetry(
   parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }>,
   job: 'tryon' | 'test-shopper',
+  opts?: { retries?: number; timeoutMs?: number },
 ): Promise<{ data: Buffer; mimeType: string }> {
   const model = process.env.ALICE_MODEL_TRYON || 'gemini-nano-banana-2.1';
-  let normalRetriesLeft = 1;
+  let normalRetriesLeft = opts?.retries ?? 1;
+  const attemptTimeoutMs = opts?.timeoutMs ?? ATTEMPT_TIMEOUT_MS;
   let rateLimitAttempt = 0;
 
   while (true) {
@@ -83,7 +85,7 @@ export async function generateImageWithRetry(
             imageConfig: { aspectRatio: '3:4' },
           },
         }),
-        ATTEMPT_TIMEOUT_MS,
+        attemptTimeoutMs,
         job,
       );
       const attemptMs = Date.now() - attemptStart;
@@ -295,6 +297,8 @@ export async function renderTryOn(
   }
 
   const verifyOff = process.env.ALICE_TRYON_VERIFY === 'off';
+  const rawCap = Number(process.env.ALICE_TRYON_CAP_MS);
+  const capMs = Number.isFinite(rawCap) && rawCap > 0 ? rawCap : 40_000;
   const contactSheetPromise: Promise<Buffer> | null = verifyOff
     ? null
     : buildContactSheet(loadedPieceBufs);
@@ -302,12 +306,19 @@ export async function renderTryOn(
   const generateOnce = async (correction: string | null): Promise<Buffer> => {
     const extraLine = correction ? `Correction from the inspector: ${correction}` : null;
     const parts = [...baseParts, { text: buildTryOnPrompt(hasShoes, hasBottom, extraLine) }];
-    const generated = await generateImageWithRetry(parts, 'tryon');
+    const isRedo = correction !== null;
+    const remMs = Math.max(5_000, capMs - (Date.now() - t0));
+    const generated = await generateImageWithRetry(
+      parts,
+      'tryon',
+      isRedo ? { retries: 0, timeoutMs: Math.min(ATTEMPT_TIMEOUT_MS, remMs + 1000) } : undefined,
+    );
     return generated.mimeType === 'image/jpeg'
       ? generated.data
       : await sharp(generated.data).jpeg({ quality: 90 }).toBuffer();
   };
 
+  const lookTag = outfit.number ?? opts?.label ?? '?';
   const { image: outBuf, check } = await runTryOnVerifyLoop<Buffer>({
     generate: generateOnce,
     gate: async (tryonJpeg) => {
@@ -331,9 +342,14 @@ export async function renderTryOn(
         { gateScores },
       );
     },
+    onBackgroundInspect: (res, ms) => {
+      console.log(
+        `[media] bg-inspect look=${lookTag} verdict=${res?.verdict ?? 'err'} ms=${ms}`,
+      );
+    },
     verifyOff,
     startedAt: t0,
-    capMs: 55_000,
+    capMs,
   });
 
   const id = newTryonId();
@@ -343,7 +359,7 @@ export async function renderTryOn(
 
   const ms = Date.now() - t0;
   console.log(
-    `tryon ${id} look ${outfit.number ?? opts?.label ?? '?'} ready in ${ms} ms (attempts=${check.attempts} passed=${check.passed} gate=${check.ms_gate}ms inspect=${check.ms_inspector}ms)`,
+    `tryon ${id} look ${lookTag} ready in ${ms} ms (path=${check.path} attempts=${check.attempts} passed=${check.passed} gate=${check.ms_gate}ms inspect=${check.ms_inspector}ms)`,
   );
 
   return {
