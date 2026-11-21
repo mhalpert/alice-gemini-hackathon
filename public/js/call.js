@@ -106,9 +106,12 @@ export function mountCall(root, { handlers = {} } = {}) {
       : (aliceState ? ALICE_STATE_LABELS[aliceState] : '');
   }
 
+  // Only the participant that publishes an agent state drives the line. A video-avatar worker
+  // joins as a second agent participant with no state of its own, so it is ignored here.
   function syncAgentState(participant) {
-    if (!participant?.isAgent) return;
-    setAliceState(participant.attributes?.['lk.agent.state']);
+    const value = participant?.attributes?.['lk.agent.state'];
+    if (!participant?.isAgent || !value) return;
+    setAliceState(value);
   }
 
   // ---- captions -----------------------------------------------------------
@@ -446,7 +449,7 @@ export function mountCall(root, { handlers = {} } = {}) {
       });
       room.on(RoomEvent.ParticipantDisconnected, (participant) => {
         if (room !== currentRoom) return;
-        if (participant?.isAgent) setAliceState('joining');
+        if (participant?.isAgent && participant.attributes?.['lk.agent.state']) setAliceState('joining');
       });
       room.on(RoomEvent.Reconnecting, () => {
         if (room === currentRoom) setReconnecting(true);
@@ -459,24 +462,14 @@ export function mountCall(root, { handlers = {} } = {}) {
       room.on(RoomEvent.Reconnected, () => {
         if (room !== currentRoom) return;
         setReconnecting(false);
-        for (const participant of room.remoteParticipants.values()) {
-          if (participant.isAgent) {
-            syncAgentState(participant);
-            break;
-          }
-        }
+        for (const participant of room.remoteParticipants.values()) syncAgentState(participant);
       });
       room.on(RoomEvent.Disconnected, () => reset('Call ended. Talk to Alice again whenever you like.'));
 
       body.classList.add('no-face');
       setAliceState('joining');
       await room.connect(grant.url, grant.token);
-      for (const participant of room.remoteParticipants.values()) {
-        if (participant.isAgent) {
-          syncAgentState(participant);
-          break;
-        }
-      }
+      for (const participant of room.remoteParticipants.values()) syncAgentState(participant);
       await room.startAudio().catch(() => {});
       await room.localParticipant.setMicrophoneEnabled(true);
       await setCamera(true);
