@@ -462,6 +462,7 @@ function closeSvg() {
 }
 
 const BOUTIQUE_FETCH_TIMEOUT_MS = 4000;
+const BAG_FETCH_TIMEOUT_MS = 20000;
 
 // Fetch JSON from same-origin store routes with a hard timeout; returns null on any failure
 async function fetchJson(url, { timeoutMs = BOUTIQUE_FETCH_TIMEOUT_MS, signal } = {}) {
@@ -482,6 +483,64 @@ async function fetchJson(url, { timeoutMs = BOUTIQUE_FETCH_TIMEOUT_MS, signal } 
     if (!res.ok) return null;
     const data = await res.json();
     return data && typeof data === 'object' ? data : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', onAbort);
+  }
+}
+
+// Deduplicate and trim a list of size labels while preserving order
+function normalizeSizeList(rawSizes) {
+  if (!Array.isArray(rawSizes)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const s of rawSizes) {
+    const clean = typeof s === 'string' || typeof s === 'number' ? String(s).trim() : '';
+    if (!clean || seen.has(clean.toLowerCase())) continue;
+    seen.add(clean.toLowerCase());
+    out.push(clean);
+  }
+  return out;
+}
+
+function computePiecesTotal(pieces) {
+  let sum = 0;
+  for (const piece of Array.isArray(pieces) ? pieces : []) {
+    const price = Number(piece?.item?.price);
+    if (Number.isFinite(price)) sum += price;
+  }
+  return Math.round(sum * 100) / 100;
+}
+
+// Post a direct bag request to /api/bag; returns a bagReady payload on 200 or null when unavailable
+async function postBag(
+  { department, outfit, sizes },
+  { timeoutMs = BAG_FETCH_TIMEOUT_MS, signal } = {}
+) {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) return null;
+    signal.addEventListener('abort', onAbort, { once: true });
+  }
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch('/api/bag', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ department, outfit, sizes }),
+      signal: controller.signal,
+    });
+    if (res.status !== 200) return null;
+    const data = await res.json();
+    if (!data || typeof data !== 'object' || !Array.isArray(data.stores)) return null;
+    return data;
   } catch {
     return null;
   } finally {
@@ -549,7 +608,7 @@ function normalizeOccasionMenu(data) {
 }
 
 // Renders the shop into `root` (the #store element) and returns the page-action handlers.
-export function mountStore(root, { onTalk } = {}) {
+export function mountStore(root, { onTalk, isLive, tellAlice } = {}) {
   if (!root || !(root instanceof HTMLElement)) {
     throw new Error('mountStore requires a valid DOM container');
   }
@@ -571,6 +630,7 @@ export function mountStore(root, { onTalk } = {}) {
     bagData: null,
     bagOpen: false,
     bagOpenedStores: new Set(),
+    directBag: null, // { department, name, number?, entries: [{ piece, size }], sizes }
     drawerMode: 'bag', // 'bag' | 'review' | 'result'
     orderReview: null,
     orderConfirmedId: null,
@@ -579,6 +639,255 @@ export function mountStore(root, { onTalk } = {}) {
     lastSearch: null,
     searchFromBoutique: false,
   };
+
+  // Remembered sizes per slot across looks and direct-bag request guards
+  const lastSizesBySlot = new Map();
+  const productSelectedSizes = new Map();
+  let directBagReqId = 0;
+  let bagAbortController = null;
+  let directBagBusy = false;
+  const liveRemoveTimers = new Set();
+
+  function isCallLive() {
+    return typeof isLive === 'function' ? Boolean(isLive()) : document.body.classList.contains('call-live');
+  }
+
+  function sendToAlice(text) {
+    if (typeof tellAlice === 'function') return tellAlice(text);
+    return Promise.resolve(false);
+  }
+
+  function clearLiveRemoveTimers() {
+    for (const timerId of liveRemoveTimers) {
+      clearTimeout(timerId);
+    }
+    liveRemoveTimers.clear();
+  }
+
+  function rememberSlotSize(slot, size) {
+    const key = typeof slot === 'string' ? slot.trim().toLowerCase() : '';
+    const val = typeof size === 'string' ? size.trim() : '';
+    if (key && val) lastSizesBySlot.set(key, val);
+  }
+
+  function getRememberedSlotSize(slot) {
+    const key = typeof slot === 'string' ? slot.trim().toLowerCase() : '';
+    return key ? lastSizesBySlot.get(key) || '' : '';
+  }
+
+  function resolveBagDepartment(pieces) {
+    for (const piece of Array.isArray(pieces) ? pieces : []) {
+      const dept = piece?.item?.department;
+      if (dept === 'men' || dept === 'women') return dept;
+    }
+    return boutique.department === 'men' ? 'men' : 'women';
+  }
+
+  function buildBagSizesMap(entries) {
+    const sizes = {};
+    for (const entry of entries) {
+      const slot = typeof entry?.piece?.slot === 'string' ? entry.piece.slot.trim() : '';
+      const size = typeof entry?.size === 'string' ? entry.size.trim() : '';
+      if (slot && size) sizes[slot] = size;
+    }
+    return sizes;
+  }
+
+  function resolveProductBagSlot(baseSlot, existingEntries) {
+    const raw = typeof baseSlot === 'string' && baseSlot.trim() ? baseSlot.trim() : 'piece';
+    const used = new Set(
+      (Array.isArray(existingEntries) ? existingEntries : []).map((e) =>
+        typeof e?.piece?.slot === 'string' ? e.piece.slot.trim().toLowerCase() : ''
+      )
+    );
+    if (!used.has(raw.toLowerCase())) return raw;
+    let suffix = 2;
+    while (used.has(`${raw}-${suffix}`.toLowerCase())) suffix += 1;
+    return `${raw}-${suffix}`;
+  }
+
+  function buildBagOutfitPayload(entries, { name = '', number = null, total = null } = {}) {
+    const pieces = entries.map((entry) => ({
+      slot: typeof entry.piece.slot === 'string' ? entry.piece.slot : '',
+      ...(entry.piece.why ? { why: entry.piece.why } : {}),
+      item: entry.piece.item,
+    }));
+    const outfit = {
+      name:
+        typeof name === 'string' && name.trim()
+          ? name.trim()
+          : typeof number === 'number' && Number.isFinite(number)
+            ? `Look ${number}`
+            : 'Your bag',
+      pieces,
+      total:
+        typeof total === 'number' && Number.isFinite(total)
+          ? total
+          : computePiecesTotal(pieces),
+    };
+    if (typeof number === 'number' && Number.isFinite(number)) {
+      outfit.number = number;
+    }
+    return outfit;
+  }
+
+  function renderBagFallbackInto(containerEl, message) {
+    containerEl.hidden = false;
+    containerEl.replaceChildren(
+      `${message} `,
+      el(
+        'button',
+        {
+          type: 'button',
+          className: 'bag-fallback-talk-btn',
+          onClick: () => triggerTalk(),
+        },
+        'Talk to Alice'
+      )
+    );
+  }
+
+  function findDirectBagEntryIndex(entries, line, storeName) {
+    if (!Array.isArray(entries) || entries.length === 0) return -1;
+    const lineTitle = typeof line?.title === 'string' ? line.title.trim().toLowerCase() : '';
+    const lineStore = typeof storeName === 'string' ? storeName.trim().toLowerCase() : '';
+    const lineSize = typeof line?.size === 'string' ? line.size.trim().toLowerCase() : '';
+    const linePrice = Number(line?.price);
+    const lineImage = typeof line?.image === 'string' ? line.image.trim() : '';
+
+    const sizeMatches = (entry) =>
+      !lineSize || (typeof entry?.size === 'string' && entry.size.trim().toLowerCase() === lineSize);
+    const storeMatches = (entry) =>
+      !lineStore ||
+      (typeof entry?.piece?.item?.store === 'string' &&
+        entry.piece.item.store.trim().toLowerCase() === lineStore);
+    const titleMatches = (entry) =>
+      Boolean(lineTitle) &&
+      typeof entry?.piece?.item?.title === 'string' &&
+      entry.piece.item.title.trim().toLowerCase() === lineTitle;
+
+    let idx = entries.findIndex((e) => itemMatches(e?.piece?.item, line) && sizeMatches(e));
+    if (idx !== -1) return idx;
+    idx = entries.findIndex((e) => itemMatches(e?.piece?.item, line));
+    if (idx !== -1) return idx;
+    idx = entries.findIndex((e) => titleMatches(e) && storeMatches(e) && sizeMatches(e));
+    if (idx !== -1) return idx;
+    idx = entries.findIndex((e) => titleMatches(e) && storeMatches(e));
+    if (idx !== -1) return idx;
+    if (Number.isFinite(linePrice)) {
+      idx = entries.findIndex((e) => titleMatches(e) && Number(e?.piece?.item?.price) === linePrice);
+      if (idx !== -1) return idx;
+    }
+    idx = entries.findIndex((e) => titleMatches(e));
+    if (idx !== -1) return idx;
+    if (lineImage) {
+      idx = entries.findIndex((e) => e?.piece?.item?.image === lineImage);
+      if (idx !== -1) return idx;
+    }
+    return entries.length === 1 ? 0 : -1;
+  }
+
+  async function removeBagLine(line, storeName, rowEl, removeBtn, noteEl) {
+    if (isCallLive()) {
+      if (removeBtn.disabled) return;
+      const title =
+        typeof line?.title === 'string' && line.title.trim() ? line.title.trim() : 'item';
+      removeBtn.disabled = true;
+      removeBtn.textContent = 'Removing…';
+      rowEl.classList.add('is-removing');
+      const restore = () => {
+        rowEl.classList.remove('is-removing');
+        removeBtn.disabled = false;
+        removeBtn.textContent = 'Remove';
+      };
+      const timerId = setTimeout(() => {
+        liveRemoveTimers.delete(timerId);
+        restore();
+      }, 15000);
+      liveRemoveTimers.add(timerId);
+      try {
+        const sent = await sendToAlice(`Remove the ${title} from my bag.`);
+        if (sent === false) {
+          clearTimeout(timerId);
+          liveRemoveTimers.delete(timerId);
+          restore();
+        }
+      } catch {
+        clearTimeout(timerId);
+        liveRemoveTimers.delete(timerId);
+        restore();
+      }
+      return;
+    }
+
+    if (!state.directBag || !Array.isArray(state.directBag.entries)) {
+      if (noteEl) {
+        renderBagFallbackInto(noteEl, 'Talk to Alice to change this bag.');
+      }
+      return;
+    }
+
+    if (directBagBusy) return;
+    const matchIdx = findDirectBagEntryIndex(state.directBag.entries, line, storeName);
+    if (matchIdx === -1) return;
+
+    const remainingEntries = state.directBag.entries.filter((_, idx) => idx !== matchIdx);
+    if (remainingEntries.length === 0) {
+      if (bagAbortController) {
+        bagAbortController.abort();
+        bagAbortController = null;
+      }
+      directBagReqId += 1;
+      state.directBag = null;
+      applyBagReady({ stores: [], links: [], total: 0 }, { fromAlice: false });
+      return;
+    }
+
+    const department = state.directBag.department;
+    const outfit = buildBagOutfitPayload(remainingEntries, {
+      name: state.directBag.name,
+      number: state.directBag.number,
+    });
+    const sizes = buildBagSizesMap(remainingEntries);
+
+    if (bagAbortController) bagAbortController.abort();
+    const controller = new AbortController();
+    bagAbortController = controller;
+    const reqId = ++directBagReqId;
+
+    directBagBusy = true;
+    removeBtn.disabled = true;
+    removeBtn.textContent = 'Removing…';
+    rowEl.classList.add('is-removing');
+
+    let data = null;
+    try {
+      data = await postBag({ department, outfit, sizes }, { signal: controller.signal });
+    } finally {
+      if (reqId === directBagReqId) {
+        directBagBusy = false;
+        bagAbortController = null;
+      }
+    }
+
+    if (reqId !== directBagReqId) return;
+
+    if (!data) {
+      rowEl.classList.remove('is-removing');
+      removeBtn.disabled = false;
+      removeBtn.textContent = 'Remove';
+      return;
+    }
+
+    state.directBag = {
+      department,
+      name: outfit.name,
+      number: outfit.number,
+      entries: remainingEntries,
+      sizes,
+    };
+    applyBagReady(data, { fromAlice: false });
+  }
 
   // Boutique storefront state (kept separate from live-call outfits)
   const boutique = {
@@ -3151,6 +3460,7 @@ export function mountStore(root, { onTalk } = {}) {
 
   function applyInPlaceSwap(panelRefs, oldLook, updated, swappedIndices) {
     if (!panelRefs || !panelRefs.pieceNotesList || !panelRefs.shopGrid) return false;
+    if (typeof panelRefs.closeSizeSheet === 'function') panelRefs.closeSizeSheet();
     const pieces = updated.pieces || [];
     const slotCounts = new Map();
     const occurrences = pieces.map((piece) => {
@@ -4124,16 +4434,222 @@ export function mountStore(root, { onTalk } = {}) {
     );
 
     const ctaStatus = el('span', { className: 'summary-cta-status', 'aria-live': 'polite' }, '');
+    const bagFallbackEl = el('p', {
+      className: 'bag-fallback-note',
+      role: 'status',
+      'aria-live': 'polite',
+      hidden: true,
+    });
+    const sizeSheetEl = el('div', {
+      className: 'look-size-sheet',
+      role: 'region',
+      'aria-label': 'Choose sizes',
+      hidden: true,
+    });
+    let sizeSheetOpen = false;
+    let sizeSheetPending = false;
+    let notesCol = null;
+
+    function closeSizeSheet() {
+      sizeSheetOpen = false;
+      sizeSheetEl.hidden = true;
+      sizeSheetEl.replaceChildren();
+      addLookBtn.setAttribute('aria-expanded', 'false');
+      if (notesCol) notesCol.classList.remove('has-size-sheet');
+    }
+
+    function openSizeSheet() {
+      const currentLook = state.outfits.get(look.number) || look;
+      const currentPieces = Array.isArray(currentLook.pieces) ? currentLook.pieces : [];
+      if (currentPieces.length === 0) return;
+
+      bagFallbackEl.hidden = true;
+      bagFallbackEl.replaceChildren();
+      ctaStatus.textContent = '';
+
+      const rowControls = [];
+      const rows = currentPieces.map((piece, idx) => {
+        const item = piece?.item || {};
+        const slot = typeof piece?.slot === 'string' ? piece.slot.trim() : '';
+        const slotLabel = formatSlot(slot);
+        const title = typeof item.title === 'string' && item.title.trim() ? item.title.trim() : slotLabel;
+        const sizes = normalizeSizeList(item.sizes);
+        const remembered = getRememberedSlotSize(slot);
+        const controlId = `look-size-${currentLook.number}-${idx}`;
+
+        let controlEl;
+        let readSize;
+
+        if (sizes.length > 1) {
+          const matched = remembered
+            ? sizes.find((s) => s.toLowerCase() === remembered.toLowerCase())
+            : '';
+          const initial = matched || sizes[0];
+          const selectEl = el(
+            'select',
+            {
+              id: controlId,
+              className: 'size-sheet-select',
+              'aria-label': `Size for ${title}`,
+              onChange: (e) => rememberSlotSize(slot, e.currentTarget.value),
+            },
+            sizes.map((s) => el('option', { value: s, selected: s === initial }, s))
+          );
+          selectEl.value = initial;
+          controlEl = selectEl;
+          readSize = () => selectEl.value.trim();
+        } else if (sizes.length === 1) {
+          const onlySize = sizes[0];
+          const label =
+            onlySize.toLowerCase() === 'os' || onlySize.toLowerCase() === 'one size'
+              ? 'One size'
+              : onlySize;
+          controlEl = el('span', { className: 'size-sheet-static' }, label);
+          readSize = () => onlySize;
+        } else {
+          const inputEl = el('input', {
+            id: controlId,
+            type: 'text',
+            className: 'size-sheet-input',
+            placeholder: 'One size',
+            maxlength: '24',
+            autocomplete: 'off',
+            'aria-label': `Size for ${title}`,
+            value: remembered,
+            onInput: (e) => rememberSlotSize(slot, e.currentTarget.value),
+          });
+          if (remembered) inputEl.value = remembered;
+          controlEl = inputEl;
+          readSize = () => inputEl.value.trim();
+        }
+
+        rowControls.push({ piece, slot, readSize });
+
+        return el(
+          'div',
+          { className: 'size-sheet-row' },
+          el(
+            'div',
+            { className: 'size-sheet-meta' },
+            el('span', { className: 'size-sheet-slot' }, slotLabel),
+            sizes.length !== 1
+              ? el('label', { className: 'size-sheet-title', for: controlId }, title)
+              : el('span', { className: 'size-sheet-title' }, title)
+          ),
+          el('div', { className: 'size-sheet-control' }, controlEl)
+        );
+      });
+
+      const submitBtn = el(
+        'button',
+        {
+          type: 'button',
+          className: 'btn-primary size-sheet-submit',
+          onClick: async () => {
+            if (isCallLive()) {
+              closeSizeSheet();
+              bagFallbackEl.hidden = true;
+              bagFallbackEl.replaceChildren();
+              sendToAlice(`Add look ${currentLook.number} to my bag.`);
+              ctaStatus.textContent = 'Alice is on it. Tell her your sizes.';
+              return;
+            }
+            if (sizeSheetPending || directBagBusy) return;
+            const entries = rowControls.map(({ piece, slot, readSize }) => {
+              const size = readSize();
+              if (slot && size) rememberSlotSize(slot, size);
+              return { piece, size };
+            });
+            const department = resolveBagDepartment(entries.map((e) => e.piece));
+            const outfit = buildBagOutfitPayload(entries, {
+              name: currentLook.name || lookLabel,
+              number: currentLook.number,
+              total: currentLook.total,
+            });
+            const sizes = buildBagSizesMap(entries);
+
+            if (bagAbortController) bagAbortController.abort();
+            const controller = new AbortController();
+            bagAbortController = controller;
+            const reqId = ++directBagReqId;
+
+            sizeSheetPending = true;
+            directBagBusy = true;
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Adding…';
+            bagFallbackEl.hidden = true;
+            bagFallbackEl.replaceChildren();
+
+            let data = null;
+            try {
+              data = await postBag({ department, outfit, sizes }, { signal: controller.signal });
+            } finally {
+              sizeSheetPending = false;
+              if (reqId === directBagReqId) {
+                directBagBusy = false;
+                bagAbortController = null;
+              }
+              submitBtn.disabled = false;
+              submitBtn.textContent = 'Add to bag';
+            }
+
+            if (reqId !== directBagReqId) return;
+
+            if (!data) {
+              renderBagFallbackInto(
+                bagFallbackEl,
+                'Talk to Alice and she will bag this look for you.'
+              );
+              return;
+            }
+
+            state.directBag = {
+              department,
+              name: outfit.name,
+              number: outfit.number,
+              entries,
+              sizes,
+            };
+            closeSizeSheet();
+            applyBagReady(data, { fromAlice: false });
+          },
+        },
+        'Add to bag'
+      );
+
+      sizeSheetEl.replaceChildren(
+        el('div', { className: 'size-sheet-rows' }, rows),
+        el('div', { className: 'size-sheet-actions' }, submitBtn)
+      );
+      sizeSheetOpen = true;
+      sizeSheetEl.hidden = false;
+      addLookBtn.setAttribute('aria-expanded', 'true');
+      if (notesCol) notesCol.classList.add('has-size-sheet');
+    }
+
     const addLookBtn = el(
       'button',
       {
         type: 'button',
         className: 'btn-primary',
+        'aria-expanded': 'false',
         onClick: () => {
-          ctaStatus.textContent = 'Ask Alice to add this look to your bag.';
           root.dispatchEvent(
             new CustomEvent('alice:add-look', { detail: { outfit: look.number } })
           );
+          if (isCallLive()) {
+            closeSizeSheet();
+            bagFallbackEl.hidden = true;
+            bagFallbackEl.replaceChildren();
+            sendToAlice(`Add look ${look.number} to my bag.`);
+            ctaStatus.textContent = 'Alice is on it. Tell her your sizes.';
+            return;
+          }
+          if (sizeSheetOpen) {
+            closeSizeSheet();
+          } else {
+            openSizeSheet();
+          }
         },
       },
       'Add the look to bag'
@@ -4146,7 +4662,7 @@ export function mountStore(root, { onTalk } = {}) {
 
     const lookNameEl = el('h1', { className: 'stage-look-name' }, lookLabel);
     const lookTotalEl = el('span', { className: 'stage-look-total' }, formatPrice(look.total));
-    const notesCol = el(
+    notesCol = el(
       'aside',
       { className: 'stage-notes-col', 'aria-label': "Alice's notes" },
       el(
@@ -4165,6 +4681,8 @@ export function mountStore(root, { onTalk } = {}) {
         'div',
         { className: 'stage-notes-footer' },
         el('div', { className: 'summary-cta-row' }, addLookBtn, ctaStatus),
+        sizeSheetEl,
+        bagFallbackEl,
         tryOnStatusEl
       )
     );
@@ -4235,6 +4753,7 @@ export function mountStore(root, { onTalk } = {}) {
       thumbImg,
       thumbLabel,
       tryOnStatusEl,
+      closeSizeSheet,
       pieceNotesList,
       shopGrid,
       boardDrop: null,
@@ -4532,7 +5051,7 @@ export function mountStore(root, { onTalk } = {}) {
       )
     );
 
-    // Display-only size chips: prefer sizes_detail (with sold-out state), falling back to sizes / item.sizes
+    // Selectable size chips: prefer sizes_detail (with sold-out state), falling back to sizes / item.sizes
     const rawSizesDetail = Array.isArray(payload.sizes_detail)
       ? payload.sizes_detail
           .filter((entry) => entry && typeof entry === 'object' && typeof entry.label === 'string' && entry.label.trim())
@@ -4548,15 +5067,53 @@ export function mountStore(root, { onTalk } = {}) {
         : Array.isArray(item.sizes)
           ? item.sizes
           : [];
-    const sizes = rawSizes
-      .map((s) => (typeof s === 'string' ? s.trim() : ''))
-      .filter(Boolean);
+    const sizes = normalizeSizeList(rawSizes);
+    const availableSizes =
+      rawSizesDetail.length > 0
+        ? rawSizesDetail.filter((entry) => entry.available).map((entry) => entry.label)
+        : sizes;
+    const allSoldOut = rawSizesDetail.length > 0 && availableSizes.length === 0;
+
+    const itemKey = pieceIdentity({ item });
+    const prevPicked = itemKey ? productSelectedSizes.get(itemKey) || '' : '';
+    const rememberedSlot = getRememberedSlotSize(slotText);
+    let selectedSize =
+      (prevPicked && availableSizes.find((s) => s.toLowerCase() === prevPicked.toLowerCase())) ||
+      (rememberedSlot && availableSizes.find((s) => s.toLowerCase() === rememberedSlot.toLowerCase())) ||
+      availableSizes[0] ||
+      '';
+
+    const selectableChipButtons = [];
+    const buildSelectableChip = (label) => {
+      const isSelected = label === selectedSize;
+      const btn = el(
+        'button',
+        {
+          type: 'button',
+          className: `size-chip size-chip--selectable${isSelected ? ' is-selected' : ''}`,
+          'aria-pressed': isSelected ? 'true' : 'false',
+          onClick: () => {
+            selectedSize = label;
+            if (itemKey) productSelectedSizes.set(itemKey, label);
+            if (slotText) rememberSlotSize(slotText, label);
+            for (const entry of selectableChipButtons) {
+              const active = entry.label === label;
+              entry.btn.classList.toggle('is-selected', active);
+              entry.btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+            }
+          },
+        },
+        label
+      );
+      selectableChipButtons.push({ label, btn });
+      return btn;
+    };
 
     const sizeChipNodes =
       rawSizesDetail.length > 0
         ? rawSizesDetail.map((entry) =>
             entry.available
-              ? el('span', { className: 'size-chip' }, entry.label)
+              ? buildSelectableChip(entry.label)
               : el(
                   'span',
                   {
@@ -4568,7 +5125,121 @@ export function mountStore(root, { onTalk } = {}) {
                   entry.label
                 )
           )
-        : sizes.map((size) => el('span', { className: 'size-chip' }, size));
+        : sizes.map((size) => buildSelectableChip(size));
+
+    const whyText = typeof payload.why === 'string' ? payload.why.trim() : '';
+    const productBagStatusEl = el('p', {
+      className: 'bag-fallback-note product-bag-status',
+      role: 'status',
+      'aria-live': 'polite',
+      hidden: true,
+    });
+    let productAddPending = false;
+    const productAddBagBtn = el(
+      'button',
+      {
+        type: 'button',
+        className: 'btn-primary product-add-bag-btn',
+        disabled: allSoldOut,
+        onClick: async () => {
+          if (allSoldOut) return;
+          const title =
+            typeof item.title === 'string' && item.title.trim() ? item.title.trim() : 'item';
+          if (isCallLive()) {
+            const msg = selectedSize
+              ? `Add the ${title} in size ${selectedSize} to my bag.`
+              : `Add the ${title} to my bag.`;
+            sendToAlice(msg);
+            productBagStatusEl.hidden = false;
+            productBagStatusEl.replaceChildren('Alice is on it.');
+            return;
+          }
+          if (productAddPending || directBagBusy) return;
+
+          if (slotText && selectedSize) rememberSlotSize(slotText, selectedSize);
+          const existingEntries =
+            state.directBag && Array.isArray(state.directBag.entries)
+              ? state.directBag.entries
+              : [];
+          const baseSlot =
+            slotText ||
+            (typeof item.slot === 'string' && item.slot.trim()) ||
+            (typeof item.category === 'string' && item.category.trim()) ||
+            'piece';
+          const resolvedSlot = resolveProductBagSlot(baseSlot, existingEntries);
+          const newEntry = {
+            piece: {
+              slot: resolvedSlot,
+              ...(whyText ? { why: whyText } : {}),
+              item,
+            },
+            size: selectedSize,
+          };
+          const nextEntries = [...existingEntries, newEntry];
+          const department =
+            state.directBag?.department || resolveBagDepartment(nextEntries.map((e) => e.piece));
+          const outfit = buildBagOutfitPayload(nextEntries, {
+            name: state.directBag?.name || title,
+            number: state.directBag?.number ?? null,
+          });
+          const sizesMap = buildBagSizesMap(nextEntries);
+
+          if (bagAbortController) bagAbortController.abort();
+          const controller = new AbortController();
+          bagAbortController = controller;
+          const reqId = ++directBagReqId;
+
+          productAddPending = true;
+          directBagBusy = true;
+          productAddBagBtn.disabled = true;
+          productAddBagBtn.textContent = 'Adding…';
+          productBagStatusEl.hidden = true;
+          productBagStatusEl.replaceChildren();
+
+          let data = null;
+          try {
+            data = await postBag(
+              { department, outfit, sizes: sizesMap },
+              { signal: controller.signal }
+            );
+          } finally {
+            productAddPending = false;
+            if (reqId === directBagReqId) {
+              directBagBusy = false;
+              bagAbortController = null;
+            }
+            productAddBagBtn.disabled = allSoldOut;
+            productAddBagBtn.textContent = 'Add to bag';
+          }
+
+          if (reqId !== directBagReqId) return;
+
+          if (!data) {
+            renderBagFallbackInto(
+              productBagStatusEl,
+              'Talk to Alice and she will bag this for you.'
+            );
+            return;
+          }
+
+          state.directBag = {
+            department,
+            name: outfit.name,
+            number: outfit.number,
+            entries: nextEntries,
+            sizes: sizesMap,
+          };
+          applyBagReady(data, { fromAlice: false });
+        },
+      },
+      'Add to bag'
+    );
+    const productBagActions = el(
+      'div',
+      { className: 'product-bag-actions' },
+      productAddBagBtn,
+      productBagStatusEl
+    );
 
     const sizesSection =
       sizeChipNodes.length > 0
@@ -4576,12 +5247,12 @@ export function mountStore(root, { onTalk } = {}) {
             'section',
             { className: 'product-panel-block', 'aria-label': 'Available sizes' },
             el('h3', { className: 'section-label' }, 'Sizes'),
-            el('div', { className: 'size-chips' }, sizeChipNodes)
+            el('div', { className: 'size-chips', role: 'group', 'aria-label': 'Choose a size' }, sizeChipNodes),
+            productBagActions
           )
-        : null;
+        : el('section', { className: 'product-panel-block' }, productBagActions);
 
     // Styling rationale box, hidden when empty
-    const whyText = typeof payload.why === 'string' ? payload.why.trim() : '';
     const whySection = whyText
       ? el(
           'section',
@@ -4704,7 +5375,25 @@ export function mountStore(root, { onTalk } = {}) {
                   const thumbUrl = sized(line.image, 160);
                   const sizeText =
                     typeof line.size === 'string' && line.size.trim() ? line.size.trim() : '';
-                  return el(
+                  const lineTitle = typeof line.title === 'string' && line.title.trim() ? line.title.trim() : '';
+                  const lineNoteEl = el('p', {
+                    className: 'bag-fallback-note bag-line-note',
+                    role: 'status',
+                    'aria-live': 'polite',
+                    hidden: true,
+                  });
+                  let rowEl;
+                  const removeBtn = el(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'bag-line-remove',
+                      'aria-label': lineTitle ? `Remove ${lineTitle} from bag` : 'Remove item from bag',
+                      onClick: () => removeBagLine(line, storeName, rowEl, removeBtn, lineNoteEl),
+                    },
+                    'Remove'
+                  );
+                  rowEl = el(
                     'li',
                     { className: 'bag-line' },
                     el(
@@ -4724,10 +5413,13 @@ export function mountStore(root, { onTalk } = {}) {
                       'div',
                       { className: 'bag-line-info' },
                       el('span', { className: 'bag-line-title' }, line.title || ''),
-                      sizeText ? el('span', { className: 'bag-line-size' }, `Size ${sizeText}`) : null
+                      sizeText ? el('span', { className: 'bag-line-size' }, `Size ${sizeText}`) : null,
+                      removeBtn,
+                      lineNoteEl
                     ),
                     el('span', { className: 'bag-line-price' }, formatPrice(line.price))
                   );
+                  return rowEl;
                 })
               )
             : null;
@@ -5351,6 +6043,45 @@ export function mountStore(root, { onTalk } = {}) {
     return { ok: true };
   }
 
+  function applyBagReady(payload, { fromAlice = false } = {}) {
+    if (!payload || !Array.isArray(payload.stores)) {
+      return { ok: false, error: 'bagReady requires a stores array' };
+    }
+
+    clearLiveRemoveTimers();
+
+    if (fromAlice) {
+      if (bagAbortController) {
+        bagAbortController.abort();
+        bagAbortController = null;
+      }
+      directBagReqId += 1;
+      directBagBusy = false;
+      state.directBag = null;
+    }
+
+    const stores = payload.stores.filter((s) => s && typeof s === 'object');
+    const links = Array.isArray(payload.links) ? payload.links : [];
+    const total =
+      typeof payload.total === 'number' && Number.isFinite(payload.total) ? payload.total : null;
+
+    state.orderReview = null;
+    state.orderConfirmedId = null;
+    state.orderResult = null;
+    state.drawerMode = 'bag';
+    state.bagOpenedStores = new Set();
+    state.bagData = { stores, links, total };
+    state.bagCount = stores.reduce(
+      (sum, s) => sum + (Array.isArray(s.added) ? s.added.length : 0),
+      0
+    );
+    updateBagBadge();
+    if (fromAlice || isCallLive()) setHasProducts();
+    renderBagDrawer(state.bagData);
+    openBagDrawer();
+    return { ok: true };
+  }
+
   // Wrap every page-action handler so it stays synchronous and never throws
   function safeHandler(fn) {
     return (payload) => {
@@ -5787,32 +6518,7 @@ export function mountStore(root, { onTalk } = {}) {
     // Panel handlers: bag drawer, search results, product detail sheet
     // -----------------------------------------------------------------------
 
-    bagReady: safeHandler((payload) => {
-      if (!payload || !Array.isArray(payload.stores)) {
-        return { ok: false, error: 'bagReady requires a stores array' };
-      }
-
-      const stores = payload.stores.filter((s) => s && typeof s === 'object');
-      const links = Array.isArray(payload.links) ? payload.links : [];
-      const total =
-        typeof payload.total === 'number' && Number.isFinite(payload.total) ? payload.total : null;
-
-      state.orderReview = null;
-      state.orderConfirmedId = null;
-      state.orderResult = null;
-      state.drawerMode = 'bag';
-      state.bagOpenedStores = new Set();
-      state.bagData = { stores, links, total };
-      state.bagCount = stores.reduce(
-        (sum, s) => sum + (Array.isArray(s.added) ? s.added.length : 0),
-        0
-      );
-      updateBagBadge();
-      setHasProducts();
-      renderBagDrawer(state.bagData);
-      openBagDrawer();
-      return { ok: true };
-    }),
+    bagReady: safeHandler((payload) => applyBagReady(payload, { fromAlice: true })),
 
     showOrderReview: safeHandler((payload) => {
       const raw =

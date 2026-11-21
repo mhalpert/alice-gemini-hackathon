@@ -7,6 +7,8 @@ import { mountCall } from './call.js';
 let call;
 const store = mountStore(document.getElementById('store'), {
   onTalk: () => call?.start(),
+  isLive: () => Boolean(call?.isLive()),
+  tellAlice: (text) => call?.sendText(text),
 });
 call = mountCall(document.getElementById('call'), { handlers: store.handlers });
 
