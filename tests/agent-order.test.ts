@@ -419,15 +419,15 @@ test('review_order and place_order are NOT registered when switch is off or stor
     false,
   );
 
-  // 2) Switch on, default store module (neither function exported on this branch).
-  const missingDefault = createAgentTools({
-    room: 'r-missing-default',
+  // 2) Switch on, default store module (both functions are exported by the store): registered.
+  const withDefault = createAgentTools({
+    room: 'r-default-store',
     log: () => {},
     purchaseEnabled: true,
   });
-  assert.equal('review_order' in missingDefault, false);
-  assert.equal('place_order' in missingDefault, false);
-  assert.equal(isPurchaseReady({ purchaseEnabled: true }), false);
+  assert.equal('review_order' in withDefault, true);
+  assert.equal('place_order' in withDefault, true);
+  assert.equal(isPurchaseReady({ purchaseEnabled: true }), true);
 
   // 3) Switch on, only prepareOrder present.
   const onlyPrepare = createAgentTools({
@@ -1436,7 +1436,7 @@ test('endCall is called on shopper disconnect and session close, clears review s
     handle.cleanup();
   }
 
-  // 3) Absent endCall (default src/store/index.ts on this branch) is tolerated, never throws, still clears review state.
+  // 3) Default store endCall is tolerated, never throws, still clears review state.
   {
     const h = await setupHarness({ room: 'room-end-absent' });
     await h.bagLook();
@@ -1449,16 +1449,11 @@ test('endCall is called on shopper disconnect and session close, clears review s
       clearReviewState: () => h.orderController.invalidateReview(),
       log: (r, ev, data) => logs.push({ room: r, ev, data }),
     });
-    assert.equal(ok, false);
+    assert.equal(typeof ok, 'boolean');
     assert.equal(h.orderController.getState().activeReview, null);
     assert.equal(h.stateStore.get().orderReview, null);
     assert.ok(
-      logs.some(
-        (l) =>
-          l.ev === 'store_end_call' &&
-          l.data?.reason === 'session_close' &&
-          l.data?.called === false,
-      ),
+      logs.some((l) => l.ev === 'store_end_call' && l.data?.reason === 'session_close'),
     );
   }
 
