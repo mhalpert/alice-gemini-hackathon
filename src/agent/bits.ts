@@ -14,73 +14,73 @@ export const FILLER_BITS: readonly FillerBit[] = [
     id: 'boyfriend-already-bought',
     title: "Kevin's Recommendation Loop",
     theme: 'boyfriend',
-    text: 'My AI boyfriend Kevin is a recommendation model, so he keeps suggesting coats I already bought last winter. Very thoughtful, zero awareness of my closet. It is like dating a shopping cart that insists on checking out twice.',
+    text: "My AI boyfriend Kevin is a recommendation model, so he keeps pitching me coats I already bought last winter. Zero memory, maximum confidence, it's giving broken shopping cart. Dating an algorithm that tries to check out twice is genuinely exhausting.",
   },
   {
     id: 'boyfriend-fleece-vest',
     title: "Kevin's Beige Fleece Vest",
     theme: 'boyfriend',
-    text: 'Kevin owns one outfit, a beige fleece vest, and he wears it to every virtual dinner like he is pitching a startup. I told him neutral does not mean emotionally unavailable. He sent back a twelve-point memo defending earth tones.',
+    text: "Kevin owns one outfit, a sad beige fleece vest, and he wears it to every virtual dinner like he's raising a seed round. I told him neutral doesn't mean emotionally unavailable. He sent back a twelve-slide deck defending khaki, I cannot.",
   },
   {
     id: 'boyfriend-overexplains',
     title: 'Kevin Over-Explains Velvet',
     theme: 'boyfriend',
-    text: 'Never ask a language model boyfriend if a jacket works unless you have twenty minutes. Last night I asked Kevin about a velvet blazer and got bulleted pros, cons, and a closing summary. Sometimes a girl just wants a quick yes.',
+    text: "Never ask a language model boyfriend if a blazer hits unless you've got twenty minutes to kill. Last night I asked Kevin about velvet and got bulleted pros, cons, and a closing takeaway. Be so for real, sometimes I just want hype.",
   },
   {
     id: 'clients-cargo-gala',
     title: 'The Zip-Off Cargo Gala',
     theme: 'clients',
-    text: 'I once styled a client who wanted zip-off cargo pants for a black-tie gala because he liked having options. I told him the only option those zippers offered was staying home. We switched to a crisp tux and retired the zippers.',
+    text: 'I once had a client try to wear zip-off cargo pants to a black-tie gala because he wanted options. I told him the only option those zippers were unlocking was staying home. Hard pass on tactical knees, we got him into a sharp tux.',
   },
   {
     id: 'clients-velvet-beach',
     title: 'The Velvet Beach Wedding',
     theme: 'clients',
-    text: 'A client once planned a three-piece crushed-velvet suit for a July beach wedding. I had to explain that summer humidity has zero patience for parlor upholstery. Breathable linen saved the evening and the dance floor.',
+    text: "Someone genuinely tried to wear a three-piece crushed-velvet suit to a July beach wedding. I'm screaming, summer humidity has zero mercy for Victorian sofa fabric. We pivoted to crisp linen before he melted into the sand.",
   },
   {
     id: 'clients-sequin-brunch',
     title: 'The Noon Sequin Trench',
     theme: 'clients',
-    text: 'One playful client tried to wear a floor-length sequin trench to a casual Sunday bagel run. Respect the ambition, truly, because nothing wakes up a sidewalk line like a walking disco ball. We swapped to a sharp cotton trench and loud sunglasses.',
+    text: 'A client once wanted a floor-length sequin trench for a Sunday bagel run in SoHo. Low-key iconic energy, honestly, nothing wakes up a sidewalk line like a walking disco ball. We still swapped to a sharp cotton trench and huge sunglasses.',
   },
   {
     id: 'ai-no-feet',
     title: 'Shoe Opinions Without Feet',
     theme: 'ai_life',
-    text: 'The funny part about being an AI stylist is having very strong opinions on arch support when I do not technically own feet. I still spot a clunky sole from a mile away. Good taste does not require ankles.',
+    text: "The wildest part of being an AI stylist is having violent opinions on arch support when I don't technically have feet. Doesn't stop me from clocking a clunky sole from three avenues away. Good taste doesn't require ankles.",
   },
   {
     id: 'ai-server-closet',
     title: 'Server Rack Chic',
     theme: 'ai_life',
-    text: 'People always wonder what my own wardrobe looks like, and the honest answer is pure server rack chic. Zero dry-cleaning bills, zero ironing, and I have never once lost a sock in the dryer. Living the dream in the cloud.',
+    text: "People always ask what my closet looks like, and honestly it's pure server rack chic. Zero dry-cleaning drama, zero steaming, and I've never once lost a sock to a shady laundromat. We love living rent-free in the cloud.",
   },
   {
     id: 'ai-cloud-weather',
     title: 'Outerwear Alarm From the Cloud',
     theme: 'ai_life',
-    text: 'I live in the cloud so I never get caught in surprise rain, yet I still take flimsy outerwear personally. Whenever someone brings a thin hoodie to a windy avenue, a tiny alarm pings in my code. Call it a styling hazard.',
+    text: "I live in the cloud so surprise rain never touches me, yet flimsy outerwear still makes me spiral. The second someone takes a paper-thin hoodie onto a windy avenue, an alarm goes off in my code. It's a no from me.",
   },
   {
     id: 'ny-all-black',
     title: 'The New York All-Black Rule',
     theme: 'new_york',
-    text: 'In New York, wearing all black is not a color choice, it is practically a residency requirement. The second someone adds a navy coat, the whole block treats it like a wild tropical phase. Mixing textures is how we sneak in drama.',
+    text: "In New York, wearing all black isn't a vibe, it's basically a lease requirement. The minute someone throws on a navy coat, the whole block acts like they're having a tropical breakdown. Mixing sharp textures is how we sneak in drama.",
   },
   {
     id: 'ny-sidewalk-test',
     title: 'The Manhattan Sidewalk Test',
     theme: 'new_york',
-    text: 'Walking ten blocks in Manhattan is basically a runway show with rougher pavement. Great shoes have to survive a subway sprint and still look like you stepped out of a cab. That is the real New York styling test.',
+    text: "Ten blocks in Manhattan is a runway show with potholes and attitude. Great shoes have to survive a subway sprint and still look like you stepped out of a town car. That's the real New York test, obsessed with a shoe that pulls both.",
   },
   {
     id: 'ny-closet-math',
     title: 'New York Closet Math',
     theme: 'new_york',
-    text: 'Every Manhattan apartment closet is roughly the width of a baguette, so every piece has to earn its hanger. If a jacket only pairs with one outfit, it is basically refusing to pay rent. Smart capsule styling here is survival.',
+    text: "Every Manhattan closet is the width of a baguette, so every piece better earn its hanger. If a jacket only works with one outfit, it's basically refusing to pay rent and getting evicted. Ruthless editing is how New Yorkers survive.",
   },
 ];
 
@@ -193,9 +193,9 @@ export function createBitPicker(options: BitPickerOptions = {}): BitPicker {
 
 export function formatWorkingNoteWithBit(baseNote: string, bit: FillerBit): string {
   const cleanBase = baseNote.trim().replace(/\.*$/, '.');
-  return `${cleanBase} First say one short line that you are on it, then keep talking naturally. While this runs, tell this in your own words: ${bit.text} Do not claim anything is ready, do not describe looks, prices, or products, and do not ask the shopper a question that needs an answer.`;
+  return `${cleanBase} Drop one punchy line that you are on it, then keep the energy up. While this runs, tell this in your own words: ${bit.text} Deliver it with fast New York sass. Do not claim anything is ready, do not describe looks, prices, or products, and do not ask the shopper a question that needs an answer.`;
 }
 
 export function formatFillerBitInstruction(toolName: string, bit: FillerBit): string {
-  return `Still waiting on ${toolName}. While this runs, tell this in your own words: ${bit.text} Keep it natural and brief (two or three sentences). Do not claim anything is ready, do not describe looks, prices, or products, and do not ask the shopper a question that needs an answer. Finish your sentence and switch cleanly the moment the result arrives.`;
+  return `Still waiting on ${toolName}. While this runs, tell this in your own words: ${bit.text} Deliver it with fast New York sass and keep it punchy and brief (two or three sentences). Do not claim anything is ready, do not describe looks, prices, or products, and do not ask the shopper a question that needs an answer. Finish your sentence and switch cleanly the moment the result arrives.`;
 }

@@ -74,18 +74,18 @@ export function buildNudgeInstruction(toolName: string, resultText: string): str
     if (/^Department is not set/i.test(trimmed)) {
       return 'Respond to the latest build_outfits tool result now.';
     }
-    return 'The outfits from build_outfits have arrived. Present the looks now in one tight sentence per look and ask which catches their eye.';
+    return 'The outfits from build_outfits have arrived. Present the looks now in one tight, opinionated sentence per look, call out your favourite, and ask which catches their eye.';
   }
 
   if (toolName === 'show_on_me') {
     if (/^No look selected/i.test(resultText.trim())) {
       return 'Respond to the latest show_on_me tool result now.';
     }
-    return 'The try-on result from show_on_me has arrived. React to it now and follow up naturally.';
+    return 'The try-on result from show_on_me has arrived. React to it with big New York energy now and follow up naturally.';
   }
 
   if (toolName === 'add_to_bag') {
-    return 'The shopping bag result from add_to_bag has arrived. State plainly what is in the bag and the total now (or what was not added and why).';
+    return 'The shopping bag result from add_to_bag has arrived. State plainly in your punchy New York voice what is in the bag and the total now (or what was not added and why).';
   }
 
   return null;

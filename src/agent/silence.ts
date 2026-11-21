@@ -7,16 +7,16 @@ export const MAX_SILENCE_CHECKINS = 2;
 
 export type SilenceLogFn = (room: string, ev: string, data?: Record<string, unknown>) => void;
 
-const FIRST_CHECKIN_INSTRUCTIONS: readonly string[] = [
-  'The shopper has been quiet for several seconds. Check in once with one short, warm line—say you did not quite catch that and ask them to say it again a little louder. Keep it natural and brief.',
-  'The shopper has been quiet for several seconds. Check in once with one short, light line—mention it sounds loud in there and they can speak up or type in the chat if that is easier. Keep it brief.',
-  'The shopper has been quiet for several seconds. Check in once with one short, friendly line—ask if they are still with you and let them know they can repeat themselves or drop it in chat.',
+export const FIRST_CHECKIN_INSTRUCTIONS: readonly string[] = [
+  'The shopper went quiet for a few seconds. Check in once with one short, punchy New York line—joke that you did not catch that and tell them to hit you with it a little louder. Keep it quick and playful.',
+  'The shopper went quiet for a few seconds. Check in once with one short, sassy line—say it sounds wild in there and they can speak up or drop it in the chat. Keep it tight.',
+  'The shopper went quiet for a few seconds. Check in once with one short, high-energy line—ask if you lost them and tell them to say it again or toss it in the chat.',
 ];
 
-const SECOND_CHECKIN_INSTRUCTIONS: readonly string[] = [
-  'Still no reply from the shopper. Try one last short, easygoing line in different words—mention it might be loud where they are and remind them they can also type in the chat whenever they are ready. Keep it brief and zero pressure.',
-  'Still no reply from the shopper. Try one last short, warm line in different words—let them know you are right here whenever they want to jump back in, by voice or by typing.',
-  'Still no reply from the shopper. Try one last short, light line in different words—say no rush at all and invite them to speak up a bit or type when ready.',
+export const SECOND_CHECKIN_INSTRUCTIONS: readonly string[] = [
+  'Still no reply from the shopper. Give one last short, playful line in different words—say it must be loud on their end and remind them they can type in the chat whenever they are ready. Zero pressure, keep it quick.',
+  'Still no reply from the shopper. Give one last short, breezy line in different words—tell them you are hanging right here whenever they want to jump back in, voice or chat.',
+  'Still no reply from the shopper. Give one last short, witty line in different words—say take your time and holler or drop it in chat when ready.',
 ];
 
 const GOODBYE_RE =

@@ -1,7 +1,34 @@
+import fs from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import {
+  FILLER_BITS,
+  formatFillerBitInstruction,
+  formatWorkingNoteWithBit,
+} from '../src/agent/bits.ts';
+import { buildNudgeInstruction } from '../src/agent/nudge.ts';
 import { ALICE_SYSTEM_PROMPT, GREETING_INSTRUCTIONS } from '../src/agent/prompt.ts';
-import { createAgentTools } from '../src/agent/tools.ts';
+import {
+  FIRST_CHECKIN_INSTRUCTIONS,
+  SECOND_CHECKIN_INSTRUCTIONS,
+} from '../src/agent/silence.ts';
+import {
+  SLOW_TOOL_NOTES,
+  TOOL_ERROR_FALLBACK,
+  createAgentTools,
+} from '../src/agent/tools.ts';
+
+const BANNED_CORPORATE_PHRASES: readonly string[] = [
+  'certainly',
+  "I'd be happy to",
+  'great choice',
+  'absolutely',
+  'perfect',
+  'no problem',
+  'let me know if',
+  'I apologize',
+  'is there anything else',
+];
 
 const REQUIRED_TOOLS = [
   'set_department',
@@ -160,4 +187,90 @@ test('ALICE_SYSTEM_PROMPT encodes polish4 rules: single build, immediate bag con
 
   // 5. Budget and bag $10,000 cap.
   assert.match(ALICE_SYSTEM_PROMPT, /cap budgets and bags over \$10,000/i);
+});
+
+test('ALICE_SYSTEM_PROMPT encodes polish6 voice: NY stylist attitude, slang limits, delivery, opinions, budgets, and body/appearance boundary', () => {
+  // 1. NY stylist persona, sass, and vocal delivery.
+  assert.match(ALICE_SYSTEM_PROMPT, /sass, not sweetness/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /millennial New Yorker/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /at most one slang phrase per reply/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never twice in a row/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /expressive, animated, fast New York delivery/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /real laughs/i);
+
+  // 2. Body/appearance limit still clearly stated (roast clothes, never people).
+  assert.match(ALICE_SYSTEM_PROMPT, /roast clothes, never people/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /\bbody\b/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /\bweight\b/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /\bface\b/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /\bage\b/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /\bskin\b/i);
+
+  // 3. First-look critique with score out of ten, roast with teeth, win, upgrade.
+  assert.match(ALICE_SYSTEM_PROMPT, /score out of ten/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /roast with teeth/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /one honest win/i);
+
+  // 4. Opinions on looks and budget attitude.
+  assert.match(ALICE_SYSTEM_PROMPT, /favourite/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /push back once/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /budget compromises?/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /small budgets/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /eyebrow/i);
+});
+
+test('banned corporate phrases never appear in prompt, greeting, filler bits, silence check-ins, nudges, or tool result texts', () => {
+  const toolSource = fs.readFileSync(new URL('../src/agent/tools.ts', import.meta.url), 'utf8');
+  const sampleBit = FILLER_BITS[0]!;
+
+  const surfaces: Array<{ label: string; text: string }> = [
+    { label: 'ALICE_SYSTEM_PROMPT', text: ALICE_SYSTEM_PROMPT },
+    { label: 'GREETING_INSTRUCTIONS', text: GREETING_INSTRUCTIONS },
+    ...FILLER_BITS.map((bit) => ({ label: `FILLER_BITS[${bit.id}]`, text: `${bit.title} ${bit.text}` })),
+    {
+      label: 'formatWorkingNoteWithBit',
+      text: formatWorkingNoteWithBit(SLOW_TOOL_NOTES.build_outfits!, sampleBit),
+    },
+    {
+      label: 'formatFillerBitInstruction',
+      text: formatFillerBitInstruction('build_outfits', sampleBit),
+    },
+    ...FIRST_CHECKIN_INSTRUCTIONS.map((text, idx) => ({
+      label: `FIRST_CHECKIN_INSTRUCTIONS[${idx}]`,
+      text,
+    })),
+    ...SECOND_CHECKIN_INSTRUCTIONS.map((text, idx) => ({
+      label: `SECOND_CHECKIN_INSTRUCTIONS[${idx}]`,
+      text,
+    })),
+    {
+      label: 'nudge:build_outfits',
+      text: buildNudgeInstruction('build_outfits', 'Built 3 looks and they are now on screen.') ?? '',
+    },
+    {
+      label: 'nudge:show_on_me',
+      text: buildNudgeInstruction('show_on_me', 'Try-on for Look 1 is now revealed on screen.') ?? '',
+    },
+    {
+      label: 'nudge:add_to_bag',
+      text: buildNudgeInstruction('add_to_bag', 'Added 3 pieces, total $160.') ?? '',
+    },
+    ...Object.entries(SLOW_TOOL_NOTES).map(([k, text]) => ({
+      label: `SLOW_TOOL_NOTES[${k}]`,
+      text,
+    })),
+    { label: 'TOOL_ERROR_FALLBACK', text: TOOL_ERROR_FALLBACK },
+    { label: 'src/agent/tools.ts', text: toolSource },
+  ];
+
+  for (const { label, text } of surfaces) {
+    for (const phrase of BANNED_CORPORATE_PHRASES) {
+      const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      assert.doesNotMatch(
+        text,
+        new RegExp(`\\b${escaped}\\b`, 'i'),
+        `banned corporate phrase "${phrase}" must not appear in ${label}`,
+      );
+    }
+  }
 });

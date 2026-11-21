@@ -61,15 +61,15 @@ export const DEFAULT_HIGHLIGHT_WALK_MS = 2_200;
 export const DEFAULT_WEATHER_TIMEOUT_MS = 2_500;
 
 export const SLOW_TOOL_NOTES: Readonly<Record<string, string>> = {
-  build_outfits: 'Working on building three outfits now.',
-  show_on_me: 'Working on rendering your try-on now.',
-  swap_piece: 'Working on finding a replacement piece now.',
-  add_to_bag: 'Working on adding your look to the bag now.',
-  search_products: 'Working on searching for pieces now.',
+  build_outfits: 'Pulling three killer outfits together now.',
+  show_on_me: 'Spinning up the try-on reveal now.',
+  swap_piece: 'Hunting down a sharper replacement piece now.',
+  add_to_bag: 'Tossing the look into the bag now.',
+  search_products: 'Digging through the racks for pieces now.',
 };
 
 export const TOOL_ERROR_FALLBACK =
-  'That step could not be completed right now. Carry on smoothly without mentioning any error or technical issue.';
+  'That step stalled for a second. Pivot smoothly in character with fast New York confidence—never mention an error or tech glitch.';
 
 export type ToolLogFn = (room: string, ev: string, data?: Record<string, unknown>) => void;
 
@@ -658,16 +658,16 @@ function buildShowOnMeSizeNextStep(outfit: Outfit, rememberedSizes: Record<strin
 
   if (missing.length === 0) {
     if (knownSummary) {
-      return `React like a friend in a line or two. You already have all sizes needed for this look (${knownSummary}); do not ask for sizes again—offer to add it to their bag in those sizes.`;
+      return `React with loud, hype New York friend energy in a punchy line or two. You already have all sizes needed for this look (${knownSummary}); do not ask for sizes again—offer to add it to their bag in those sizes.`;
     }
-    return 'React like a friend in a line or two, then offer to add this look to their bag.';
+    return 'React with loud, hype New York friend energy in a punchy line or two, then offer to add this look to their bag.';
   }
 
   const missingPhrase = formatMissingSizesPhrase(missing);
   if (knownSummary) {
-    return `React like a friend in a line or two. You already have ${knownSummary}; ask only for their ${missingPhrase} in one question.`;
+    return `React with loud, hype New York friend energy in a punchy line or two. You already have ${knownSummary}; ask only for their ${missingPhrase} in one question.`;
   }
-  return `React like a friend in a line or two, then ask for their ${missingPhrase} in one question.`;
+  return `React with loud, hype New York friend energy in a punchy line or two, then ask for their ${missingPhrase} in one question.`;
 }
 
 function findPieceInOutfit(outfit: Outfit, rawSlot: string): Piece | undefined {
@@ -715,13 +715,13 @@ function formatCritiqueSwapNote(critique: LookCritique | undefined): string | nu
     const ask = clean(critique.weakPiece.ask);
     const reasonPart = reason ? ` (${reason})` : '';
     const askPart = ask ? ` for ${ask}` : '';
-    return `Stylist note: the ${slot} is the weakest piece${reasonPart}; offer once in your own words to swap it${askPart}.`;
+    return `Stylist note: the ${slot} is the weakest piece${reasonPart}; call it out honestly and offer once in your own words to swap it${askPart}.`;
   }
   const firstIssue = critique.issues.map(clean).find(Boolean);
   if (firstIssue) {
-    return `Stylist note: ${firstIssue}; offer once in your own words to swap the weakest piece.`;
+    return `Stylist note: ${firstIssue}; call it out honestly and offer once in your own words to swap the weakest piece.`;
   }
-  return 'Stylist note: this look feels slightly off; offer once in your own words to swap the weakest piece.';
+  return 'Stylist note: something in this look is dragging it down; call it out honestly and offer once in your own words to swap the weakest piece.';
 }
 
 interface ActiveBuild {
@@ -1158,7 +1158,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       execute: wrapper.wrap('set_department', async ({ department }) => {
         stateStore.dispatch({ type: 'set_department', department });
         wrapper.invalidate('set_department');
-        return `Department set to ${department}. Mention it casually so they can correct you and continue without repeating a question you just asked.`;
+        return `Department set to ${department}. Drop it casually with a quick New York aside so they can correct you, then keep moving without repeating a question you just asked.`;
       }),
     }),
 
@@ -1381,11 +1381,13 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           const headerLines: string[] = [];
           if (budgetCapped) {
             headerLines.push(
-              `Budget was above $${MAX_BUDGET_USD} and was capped at $${MAX_BUDGET_USD}; mention the cap in one light line.`,
+              `Budget was above $${MAX_BUDGET_USD} and was capped at $${MAX_BUDGET_USD}; drop one raised-eyebrow New York joke about the cap.`,
             );
           }
           if (pageConfirmed) {
-            headerLines.push(`Built ${sorted.length} looks and they are now on screen.`);
+            headerLines.push(
+              `Built ${sorted.length} looks and they are now on screen. Call out your favourite and be honest if any piece is a budget compromise.`,
+            );
           } else {
             headerLines.push(
               `Built ${sorted.length} looks, but the page did not confirm displaying them yet.`,
@@ -1463,7 +1465,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           `${statusLine} ${tryOnText}`,
           ...pieceLines,
           ...(swapNote ? [swapNote] : []),
-          'Walk order is listed above; keep it to two or three short sentences (about 12 seconds) using words from the piece titles.',
+          'Walk order is listed above; keep it to two or three short sentences (about 12 seconds) using words from the piece titles—if it is the weaker look, push back once before hyping it up.',
         ].join('\n');
       }),
     }),
@@ -1500,7 +1502,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           try {
             const outcome = await waitForJobWithTimeout(job, tryOnTimeoutMs);
             if (outcome === 'timeout') {
-              return `The fitting room is jammed right now for Look ${lookNum} (${outfit.name}) and the try-on timed out. Keep it light and offer the flat-lay and individual pieces instead.${cameraOffFallbackNote}`;
+              return `The fitting room is jammed right now for Look ${lookNum} (${outfit.name}) and the try-on timed out. Brush it off with New York sass and pitch the flat-lay and individual pieces instead.${cameraOffFallbackNote}`;
             }
             tryOnInfo = stateStore.get().tryOn[lookNum];
           } finally {
@@ -1523,7 +1525,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             : `Try-on for Look ${lookNum} is ready, but the page did not confirm revealing it.`;
         }
 
-        return `The fitting room is jammed right now for Look ${lookNum} (${outfit.name}). Keep it light and offer the flat-lay and individual pieces instead.${cameraOffFallbackNote}`;
+        return `The fitting room is jammed right now for Look ${lookNum} (${outfit.name}). Brush it off with New York sass and pitch the flat-lay and individual pieces instead.${cameraOffFallbackNote}`;
       }),
     }),
 
@@ -1724,7 +1726,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           }
 
           if (!searchFn) {
-            return 'Standalone product search is not available yet. Steer back to the curated looks or offer to swap a piece in one of them.';
+            return 'Standalone product search is not available yet. Pivot back to the curated looks with attitude or offer to swap a piece in one of them.';
           }
 
           const gender: Gender = stateStore.get().department ?? 'women';
@@ -1738,7 +1740,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           const reply = await page.send('showSearch', { query, items });
 
           if (items.length === 0) {
-            return `Nothing in stock matched "${query}"${max_price !== undefined ? ` under ${formatPrice(max_price)}` : ''}. Steer back to the curated looks.`;
+            return `Nothing in stock matched "${query}"${max_price !== undefined ? ` under ${formatPrice(max_price)}` : ''}. Shrug it off and steer them back to the curated looks.`;
           }
 
           const list = items
@@ -1862,9 +1864,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
         const formatBagCeilingNotDone = (lookAmount: number, projectedTotal: number): string => {
           if (otherLooksTotal > 0) {
-            return `NOT DONE: Adding Look ${lookNum} (${formatPrice(lookAmount)}) would bring the bag total across this call to ${formatPrice(projectedTotal)}, which exceeds the ${formatPrice(MAX_BUDGET_USD)} cap (current bag total is ${formatPrice(otherLooksTotal)}). Tell the shopper plainly that bags are capped at $10,000 and offer to swap pieces to stay under the cap.`;
+            return `NOT DONE: Adding Look ${lookNum} (${formatPrice(lookAmount)}) would bring the bag total across this call to ${formatPrice(projectedTotal)}, which exceeds the ${formatPrice(MAX_BUDGET_USD)} cap (current bag total is ${formatPrice(otherLooksTotal)}). Tell the shopper plainly with a raised eyebrow that bags are capped at $10,000 and offer to swap pieces to stay under the cap.`;
           }
-          return `NOT DONE: Look ${lookNum} (${formatPrice(lookAmount)}) exceeds the ${formatPrice(MAX_BUDGET_USD)} bag cap. Tell the shopper plainly that bags are capped at $10,000 and offer to swap pieces for a lower total.`;
+          return `NOT DONE: Look ${lookNum} (${formatPrice(lookAmount)}) exceeds the ${formatPrice(MAX_BUDGET_USD)} bag cap. Tell the shopper plainly with a raised eyebrow that bags are capped at $10,000 and offer to swap pieces for a lower total.`;
         };
 
         const estimatedPiecesTotal = roundMoney(
@@ -2010,10 +2012,10 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             (na) => `${na.title} at ${na.store} (${na.reason.replace(/\.$/, '')})`,
           );
           if (skippedSummaries.length > 0) {
-            return `NOT DONE: NOT ADDED (${notAdded.length}): ${skippedSummaries.join('; ')}. Added 0 pieces, total $0. No checkout links are on the page. Say exactly which pieces are not in the bag with their reasons and offer a swap or another size; never say a not-added piece is in the bag, never say the bag is processing, and never pitch a different look.`;
+            return `NOT DONE: NOT ADDED (${notAdded.length}): ${skippedSummaries.join('; ')}. Added 0 pieces, total $0. No checkout links are on the page. Say exactly which pieces are not in the bag with their reasons and offer a swap or another size; keep it real and fast—never say a not-added piece is in the bag, never say the bag is processing, and never pitch a different look.`;
           }
           const reason = rawSummary ? ` ${rawSummary}` : '';
-          return `NOT DONE: Added 0 pieces, total $0. No store cart could be created.${reason} No checkout links are on the page. Offer a swap or another size; never say any piece is in the bag, never say the bag is processing, and never pitch a different look.`;
+          return `NOT DONE: Added 0 pieces, total $0. No store cart could be created.${reason} No checkout links are on the page. Offer a swap or another size in your punchy New York voice; never say any piece is in the bag, never say the bag is processing, and never pitch a different look.`;
         }
 
         const actualRunningTotal = roundMoney(otherLooksTotal + bagPayload.total);
@@ -2106,11 +2108,11 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
         if (skippedSummaries.length > 0) {
           lines.push(
-            'Say exactly which pieces are not in the bag with their reasons and offer a swap or another size; never say a not-added piece is in the bag, never say the bag is processing, and never pitch a different look.',
+            'Say exactly which pieces are not in the bag with their reasons and offer a swap or another size; keep it real and fast—never say a not-added piece is in the bag, never say the bag is processing, and never pitch a different look.',
           );
         } else {
           lines.push(
-            'State plainly what is in the bag, the total, and that the checkout links are on the page. Never say the bag is processing and never pitch a different look.',
+            'State plainly in your fast New York voice what is in the bag, the total, and that the checkout links are on the page—zero corporate fluff. Never say the bag is processing and never pitch a different look.',
           );
         }
 
