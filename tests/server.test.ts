@@ -248,8 +248,8 @@ describe('Alice server', () => {
     const res = await fetch(`${baseUrl}/tryon/look1.jpg`);
     assert.equal(res.status, 200);
     assert.equal(res.headers.get('content-type'), 'image/jpeg');
-    assert.equal(res.headers.get('cache-control'), 'public, max-age=3600');
-    assert.equal(res.headers.get('access-control-allow-origin'), '*');
+    assert.equal(res.headers.get('cache-control'), 'private, max-age=3600');
+    assert.equal(res.headers.get('access-control-allow-origin'), null);
     assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
     const bytes = Buffer.from(await res.arrayBuffer());
     assert.deepEqual(bytes, fakeJpg);
@@ -269,8 +269,8 @@ describe('Alice server', () => {
     assert.equal(full.headers.get('content-type'), 'video/mp4');
     assert.equal(full.headers.get('accept-ranges'), 'bytes');
     assert.equal(full.headers.get('content-length'), '64');
-    assert.equal(full.headers.get('cache-control'), 'public, max-age=3600');
-    assert.equal(full.headers.get('access-control-allow-origin'), '*');
+    assert.equal(full.headers.get('cache-control'), 'private, max-age=3600');
+    assert.equal(full.headers.get('access-control-allow-origin'), null);
     assert.deepEqual(Buffer.from(await full.arrayBuffer()), fakeMp4);
 
     // 2. Closed range bytes=0-9 -> 206 with exactly 10 bytes
@@ -282,6 +282,8 @@ describe('Alice server', () => {
     assert.equal(rClosed.headers.get('accept-ranges'), 'bytes');
     assert.equal(rClosed.headers.get('content-range'), 'bytes 0-9/64');
     assert.equal(rClosed.headers.get('content-length'), '10');
+    assert.equal(rClosed.headers.get('cache-control'), 'private, max-age=3600');
+    assert.equal(rClosed.headers.get('access-control-allow-origin'), null);
     const closedBytes = Buffer.from(await rClosed.arrayBuffer());
     assert.equal(closedBytes.length, 10);
     assert.deepEqual(closedBytes, fakeMp4.subarray(0, 10));
@@ -312,6 +314,8 @@ describe('Alice server', () => {
       assert.equal(res416.status, 416, `expected 416 for Range: ${badRange}`);
       assert.equal(res416.headers.get('content-range'), 'bytes */64');
       assert.equal(res416.headers.get('accept-ranges'), 'bytes');
+      assert.equal(res416.headers.get('cache-control'), 'private, max-age=3600');
+      assert.equal(res416.headers.get('access-control-allow-origin'), null);
     }
 
     // 6. Multiple ranges -> ignore Range header and send 200 with full file
@@ -334,6 +338,8 @@ describe('Alice server', () => {
     assert.equal(rHead.headers.get('accept-ranges'), 'bytes');
     assert.equal(rHead.headers.get('content-range'), 'bytes 0-9/64');
     assert.equal(rHead.headers.get('content-length'), '10');
+    assert.equal(rHead.headers.get('cache-control'), 'private, max-age=3600');
+    assert.equal(rHead.headers.get('access-control-allow-origin'), null);
     assert.equal((await rHead.arrayBuffer()).byteLength, 0);
 
     // 8. Static files from public/ stay unaffected (no 206 on Range)
