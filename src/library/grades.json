@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "graded_at": "2026-11-21T19:18:35.710Z",
+  "graded_at": "2026-11-21T19:45:43.806Z",
   "grades": {
     "rooftop-birthday|men": {
       "graded_at": "2026-11-21T18:36:02.751Z",
@@ -10602,6 +10602,2360 @@
       "avg": 4.67,
       "presentable_count": 0,
       "pass": false
+    },
+    "european-summer-trip|men": {
+      "graded_at": "2026-11-21T19:42:39.034Z",
+      "set_built_at": 16615,
+      "outfits": [
+        {
+          "name": "Aegean Breeze",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "Backless suede clog-mules with heavy black footbeds are impractical for walking during sightseeing and visually heavy for a breezy summer look",
+            "Heavyweight long-sleeve Oxford cotton shirt is less breathable than linen or lightweight weave for hot Mediterranean summer weather",
+            "Pull-on elastic waist trousers do not appear to have belt loops to wear the included belt"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "Backless suede mules are clumsy for a day of walking/sightseeing and the heavy black footbed clashes with the light Mediterranean palette.",
+            "ask": "tan suede loafers or canvas espadrilles"
+          }
+        },
+        {
+          "name": "Sicilian Sun",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "rimless light-blue tinted sunglasses clash with the classic earth-toned Mediterranean palette and look cheap"
+          ],
+          "weak_piece": {
+            "slot": "accessory",
+            "reason": "Rimless icy-blue sunglasses feel out of place with the warm cream, olive, and dark brown Mediterranean palette",
+            "ask": "tortoiseshell or brown frame sunglasses"
+          }
+        },
+        {
+          "name": "Sage Riviera",
+          "score": 2,
+          "presentable": false,
+          "issues": [
+            "bag slot contains a navy overshirt instead of a bag",
+            "missing at least one visible accessory (no bag, sunglasses, watch, or hat present)"
+          ],
+          "weak_piece": {
+            "slot": "bag",
+            "reason": "The bag slot contains a long-sleeve navy overshirt instead of an actual bag, leaving the outfit without any accessories.",
+            "ask": "canvas crossbody bag or tote bag"
+          }
+        }
+      ],
+      "min": 2,
+      "avg": 5,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "volunteering-day|men": {
+      "graded_at": "2026-11-21T19:42:41.794Z",
+      "set_built_at": 20545,
+      "outfits": [
+        {
+          "name": "Olive Utility",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Charcoal & Navy",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "low-top star-patterned canvas fashion sneakers lack the durability and support needed for hands-on volunteering",
+            "navy hoodie and hat paired with black tee and black shoes creates a slightly muddled dark palette"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "Flashy star-patterned canvas sneakers are neither durable nor practical enough for hands-on community volunteering.",
+            "ask": "sturdy work boots or durable athletic sneakers in black or grey"
+          }
+        },
+        {
+          "name": "Classic Workwear",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        }
+      ],
+      "min": 6,
+      "avg": 7.33,
+      "presentable_count": 2,
+      "pass": true
+    },
+    "rooftop-birthday@premium|women": {
+      "graded_at": "2026-11-21T19:42:45.548Z",
+      "set_built_at": 19047,
+      "outfits": [
+        {
+          "name": "Velvet Moto",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "Chartreuse/lime green resin earrings clash with the deep emerald velvet dress in both color tone and texture",
+            "Chunky low-heeled ankle boots feel too heavy and awkward paired with a plunging velvet bodycon cocktail dress"
+          ],
+          "weak_piece": {
+            "slot": "jewelry",
+            "reason": "The casual lime-green resin hoops clash with the deep emerald jewel-toned velvet dress.",
+            "ask": "gold hoop earrings"
+          }
+        },
+        {
+          "name": "Leather Tailored",
+          "score": 4,
+          "presentable": false,
+          "issues": [
+            "Missing at least one visible accessory (e.g., bag, jewelry, sunglasses)",
+            "Tan leather ankle boots clash awkwardly with cuffed black faux leather balloon pants, both in colour and silhouette",
+            "Romantic lace-trimmed top clashes stylistically with baggy faux leather balloon pants"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "The tan ankle boots clash with the black faux leather balloon pants and create a bulky silhouette at the cuffed ankle.",
+            "ask": "black strappy heeled sandals or black pointed-toe pumps"
+          }
+        },
+        {
+          "name": "Charcoal Satin & Wool",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "The casual chunky cotton sweater slightly underplays the evening party vibe of the satin skirt and boots"
+          ],
+          "weak_piece": {
+            "slot": "top",
+            "reason": "The chunky heathered grey cotton sweater feels a bit too casual and daytime-oriented for a birthday party compared to the sleek satin skirt and heeled boots.",
+            "ask": "fitted black or jewel-toned knit top"
+          }
+        }
+      ],
+      "min": 4,
+      "avg": 5.67,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "summer-wedding@premium|men": {
+      "graded_at": "2026-11-21T19:42:50.256Z",
+      "set_built_at": 23025,
+      "outfits": [
+        {
+          "name": "Espresso Linen Suit",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Espresso Linen Suit",
+          "score": 4,
+          "presentable": false,
+          "issues": [
+            "drawstring linen shorts are far too casual for a wedding guest and clash with a tailored wool blazer",
+            "drawstring shorts have no belt loops to accommodate the included suede belt"
+          ],
+          "weak_piece": {
+            "slot": "bottom",
+            "reason": "Drawstring shorts are inappropriate for a wedding guest, mismatch the formality of the blazer, and cannot be worn with the belt.",
+            "ask": "tailored stone linen or cotton dress trousers with belt loops"
+          }
+        },
+        {
+          "name": "Grey & Rose",
+          "score": 4,
+          "presentable": false,
+          "issues": [
+            "Black belt clashes with cognac brown suede shoes (hard rule violation)",
+            "Mismatched grey blazer and heathered grey trousers look like an accidental suit mismatch rather than intentional separates"
+          ],
+          "weak_piece": {
+            "slot": "accessory",
+            "reason": "The black belt clashes with the cognac brown shoes.",
+            "ask": "cognac brown leather or suede dress belt"
+          }
+        }
+      ],
+      "min": 4,
+      "avg": 5.33,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "rooftop-birthday@premium|men": {
+      "graded_at": "2026-11-21T19:42:54.891Z",
+      "set_built_at": 18773,
+      "outfits": [
+        {
+          "name": "Espresso and Black",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "Warm birch/brown resort knit polo clashes with the cool black and slate grey palette of the jacket, chinos, and suede boots",
+            "Sporty tactical G-Shock watch feels slightly mismatched with sleek suede Chelsea boots and a resort polo"
+          ],
+          "weak_piece": {
+            "slot": "top",
+            "reason": "The warm brown and cream tones of the resort polo clash with the cool black and slate grey palette of the rest of the outfit.",
+            "ask": "black or charcoal knit polo shirt"
+          }
+        },
+        {
+          "name": "Taupe and Charcoal",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "casual carpenter loop on the black jeans clashes slightly with the sleek dressy boots and tailored tops",
+            "bulky collared knit sweater can bunch awkwardly under a collared zip jacket"
+          ],
+          "weak_piece": {
+            "slot": "bottom",
+            "reason": "the carpenter utility loop and washed denim feel too casual next to the sleek dress boots and tailored knitwear",
+            "ask": "clean slim black jeans or tailored charcoal trousers"
+          }
+        },
+        {
+          "name": "Olive and Corduroy",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "Western-style stitched ankle boots feel slightly out of place with the utilitarian barn jacket and textured knitwear."
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "The western stitching and pointed silhouette clash slightly with the casual workwear aesthetic of the barn jacket and corduroy pants.",
+            "ask": "brown leather chelsea boots"
+          }
+        }
+      ],
+      "min": 6,
+      "avg": 6.67,
+      "presentable_count": 2,
+      "pass": true
+    },
+    "first-date@premium|men": {
+      "graded_at": "2026-11-21T19:42:56.746Z",
+      "set_built_at": 21445,
+      "outfits": [
+        {
+          "name": "Monochrome Edge",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Sharp Bomber & Wool",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "Bulky, casual relaxed faux leather bomber jacket clashes with the sharp formality of a crisp white dress shirt, pleated wool trousers, and sleek dress boots"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "The boxy streetwear faux leather bomber jacket feels too casual and bulky over a formal dress shirt and tailored wool trousers.",
+            "ask": "tailored black blazer or sleek wool overcoat"
+          }
+        },
+        {
+          "name": "Olive & Espresso",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "Collarless kimono-style unlined blazer clashes in silhouette and collar structure with a heavy double-gauze collared button-down shirt",
+            "Chunky faux-leather work boots clash with lightweight summer linen trousers and the resort-style St. Tropez blazer",
+            "Pale sage-olive blazer does not harmonize well with the warm brown/camel check shirt and dark brown linen trousers"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "The collarless resort-cut sage blazer clashes in both silhouette and color with the collared check double-gauze shirt.",
+            "ask": "structured navy or dark brown casual blazer with lapels"
+          }
+        }
+      ],
+      "min": 5,
+      "avg": 6.33,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "summer-wedding@premium|women": {
+      "graded_at": "2026-11-21T19:42:57.502Z",
+      "set_built_at": 25734,
+      "outfits": [
+        {
+          "name": "Botanical Sage",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "The heavy metallic gold and dark textured clutch clashes with the soft pastel sage cotton dress and casual tan leather slingbacks.",
+            "The shoes and dress read as casual daytime wear while the clutch is evening club/cocktail wear."
+          ],
+          "weak_piece": {
+            "slot": "bag",
+            "reason": "The dark gold textured evening clutch feels too heavy and formal for a breezy pastel cotton daytime dress and tan leather flats.",
+            "ask": "woven straw clutch or tan leather handbag"
+          }
+        },
+        {
+          "name": "Cool Lavender Breeze",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "The hard-case mirror metallic cylinder clutch feels a bit too edgy/nightclub-leaning for a romantic lavender jacquard outdoor summer wedding dress"
+          ],
+          "weak_piece": {
+            "slot": "bag",
+            "reason": "The futuristic mirror-finish cylinder bag clashes slightly with the romantic, soft aesthetic of the lavender jacquard midi dress for an outdoor summer wedding.",
+            "ask": "soft silver or pearl-beaded evening clutch"
+          }
+        },
+        {
+          "name": "Sunset Coral Chiffon",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "The dress features large waist cutouts and a bikini-style top that may read slightly too revealing or resort-casual for some weddings, and the raffia slide mules are on the casual side compared to the formal metal clutch."
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "The casual raffia slide mules feel slightly underdressed for a wedding guest look and clash with the sleek metallic clutch.",
+            "ask": "strappy gold heeled sandals"
+          }
+        }
+      ],
+      "min": 6,
+      "avg": 6.67,
+      "presentable_count": 2,
+      "pass": true
+    },
+    "first-date@premium|women": {
+      "graded_at": "2026-11-21T19:42:57.833Z",
+      "set_built_at": 27366,
+      "outfits": [
+        {
+          "name": "Olive Satin & Leather",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "Belted blazer clashes structurally with the tie-front detail of the halter top underneath"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "The belted waist of the blazer is designed to be worn closed and will bunch awkwardly over a tie-front halter top.",
+            "ask": "black open-front tailored blazer"
+          }
+        },
+        {
+          "name": "Burgundy & Faux Fur",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "Delicate lariat necklace gets lost over the high crew neckline and heavy draping of the jumpsuit"
+          ],
+          "weak_piece": {
+            "slot": "jewelry",
+            "reason": "A delicate plunging lariat necklace works best with a V-neck or open décolletage, not over a high-necked draped mesh top.",
+            "ask": "gold statement earrings"
+          }
+        },
+        {
+          "name": "Velvet Noir",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "boxy daytime wool jacket clashes in style, silhouette, and color with the bodycon black velvet evening dress"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "The casual, boxy heather taupe wool jacket looks disconnected from the fitted black velvet cocktail dress.",
+            "ask": "tailored black coat or sleek leather jacket"
+          }
+        }
+      ],
+      "min": 6,
+      "avg": 6.67,
+      "presentable_count": 2,
+      "pass": true
+    },
+    "interview-creative@premium|men": {
+      "graded_at": "2026-11-21T19:43:04.500Z",
+      "set_built_at": 20967,
+      "outfits": [
+        {
+          "name": "Navy Wool Classic",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Charcoal Minimalist Tailoring",
+          "score": 4,
+          "presentable": false,
+          "issues": [
+            "cropped blazer violates the strict no-cropped-items rule for job interviews"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "a boxy cropped blazer violates the dress-code rule against cropped garments at job interviews",
+            "ask": "full-length charcoal tailored blazer"
+          }
+        },
+        {
+          "name": "Camel & Cocoa",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "stacked flare pants are too casual and messy at the hem for a job interview",
+            "watch looks overly flashy and cheap for an interview setting"
+          ],
+          "weak_piece": {
+            "slot": "bottom",
+            "reason": "Stacked flare silhouette looks sloppy and overly casual for a professional interview, even at a creative agency.",
+            "ask": "tailored dark brown or charcoal straight-leg trousers"
+          }
+        }
+      ],
+      "min": 4,
+      "avg": 6,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "interview-creative@premium|women": {
+      "graded_at": "2026-11-21T19:43:18.322Z",
+      "set_built_at": 22686,
+      "outfits": [
+        {
+          "name": "Sleek Black Monochrome",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "oversized large gold hoop earrings are too flashy and club-like for a job interview"
+          ],
+          "weak_piece": {
+            "slot": "jewelry",
+            "reason": "The oversized chunky hoop earrings read as too flashy and nightlife-oriented for a professional interview setting, even at a creative agency.",
+            "ask": "small minimalist gold hoop earrings"
+          }
+        },
+        {
+          "name": "Structured Neutral Suit",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Sophisticated Midi Dress",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "Knee-length beige mac coat clashes in both color tone and hem length with the cool grey ombre midi sweater dress",
+            "Chunky zip-front platform sneaker-booties are slightly too casual for a job interview"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "The warm beige knee-length mac coat clashes with the cool grey ombre midi dress and creates an awkward hemline proportion.",
+            "ask": "charcoal or black tailored wool midi coat or structured blazer"
+          }
+        }
+      ],
+      "min": 6,
+      "avg": 6.67,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "interview-bank@premium|men": {
+      "graded_at": "2026-11-21T19:43:20.197Z",
+      "set_built_at": 23430,
+      "outfits": [
+        {
+          "name": "Heathered Grey Tailoring",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "shoes photo shows black and beige two-tone horsebit loafers instead of solid black penny loafers, which are too flashy and casual for a conservative bank interview",
+            "casual button-down oxford shirt with chest pocket is slightly under-formal for a traditional banking interview"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "Two-tone black and beige horsebit loafers are too trendy and flashy for a conservative bank interview.",
+            "ask": "solid black leather dress shoes"
+          }
+        },
+        {
+          "name": "Charcoal Executive",
+          "score": 2,
+          "presentable": false,
+          "issues": [
+            "accessory slot contains a casual striped t-shirt instead of an actual accessory",
+            "missing a visible accessory such as a tie or black leather belt required for a bank interview",
+            "mismatched black suit jacket and charcoal trousers instead of a matching suit"
+          ],
+          "weak_piece": {
+            "slot": "accessory",
+            "reason": "The accessory slot is filled by a striped t-shirt instead of a formal accessory, leaving the outfit incomplete for a bank interview.",
+            "ask": "navy silk tie"
+          }
+        },
+        {
+          "name": "Slate and Cognac",
+          "score": 3,
+          "presentable": false,
+          "issues": [
+            "flashy gold charm bracelet set is inappropriate for a conservative bank job interview",
+            "relaxed dark brown cargo-style trousers are too casual and clash with the grey houndstooth blazer",
+            "missing a belt or tie for a formal bank interview setting"
+          ],
+          "weak_piece": {
+            "slot": "accessory",
+            "reason": "The flashy stacked gold bracelet set violates conservative interview dress codes; a tie or matching leather belt is needed instead.",
+            "ask": "cognac brown leather dress belt"
+          }
+        }
+      ],
+      "min": 2,
+      "avg": 3.33,
+      "presentable_count": 0,
+      "pass": false
+    },
+    "brunch@premium|women": {
+      "graded_at": "2026-11-21T19:43:23.162Z",
+      "set_built_at": 20610,
+      "outfits": [
+        {
+          "name": "Cozy Taupe Neutrals",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "Rhinestone-embellished jeans clash stylistically with the classic wool duffle coat and knit polo top"
+          ],
+          "weak_piece": {
+            "slot": "bottom",
+            "reason": "The heavy rhinestone embellishment across the hips clashes with the classic, understated vibe of the wool duffle coat and cream sweater top.",
+            "ask": "classic medium-wash straight-leg jeans without embellishments"
+          }
+        },
+        {
+          "name": "Sleek Monochrome",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Soft Tailored Brunch",
+          "score": 4,
+          "presentable": false,
+          "issues": [
+            "Outfit is missing a top under the outer layer jacket, which cannot comfortably be taken off indoors at brunch",
+            "Seasonal and textural mismatch between the autumnal faux suede bomber/suede lace-up shoes and the perforated plastic summer beach tote",
+            "Too much mismatched olive green between the jacket and trousers without a contrasting top to break it up"
+          ],
+          "weak_piece": {
+            "slot": "bag",
+            "reason": "The perforated plastic summer beach bag clashes heavily with the autumn-weight suede shoes and faux suede bomber jacket, and the outfit also needs a proper top underneath.",
+            "ask": "tan leather or suede crossbody bag"
+          }
+        }
+      ],
+      "min": 4,
+      "avg": 6.33,
+      "presentable_count": 2,
+      "pass": true
+    },
+    "brunch@premium|men": {
+      "graded_at": "2026-11-21T19:43:26.427Z",
+      "set_built_at": 23924,
+      "outfits": [
+        {
+          "name": "Classic Blue Oxford",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "Pleated tropical wool trousers and dark leather dress loafers read a bit too corporate/office-ready for a casual Sunday brunch with friends"
+          ],
+          "weak_piece": {
+            "slot": "bottom",
+            "reason": "Pleated tropical wool trousers feel slightly too business-casual for a relaxed Sunday brunch",
+            "ask": "navy or tan cotton chinos"
+          }
+        },
+        {
+          "name": "Indigo Streetwear Casual",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Textured Brunch Knit",
+          "score": 2,
+          "presentable": false,
+          "issues": [
+            "bag slot contains a brown leather loafer shoe instead of a bag",
+            "missing a visible accessory since the bag slot is occupied by a second pair of shoes"
+          ],
+          "weak_piece": {
+            "slot": "bag",
+            "reason": "The bag slot shows a pair of brown loafers instead of a bag, leaving the outfit with two pairs of shoes and no visible accessory.",
+            "ask": "brown leather crossbody bag or canvas tote bag"
+          }
+        }
+      ],
+      "min": 2,
+      "avg": 5.67,
+      "presentable_count": 2,
+      "pass": true
+    },
+    "festival@premium|men": {
+      "graded_at": "2026-11-21T19:43:29.035Z",
+      "set_built_at": 26286,
+      "outfits": [
+        {
+          "name": "Rugged Desert Denim",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Desert Utility Earth",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "Black faux-leather women's shoulder purse clashes with the brown suede western boots and men's cargo aesthetic",
+            "Bright leaf-green shirt clashes slightly with the muted distressed olive-khaki cargo pants"
+          ],
+          "weak_piece": {
+            "slot": "bag",
+            "reason": "The shiny black faux-leather shoulder purse clashes with the brown suede boots and does not suit a men's desert festival look.",
+            "ask": "brown or canvas men's crossbody bag"
+          }
+        },
+        {
+          "name": "Sunset Rider",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "Shiny dark faux-leather dressy boots are too formal and unbreathable for a desert music festival",
+            "Semi-formal dress belt mismatches the casual relaxed festival vibe and would be hidden under an untucked tee",
+            "Floor-dragging cream pleated trousers are too formal and impractical for dusty desert festival grounds"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "Dark shiny faux-leather boots feel too formal and stifling for a desert festival",
+            "ask": "tan suede desert boots or casual breathable sneakers"
+          }
+        }
+      ],
+      "min": 5,
+      "avg": 6.33,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "interview-bank@premium|women": {
+      "graded_at": "2026-11-21T19:43:33.039Z",
+      "set_built_at": 22501,
+      "outfits": [
+        {
+          "name": "Classic Navy Suit",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "and Black",
+          "score": 4,
+          "presentable": false,
+          "issues": [
+            "relaxed sweater dress and collarless cocoon coat are too casual and unstructured for a bank job interview",
+            "high patent stiletto pumps are too flashy and club-oriented for a conservative finance interview",
+            "mini crossbody bag is too small and casual to hold interview essentials like a resume"
+          ],
+          "weak_piece": {
+            "slot": "dress",
+            "reason": "a relaxed knit sweater dress lacks the sharp tailoring required for a formal bank interview",
+            "ask": "tailored black sheath dress"
+          }
+        },
+        {
+          "name": "Espresso & Cream",
+          "score": 4,
+          "presentable": false,
+          "issues": [
+            "layer photo shows a short plaid collarless jacket instead of the solid Chocolate Plum/Heather Charcoal Cocoon Coat in the title",
+            "chunky Y2K hip belt is inappropriate for a conservative bank interview and cannot be worn properly with a draped wrap-waist top and standard belt loops",
+            "high stiletto d'Orsay pumps with jewel embellishment are too flashy for a traditional banking interview",
+            "cream wrap top blends awkwardly into the tan trousers"
+          ],
+          "weak_piece": {
+            "slot": "accessory",
+            "reason": "The chunky low-slung Y2K belt is far too casual and trendy for a bank interview and clashes structurally with the wrap-front top.",
+            "ask": "classic slim dark brown leather trouser belt or structured brown leather tote bag"
+          }
+        }
+      ],
+      "min": 4,
+      "avg": 5.33,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "club@premium|women": {
+      "graded_at": "2026-11-21T19:43:36.343Z",
+      "set_built_at": 22985,
+      "outfits": [
+        {
+          "name": "Burgundy & Moto",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "bag reads as a minimalist daytime bucket bag rather than an evening club bag",
+            "shoes have a very low, daytime-leaning heel rather than a sleek club-ready silhouette"
+          ],
+          "weak_piece": {
+            "slot": "bag",
+            "reason": "the structured daytime bucket bag feels too utilitarian and office-casual for a night out at a club",
+            "ask": "black evening clutch or chain-strap mini bag"
+          }
+        },
+        {
+          "name": "Satin & Leather",
+          "score": 4,
+          "presentable": false,
+          "issues": [
+            "Lace-trimmed satin flyaway cami reads directly as lingerie/sleepwear, violating hard dress-code rules",
+            "Large work tote bag is completely inappropriate and impractical for a night out at a club"
+          ],
+          "weak_piece": {
+            "slot": "top",
+            "reason": "The lace-trim satin flyaway camisole looks like lingerie rather than proper clubwear.",
+            "ask": "emerald green satin corset top"
+          }
+        },
+        {
+          "name": "Shimmer & Suede",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "The boxy, daytime wool cocoon coat clashes with the sexy clubwear aesthetic of the sequin micro mini skirt and fold-over boots",
+            "The boots feature a gold buckle detail on the shaft that clashes slightly with the silver rhinestone necklace and silver/white sequin skirt"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "The boxy collarless wool jacket reads as conservative daytime/office wear and looks out of place over a sequin club outfit.",
+            "ask": "black faux leather moto jacket or sleek cropped blazer"
+          }
+        }
+      ],
+      "min": 4,
+      "avg": 5.67,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "club@premium|men": {
+      "graded_at": "2026-11-21T19:43:37.705Z",
+      "set_built_at": 20659,
+      "outfits": [
+        {
+          "name": "Burgundy Velvet",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Moto",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Charcoal & Cream",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "Style clash between the preppy tailored car coat/knit polo and the edgy biker buckle boots and heavily iced-out watch",
+            "Long wool car coat is bulky and impractical for a club setting"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "A formal long car coat feels too business-commuter for a nightclub and clashes with the biker boots and flashy watch.",
+            "ask": "black leather moto jacket or sleek bomber jacket"
+          }
+        }
+      ],
+      "min": 6,
+      "avg": 7.33,
+      "presentable_count": 2,
+      "pass": true
+    },
+    "beach@premium|men": {
+      "graded_at": "2026-11-21T19:43:41.911Z",
+      "set_built_at": 23583,
+      "outfits": [
+        {
+          "name": "Coastal Linen Ease",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "heavy dark leather dress tassel loafers are too formal and wintery for casual striped linen beach shorts",
+            "grunge black-and-red Cobain sunglasses clash aesthetically with the airy neutral linen resort look"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "Structured dark leather dress tassel loafers feel too stiff and formal alongside relaxed drawstring linen shorts for a Miami beach vacation.",
+            "ask": "beige suede espadrilles or tan leather sandals"
+          }
+        },
+        {
+          "name": "Sunset Waffle",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Tropical Olive",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        }
+      ],
+      "min": 5,
+      "avg": 7,
+      "presentable_count": 2,
+      "pass": true
+    },
+    "festival@premium|women": {
+      "graded_at": "2026-11-21T19:43:43.138Z",
+      "set_built_at": 20980,
+      "outfits": [
+        {
+          "name": "Denim & Crochet",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Utility Cool",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Desert Bohemian",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "Structured minimalist taupe bag feels out of place with the warm boho festival aesthetic and clashes slightly with the warm tan tones"
+          ],
+          "weak_piece": {
+            "slot": "bag",
+            "reason": "The structured minimalist grey-taupe leather bag clashes with the warm bohemian desert festival vibe of the rust dress, straw hat, and tan suede boots.",
+            "ask": "tan or brown leather boho crossbody bag"
+          }
+        }
+      ],
+      "min": 7,
+      "avg": 7.67,
+      "presentable_count": 3,
+      "pass": true
+    },
+    "gala@premium|men": {
+      "graded_at": "2026-11-21T19:43:45.352Z",
+      "set_built_at": 19750,
+      "outfits": [
+        {
+          "name": "Charcoal Tailoring",
+          "score": 4,
+          "presentable": false,
+          "issues": [
+            "Missing a visible accessory such as a tie, bow tie, belt, or watch",
+            "Missing a required solid tie for a black tie optional gala",
+            "Heathered medium-grey relaxed tropical wool suit is too casual and light for an evening gala (dark suit required)"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "The medium heathered grey relaxed blazer is too daytime-casual for a black tie optional gala, which requires a dark formal suit.",
+            "ask": "dark charcoal or black formal suit jacket"
+          }
+        },
+        {
+          "name": "Sleek Monochrome",
+          "score": 2,
+          "presentable": false,
+          "issues": [
+            "accessory slot shows a velvet loafer shoe instead of an accessory",
+            "missing a tie and any real visible accessory required for a black tie optional gala",
+            "chunky lug-sole loafers in the shoes slot are too casual for a black tie optional gala"
+          ],
+          "weak_piece": {
+            "slot": "accessory",
+            "reason": "The accessory slot is filled with a pair of shoes, leaving the outfit without a tie or any actual accessory for a black tie optional dress code.",
+            "ask": "black silk necktie"
+          }
+        },
+        {
+          "name": "Classic Black Tailoring",
+          "score": 2,
+          "presentable": false,
+          "issues": [
+            "accessory slot contains baggy sweatpants instead of an actual accessory",
+            "missing a solid tie or bow tie required for a black tie optional gala",
+            "missing a visible accessory",
+            "cropped blazer and mismatched trousers do not form a proper formal suit for a gala",
+            "chunky lug-sole patent shoes are too casual for black tie optional"
+          ],
+          "weak_piece": {
+            "slot": "accessory",
+            "reason": "The accessory slot is filled with casual sweatpants, leaving the outfit without a required tie or visible accessory.",
+            "ask": "black silk necktie"
+          }
+        }
+      ],
+      "min": 2,
+      "avg": 2.67,
+      "presentable_count": 0,
+      "pass": false
+    },
+    "beach@premium|women": {
+      "graded_at": "2026-11-21T19:43:45.835Z",
+      "set_built_at": 22659,
+      "outfits": [
+        {
+          "name": "Sunset Coral Maxi",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Ocean Breeze",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Tropical Sage Jumpsuit",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "black leather sandals and dark sunglasses feel slightly heavy against the soft sage resort jumpsuit"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "Black ankle-wrap sandals feel a bit stark against the light sage jumpsuit for a Miami beach look, and the ankle ties will be hidden under the wide-leg hem.",
+            "ask": "tan or cognac leather slide sandals"
+          }
+        }
+      ],
+      "min": 7,
+      "avg": 7.67,
+      "presentable_count": 3,
+      "pass": true
+    },
+    "business-casual@premium|men": {
+      "graded_at": "2026-11-21T19:43:50.612Z",
+      "set_built_at": 22668,
+      "outfits": [
+        {
+          "name": "Oatmeal Merino Layer",
+          "score": 9,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Modern Grey Tailoring",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "Chunky cable-knit sweater is too bulky to layer cleanly under a lightweight tropical wool blazer",
+            "Flared faux-wool trousers are overly trendy and awkward for a first week at a standard business casual office",
+            "Hiking-style D-ring lug-sole shoes clash with the tailored blazer"
+          ],
+          "weak_piece": {
+            "slot": "bottom",
+            "reason": "Flared faux-wool trousers look out of place for a business casual office and clash with the classic blazer",
+            "ask": "charcoal straight-leg wool trousers or chinos"
+          }
+        },
+        {
+          "name": "Classic Navy Blazer",
+          "score": 2,
+          "presentable": false,
+          "issues": [
+            "bag slot shows a brown leather loafer instead of a bag",
+            "missing a visible accessory because the bag slot is occupied by a second pair of shoes",
+            "cropped double-breasted blazer is too trendy and unpolished for a first week at a business casual office"
+          ],
+          "weak_piece": {
+            "slot": "bag",
+            "reason": "The bag slot contains a brown leather loafer instead of an actual bag or accessory.",
+            "ask": "black leather briefcase"
+          }
+        }
+      ],
+      "min": 2,
+      "avg": 5.33,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "fall-weekend@premium|men": {
+      "graded_at": "2026-11-21T19:43:54.451Z",
+      "set_built_at": 21137,
+      "outfits": [
+        {
+          "name": "Olive Corduroy",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "layering a slim fitted corduroy button-up shirt over a bulky crew neck sweater does not work",
+            "the tan/camel sweater and khaki chinos are too close in color, creating a washed-out beige look",
+            "cool charcoal beanie feels disconnected from the warm earth-toned palette"
+          ],
+          "weak_piece": {
+            "slot": "bottom",
+            "reason": "The khaki chinos blend right into the camel-toned sweater; darker bottoms would add needed contrast and anchor the fall palette.",
+            "ask": "dark wash straight-leg jeans"
+          }
+        },
+        {
+          "name": "Crisp Field",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "watch is too flashy and dressy for a casual outdoor autumn look"
+          ],
+          "weak_piece": {
+            "slot": "accessory",
+            "reason": "The chunky gold chronograph watch clashes with the understated, earthy fall aesthetic of the corduroy pants, henley, and work boots.",
+            "ask": "casual brown leather strap field watch"
+          }
+        },
+        {
+          "name": "Orchard Barn Flannel",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "Western cowboy boots clash slightly with the New England workwear vibe of the barn jacket and selvedge denim, and appear very costume-like in faux suede."
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "The faux suede cowboy boots look cheap and out of place with the classic heritage workwear aesthetic of the barn jacket and selvedge jeans.",
+            "ask": "brown leather work boots or chukka boots"
+          }
+        }
+      ],
+      "min": 6,
+      "avg": 6.67,
+      "presentable_count": 2,
+      "pass": true
+    },
+    "fall-weekend@premium|women": {
+      "graded_at": "2026-11-21T19:43:58.829Z",
+      "set_built_at": 21714,
+      "outfits": [
+        {
+          "name": "Orchard Plaid",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Tailgate Quilted",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Denim & Shearling",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "the ultra-wide boho hip belt won't fit standard jean belt loops and clashes with the classic utilitarian aesthetic"
+          ],
+          "weak_piece": {
+            "slot": "accessory",
+            "reason": "The wide faux-leather hip belt is too wide for standard denim belt loops and its Y2K boho styling clashes with the classic fall aesthetic.",
+            "ask": "classic brown leather belt or a brown leather crossbody bag"
+          }
+        }
+      ],
+      "min": 7,
+      "avg": 7.67,
+      "presentable_count": 3,
+      "pass": true
+    },
+    "upscale-dinner-date@premium|women": {
+      "graded_at": "2026-11-21T19:44:02.833Z",
+      "set_built_at": 19946,
+      "outfits": [
+        {
+          "name": "Charcoal Tailored Suiting",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "Mismatched greys between the heather graphite blazer and dark charcoal trousers can look like a near-miss suit",
+            "Chunky rhinestone necklace clashes slightly with the understated, high-neck pleated silk top"
+          ],
+          "weak_piece": {
+            "slot": "bottom",
+            "reason": "Pairing two different shades and fabrics of grey tailoring looks slightly mismatched rather than intentional.",
+            "ask": "black wide leg tailored trousers"
+          }
+        },
+        {
+          "name": "Warm Taupe Neutrals",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Black Velvet",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "The boxy, collarless cropped wool jacket reads too casual and daytime-oriented over a bodycon velvet evening dress."
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "The boxy cropped silhouette and daytime styling of the collarless wool jacket clash with the sleek, fitted evening silhouette of the velvet midi dress.",
+            "ask": "black tailored longline wool coat"
+          }
+        }
+      ],
+      "min": 7,
+      "avg": 7.33,
+      "presentable_count": 3,
+      "pass": true
+    },
+    "gala@premium|women": {
+      "graded_at": "2026-11-21T19:44:07.096Z",
+      "set_built_at": 22421,
+      "outfits": [
+        {
+          "name": "Burgundy Velvet Jumpsuit",
+          "score": 4,
+          "presentable": false,
+          "issues": [
+            "The jumpsuit has a sheer mesh button-down top that reads as clubwear or smart-casual rather than formal enough for a black tie optional gala",
+            "Layering a plunging sequin blazer over a collared long-sleeve mesh button-down jumpsuit creates a bulky, awkward neckline clash"
+          ],
+          "weak_piece": {
+            "slot": "dress",
+            "reason": "A sheer mesh collared button-down jumpsuit is far too casual for a black tie optional gala and clashes structurally under the blazer.",
+            "ask": "formal floor-length evening gown in black or burgundy"
+          }
+        },
+        {
+          "name": "Black & Pearl",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "oversized faux leather fringe clutch is too casual and western-inspired for a formal gala",
+            "boxy daytime wool blanket coat clashes with the formal evening satin gown"
+          ],
+          "weak_piece": {
+            "slot": "bag",
+            "reason": "the heavy fringe and oversized silhouette clash with the formal gala dress code",
+            "ask": "sleek black or metallic formal evening clutch without fringe"
+          }
+        },
+        {
+          "name": "Midnight Silk Satin",
+          "score": 4,
+          "presentable": false,
+          "issues": [
+            "Simple knee-length slip dress reads too casual and nightwear-like for a black-tie optional gala",
+            "Boxy cropped wool jacket is casual daytime outerwear and clashes in both formality and colour (black over navy) with an evening look"
+          ],
+          "weak_piece": {
+            "slot": "dress",
+            "reason": "A basic minimalist slip dress is underdressed and borderline nightwear-like for a black-tie optional gala",
+            "ask": "navy floor-length evening gown or structured midi cocktail dress"
+          }
+        }
+      ],
+      "min": 4,
+      "avg": 4.67,
+      "presentable_count": 0,
+      "pass": false
+    },
+    "upscale-dinner-date@premium|men": {
+      "graded_at": "2026-11-21T19:44:09.125Z",
+      "set_built_at": 22028,
+      "outfits": [
+        {
+          "name": "Midnight Tailoring",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "two-tone chunky horsebit loafers with contrast cream vamps are slightly trendy and less sleek than classic solid black dress loafers"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "The contrast cream vamp on the loafers detracts slightly from a sleek, classic upscale evening look.",
+            "ask": "solid black leather dress loafers"
+          }
+        },
+        {
+          "name": "Burgundy Evening",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "The boxy faux-wool trucker jacket is too casual and workwear-styled for a polished upscale restaurant dinner, clashing with the dress trousers and leather loafers.",
+            "Mismatch between the bright navy faux-wool trucker jacket and the dark navy tailored tropical wool trousers."
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "The boxy utility trucker jacket dress down the outfit and clashes in shade and texture with the dark navy tailored wool trousers.",
+            "ask": "charcoal or camel tailored wool blazer or overcoat"
+          }
+        },
+        {
+          "name": "Warm Espresso",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "Layering a chunky cable-knit crewneck sweater directly over another knit turtleneck sweater is bulky, awkward, and impractical for an indoor dinner",
+            "The yellow-toned sand relaxed trousers look too casual and resort-like against the heavy winter wools and dark brown suede for an upscale evening dinner"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "A pullover crewneck sweater cannot be layered cleanly over a turtleneck sweater and lacks the structure needed for a polished evening dinner.",
+            "ask": "tailored dark brown blazer or sport coat"
+          }
+        }
+      ],
+      "min": 5,
+      "avg": 6,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "business-casual@premium|women": {
+      "graded_at": "2026-11-21T19:44:10.317Z",
+      "set_built_at": 24311,
+      "outfits": [
+        {
+          "name": "Burgundy & Graphite",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Espresso & Black",
+          "score": 2,
+          "presentable": false,
+          "issues": [
+            "bottom slot is a children's pleated faux leather mini skirt, which is both the wrong department (kids) and completely inappropriate for a business casual office",
+            "brown washed faux leather skirt clashes with the black leather knee-high boots and black belted blazer"
+          ],
+          "weak_piece": {
+            "slot": "bottom",
+            "reason": "It is a children's faux-leather mini skirt, which is inappropriate for an adult women's business casual office outfit and clashes with the black boots.",
+            "ask": "women's tailored trousers or midi skirt in black, grey, or tan"
+          }
+        },
+        {
+          "name": "Camel & Navy",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "The bag features flashy neon pink mini-bag charms and a large plastic heart attachment, which looks juvenile and unpolished for a first week at an office.",
+            "The moto-style wool jacket with heavy zipper hardware and waist belt clashes with the classic preppy cardigan and tailored wide-leg trousers."
+          ],
+          "weak_piece": {
+            "slot": "bag",
+            "reason": "The bright pink mini-pouch and plastic heart charms make the bag too loud and casual for making a strong professional impression during the first week at work.",
+            "ask": "minimalist black leather tote bag"
+          }
+        }
+      ],
+      "min": 2,
+      "avg": 5,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "wine-bar-date@premium|men": {
+      "graded_at": "2026-11-21T19:44:13.445Z",
+      "set_built_at": 20684,
+      "outfits": [
+        {
+          "name": "Warm Camel",
+          "score": 9,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Monochrome Charcoal",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "chunky hiker-lace lug-sole shoes feel a bit too heavy and rugged for an effortless chic wine bar aesthetic",
+            "double collars from layering a collared merino sweater under a collared jacket can look slightly bulky"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "The chunky hiker eyelets and heavy lug sole clash slightly with the refined, effortless chic vibe of the merino polo sweater.",
+            "ask": "sleek black leather Chelsea boots or minimalist black leather loafers"
+          }
+        },
+        {
+          "name": "Burgundy & Navy Tailoring",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "Chunky, oversized open-weave crochet knit polo is too bulky and slouchy to layer cleanly under a structured tropical wool blazer",
+            "Mismatched aesthetics between the streetwear crochet top and the tailored wool separates"
+          ],
+          "weak_piece": {
+            "slot": "top",
+            "reason": "The oversized, chunky open-weave crochet polo clashes with the sleek tailoring of the wool blazer and trousers and will bunch awkwardly underneath the jacket.",
+            "ask": "fine-knit burgundy merino or cotton polo shirt"
+          }
+        }
+      ],
+      "min": 5,
+      "avg": 7,
+      "presentable_count": 2,
+      "pass": true
+    },
+    "wine-bar-date@premium|women": {
+      "graded_at": "2026-11-21T19:44:16.451Z",
+      "set_built_at": 22946,
+      "outfits": [
+        {
+          "name": "Satin Tailoring",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "Clubwear-leaning belted satin halter top with silver hardware clashes slightly with the effortless tailored vibe and gold hoop earrings"
+          ],
+          "weak_piece": {
+            "slot": "top",
+            "reason": "The plunging belted satin halter top feels a bit too clubby and over-designed for an effortless wine bar aesthetic, and its silver buckle clashes with the gold hoops.",
+            "ask": "black silk camisole"
+          }
+        },
+        {
+          "name": "Wine Midi & Moto",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Canvas & Denim",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "flat loafer mules with floor-length wide-leg jeans look overly casual and risk dragging for an evening wine bar date"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "Flat loafer mules lack evening elevation and get swallowed by the floor-length wide-leg denim.",
+            "ask": "black leather heeled ankle boots"
+          }
+        }
+      ],
+      "min": 7,
+      "avg": 7.33,
+      "presentable_count": 3,
+      "pass": true
+    },
+    "arena-concert@premium|men": {
+      "graded_at": "2026-11-21T19:44:23.345Z",
+      "set_built_at": 22702,
+      "outfits": [
+        {
+          "name": "Leather",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Crimson Corduroy Concert",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Olive Utility",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "Plain black knit sweater under the bomber jacket feels too safe for a 'bold' concert request and could get too warm inside a packed stadium arena",
+            "Beanie photo reads dark brown despite the 'Black' title"
+          ],
+          "weak_piece": {
+            "slot": "top",
+            "reason": "A plain black knit sweater is too understated for a bold concert vibe and may be too hot inside a packed arena under a heavy bomber.",
+            "ask": "bold graphic concert tee or statement streetwear t-shirt"
+          }
+        }
+      ],
+      "min": 7,
+      "avg": 7.67,
+      "presentable_count": 3,
+      "pass": true
+    },
+    "arena-concert@premium|women": {
+      "graded_at": "2026-11-21T19:44:26.295Z",
+      "set_built_at": 24310,
+      "outfits": [
+        {
+          "name": "Indigo Rocker Edge",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "Large tote bag is impractical and often violates stadium arena bag size restrictions"
+          ],
+          "weak_piece": {
+            "slot": "bag",
+            "reason": "A large structured work tote is bulky for dancing in a stadium crowd and will likely fail arena bag size policies.",
+            "ask": "small black leather crossbody bag"
+          }
+        },
+        {
+          "name": "Velvet Glam",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "sporty baseball cap clashes slightly with the dressier red velvet trousers and edgy moto jacket aesthetic"
+          ],
+          "weak_piece": {
+            "slot": "accessory",
+            "reason": "The sporty baseball hat feels out of place alongside velvet trousers and a leather moto jacket; a hands-free concert bag or statement jewelry would elevate the look.",
+            "ask": "black leather crossbody bag"
+          }
+        },
+        {
+          "name": "Utilitarian Concert Cool",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "high-heeled platform boots are not comfortable for standing and walking at a stadium arena concert",
+            "plunge lariat necklace does not work over a high crew-neck top"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "High platform heels are impractical and uncomfortable for a stadium concert where comfort was specifically requested.",
+            "ask": "black leather combat boots or chunky platform sneakers"
+          }
+        }
+      ],
+      "min": 5,
+      "avg": 6,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "office-holiday-party@premium|men": {
+      "graded_at": "2026-11-21T19:44:37.668Z",
+      "set_built_at": 21585,
+      "outfits": [
+        {
+          "name": "Velvet Holiday Season",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "Casual black performance chinos clash in fabric and formality with a satin scarf blazer",
+            "The satin fringe scarf blazer reads more like clubwear than a workplace-appropriate office holiday look"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "The attached satin fringe scarf is too costume-like for a professional office environment and clashes with the casual cotton chinos.",
+            "ask": "tailored velvet or wool blazer without attached scarf"
+          }
+        },
+        {
+          "name": "Midnight Wool Polish",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "Mismatched navy shades between the Dark Navy blazer and Heathered Navy trousers create a clashing near-match suit look",
+            "Casual wide-cut faux leather belt with a chunky silver buckle clashes with the dressier dark espresso gold-bit loafers",
+            "Lacks any festive holiday character, reading as basic daily office wear"
+          ],
+          "weak_piece": {
+            "slot": "bottom",
+            "reason": "The Heathered Navy trousers are a slightly different shade from the Dark Navy blazer, making the suit look unintentionally mismatched.",
+            "ask": "dark navy tropical wool dress trousers or charcoal wool dress trousers"
+          }
+        },
+        {
+          "name": "Heathered Holiday Tailoring",
+          "score": 3,
+          "presentable": false,
+          "issues": [
+            "microfleece sweatpants are loungewear/athletic wear and completely inappropriate for an office holiday party, clashing severely with the blazer, dress shirt, and leather loafers",
+            "microfleece sweatpants do not have belt loops to wear the included belt",
+            "studded western belt clashes stylistically with smart office tailoring and dress loafers"
+          ],
+          "weak_piece": {
+            "slot": "bottom",
+            "reason": "Microfleece loungewear pants ruin the formality of the outfit and have no belt loops.",
+            "ask": "charcoal or black tailored dress trousers"
+          }
+        }
+      ],
+      "min": 3,
+      "avg": 5,
+      "presentable_count": 0,
+      "pass": false
+    },
+    "office-holiday-party@premium|women": {
+      "graded_at": "2026-11-21T19:44:40.028Z",
+      "set_built_at": 26055,
+      "outfits": [
+        {
+          "name": "Metallic Silk Sheen",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "sheer white cotton-silk organza skirt is too summery for a winter holiday party",
+            "open-toe platform sandals and oversized thin hoop earrings are not workplace-appropriate for a winter office party"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "open-toe platform sandals feel too clubby and seasonally mismatched with a cashmere sweater for a winter office holiday party",
+            "ask": "silver or black closed-toe heeled pumps or ankle boots"
+          }
+        },
+        {
+          "name": "Satin Sparkle Blazer",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "chunky platform zip booties are too casual and clunky for an office holiday party and clash with a velvet sequin blazer",
+            "Large everyday tote bag reads like a daytime commuter bag rather than a festive party accessory",
+            "Muted brown daytime trousers clash in vibe and color with the evening-style black velvet sequin blazer"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "Chunky platform booties with an exposed front zipper are too casual and heavy for a festive office holiday party look with a sequin blazer.",
+            "ask": "black pointed-toe heels"
+          }
+        },
+        {
+          "name": "Ruby Plaid Grace",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "flat menswear-style loafers clash with the feminine mermaid-hem midi dress and feel too utilitarian for a festive holiday party",
+            "boxy hip-length cocoon jacket cuts the flared midi dress silhouette awkwardly"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "Flat menswear-inspired loafers weigh down the flared midi dress and lack festive polish for an office holiday party.",
+            "ask": "black pointed-toe heeled pumps or ankle boots"
+          }
+        }
+      ],
+      "min": 5,
+      "avg": 5.67,
+      "presentable_count": 0,
+      "pass": false
+    },
+    "anniversary-dinner@premium|men": {
+      "graded_at": "2026-11-21T19:44:41.313Z",
+      "set_built_at": 24625,
+      "outfits": [
+        {
+          "name": "Charcoal Elegance",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "The boxy streetwear-style jacket clashes in formality with the traditional tailored dress shirt and cap-toe derby shoes.",
+            "The charcoal jacket and charcoal trousers are slightly different shades and textures of grey, looking like a mismatched suit rather than an intentional pairing."
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "The cropped, boxy jacket is too casual and streetwear-leaning to pair well with formal dress shoes and a crisp dress shirt for a dressy romantic occasion.",
+            "ask": "tailored navy or black blazer"
+          }
+        },
+        {
+          "name": "Tonal Noir",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "Chunky lug-soled faux patent leather derbies and a zip-front jacket lean more streetwear/edgy than classically dressy for a romantic anniversary"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "A zip-front blouson jacket feels too casual compared to a tailored blazer for a dressy anniversary celebration",
+            "ask": "tailored black or charcoal blazer"
+          }
+        },
+        {
+          "name": "Classic Navy Sophistication",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "casual boxy trucker-style jacket with metal snap buttons is too informal for a dressy romantic anniversary",
+            "mismatched navy tones and textures between the faux wool jacket and the tailored trousers create an awkward pseudo-suit look"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "The boxy workwear-style faux wool jacket clashes in formality with the dress shirt, tailored trousers, and leather loafers.",
+            "ask": "tailored navy or charcoal blazer"
+          }
+        }
+      ],
+      "min": 5,
+      "avg": 6,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "beach-wedding-guest@premium|men": {
+      "graded_at": "2026-11-21T19:44:45.567Z",
+      "set_built_at": 25160,
+      "outfits": [
+        {
+          "name": "Espresso Linen Suit",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Coastal Grey Linen",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "Studded cross-buckle belt is too edgy and casual for a coastal destination wedding",
+            "Dark black linen shirt combined with dark brown leather loafers and belt feels heavy and muddy against the light grey suit"
+          ],
+          "weak_piece": {
+            "slot": "accessory",
+            "reason": "The studded belt with an iron-cross style buckle clashes heavily with dressy wedding tailoring.",
+            "ask": "classic dark brown leather dress belt"
+          }
+        },
+        {
+          "name": "Coastal Navy Classic",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "short-sleeve camp collar shirt and baggy chinos are too casual and slouchy for dressy wedding attire under a tailored blazer"
+          ],
+          "weak_piece": {
+            "slot": "top",
+            "reason": "The boxy short-sleeve camp-collar shirt is too casual for dressy wedding attire and does not layer cleanly under a structured blazer.",
+            "ask": "light blue long-sleeve linen dress shirt"
+          }
+        }
+      ],
+      "min": 5,
+      "avg": 6.33,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "cocktail-attire-wedding@premium|men": {
+      "graded_at": "2026-11-21T19:44:48.310Z",
+      "set_built_at": 23423,
+      "outfits": [
+        {
+          "name": "Tonal Espresso",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "casual button-down oxford shirt with chest pocket is slightly underdressed for a refined cocktail wedding"
+          ],
+          "weak_piece": {
+            "slot": "top",
+            "reason": "casual button-down oxford shirt with chest pocket reads too informal for a refined cocktail wedding",
+            "ask": "light blue poplin dress shirt"
+          }
+        },
+        {
+          "name": "Midnight Navy Suit",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Olive & Black Knit",
+          "score": 4,
+          "presentable": false,
+          "issues": [
+            "Unlined, collarless St. Tropez linen-style jacket is far too casual and summery for a refined semi-formal cocktail wedding.",
+            "Heavy knit turtleneck and wool-blend trousers clash seasonally and texturally with the lightweight resort blazer.",
+            "Muddy color combination of pale sage olive, dark brown, and black lacks polish and cohesion."
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "The unlined, collarless resort blazer is too casual for a cocktail wedding and clashes with the cold-weather turtleneck and wool trousers.",
+            "ask": "structured dark brown or charcoal tailored blazer"
+          }
+        }
+      ],
+      "min": 4,
+      "avg": 6.33,
+      "presentable_count": 2,
+      "pass": true
+    },
+    "anniversary-dinner@premium|women": {
+      "graded_at": "2026-11-21T19:44:53.429Z",
+      "set_built_at": 26061,
+      "outfits": [
+        {
+          "name": "Velvet Romance",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "Thigh-high boots are too bulky and heavy underneath a fitted calf-length velvet midi dress",
+            "Boxy cropped wool jacket clashes with the sleek, bodycon silhouette of the dress"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "Thigh-high boots bunch awkwardly under a fitted calf-length midi dress and make the bottom half look too heavy.",
+            "ask": "black strappy heeled sandals or classic black pointed-toe pumps"
+          }
+        },
+        {
+          "name": "Velvet Jumpsuit",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Navy Pinstripe Silk",
+          "score": 4,
+          "presentable": false,
+          "issues": [
+            "Navy pinstripe blazer and trousers read as corporate business wear rather than a romantic anniversary look",
+            "Chunky low-heeled western-style ankle boots clash in both formality and style with a tailored pinstripe suit and silk camisole"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "Chunky western-style ankle boots are far too casual and heavy for a romantic dressy anniversary celebration.",
+            "ask": "sleek silver or black stiletto heeled sandals or pointed-toe evening pumps"
+          }
+        }
+      ],
+      "min": 4,
+      "avg": 6,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "cocktail-attire-wedding@premium|women": {
+      "graded_at": "2026-11-21T19:45:00.530Z",
+      "set_built_at": 25489,
+      "outfits": [
+        {
+          "name": "Emerald Jacquard Midi",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Navy Satin Silver",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "knee-high rhinestone wrap-up heels with clear acrylic flared heels read clubwear rather than refined semi-formal cocktail wedding guest",
+            "knee-high wrap straps clash awkwardly with the midi-length hemline of the dress"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "The knee-high rhinestone wrap straps and clear acrylic heels look tacky and clubby for a refined wedding guest look, and the high leg wraps fight the midi hemline.",
+            "ask": "minimalist silver ankle-strap heels"
+          }
+        },
+        {
+          "name": "Purple Chiffon Elegance",
+          "score": 4,
+          "presentable": false,
+          "issues": [
+            "black and white zebra print clutch severely clashes with the purple patterned chiffon gown",
+            "floor-length formal gown is overdressed for a semi-formal cocktail wedding",
+            "casual clear lucite block-heel mules do not match the formality of an evening gown"
+          ],
+          "weak_piece": {
+            "slot": "bag",
+            "reason": "The bold black and white zebra print clashes terribly with the purple patterned gown and lacks refinement.",
+            "ask": "solid gold or black evening clutch"
+          }
+        }
+      ],
+      "min": 4,
+      "avg": 6,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "beach-wedding-guest@premium|women": {
+      "graded_at": "2026-11-21T19:45:01.875Z",
+      "set_built_at": 28332,
+      "outfits": [
+        {
+          "name": "Sunset Coral",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "Flat wrap sandals with clear PVC toe straps are too casual and cheap-looking for dressy wedding attire, and will cause the maxi dress hem to drag",
+            "Gold velvet clutch has a heavy winter/holiday texture that clashes with an airy coastal wedding aesthetic"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "Casual flat sandals with clear plastic straps downgrade the dressiness required for a wedding and don't provide the height needed for a maxi dress.",
+            "ask": "gold or nude dressy block-heel sandals"
+          }
+        },
+        {
+          "name": "Golden Hour Glow",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "Flat leather slide sandals are too casual for wedding attire, even at a coastal destination",
+            "The button-front sundress reads more like casual daytime resort wear than dressy wedding guest attire"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "Flat slide sandals dress the look down to everyday casual rather than wedding-appropriate dressy.",
+            "ask": "tan or gold block-heel strappy sandals"
+          }
+        },
+        {
+          "name": "Olive Breeze",
+          "score": 4,
+          "presentable": false,
+          "issues": [
+            "flat leather sandals are too casual for dressy wedding attire",
+            "stark white casual shoulder bag clashes with the earthy olive dress and brown sandals",
+            "dainty pendant necklace will be hidden by the high neckline of the dress"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "Flat everyday sandals dress down the outfit too much for a wedding.",
+            "ask": "gold or tan block-heel dressy sandals"
+          }
+        }
+      ],
+      "min": 4,
+      "avg": 4.67,
+      "presentable_count": 0,
+      "pass": false
+    },
+    "engagement-party@premium|men": {
+      "graded_at": "2026-11-21T19:45:03.523Z",
+      "set_built_at": 27875,
+      "outfits": [
+        {
+          "name": "Midnight Tailoring",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "dark navy blazer over a black turtleneck and charcoal trousers creates a muddy, overly dark palette",
+            "chunky wide-ribbed turtleneck is a bit heavy under a lightweight tropical wool blazer"
+          ],
+          "weak_piece": {
+            "slot": "top",
+            "reason": "a black wide-ribbed turtleneck clashes slightly with the dark navy blazer and looks too bulky under lightweight tropical wool",
+            "ask": "fine-knit cream or burgundy merino sweater"
+          }
+        },
+        {
+          "name": "Camel and Espresso",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Emerald and Black",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        }
+      ],
+      "min": 7,
+      "avg": 7.67,
+      "presentable_count": 3,
+      "pass": true
+    },
+    "engagement-party@premium|women": {
+      "graded_at": "2026-11-21T19:45:11.579Z",
+      "set_built_at": 24303,
+      "outfits": [
+        {
+          "name": "Velvet",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "The short, boxy wool cocoon jacket is too casual in silhouette and proportion to pair with a sleek, bodycon velvet evening midi dress",
+            "Knee-high boots with a calf-length bodycon velvet midi dress create a heavy, visually cramped lower silhouette compared to sleek heels or evening pumps"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "The cropped, boxy wool jacket reads like casual daytime outerwear and clashes with the sleek, festive evening aesthetic of the velvet midi dress.",
+            "ask": "tailored black evening coat or dressy faux fur jacket"
+          }
+        },
+        {
+          "name": "Burgundy Satin Look",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "bag is a daytime bucket style rather than an upscale evening bag",
+            "heather taupe wool coat and basic crew sweater read slightly understated for a festive upscale celebration"
+          ],
+          "weak_piece": {
+            "slot": "bag",
+            "reason": "the structured bucket bag reads too daytime and utilitarian for an upscale engagement party",
+            "ask": "black leather evening clutch"
+          }
+        },
+        {
+          "name": "Midnight Pinstripe",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "Navy pinstripe jumpsuit reads as daytime corporate office wear rather than festive engagement celebration attire",
+            "Gold hardware and warm amber/brown beads on the black bag clash with the silver rhinestone shoes and silver hoop earrings",
+            "Pairing a heavy black faux fur coat over a navy office-style jumpsuit feels mismatched in both color and vibe"
+          ],
+          "weak_piece": {
+            "slot": "dress",
+            "reason": "The navy pinstripe jumpsuit looks like daytime office attire and clashes with the glamorous black faux fur coat and silver rhinestone accessories.",
+            "ask": "black cocktail dress or festive evening jumpsuit"
+          }
+        }
+      ],
+      "min": 5,
+      "avg": 6,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "graduation-ceremony@premium|women": {
+      "graded_at": "2026-11-21T19:45:11.904Z",
+      "set_built_at": 23781,
+      "outfits": [
+        {
+          "name": "Burgundy Wool Elegance",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Plum Draped Jumpsuit",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "bag has a bright pink mini pouch and orange heart charm that clash with the plum jumpsuit and gold hardware",
+            "heavy black satin platform pumps and dark plum palette feel too evening-heavy for a daytime commencement ceremony",
+            "belted blazer will bunch awkwardly over the draped cowl-neck waist detail of the jumpsuit"
+          ],
+          "weak_piece": {
+            "slot": "bag",
+            "reason": "the hot pink attachment and novelty charms clash with the plum jumpsuit and dressy daytime aesthetic",
+            "ask": "structured black or gold clutch bag without novelty charms"
+          }
+        },
+        {
+          "name": "Satin & Wool",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "All-dark charcoal and black palette with wool layers reads heavy and wintery for a typical daytime graduation ceremony"
+          ],
+          "weak_piece": {
+            "slot": "top",
+            "reason": "The dark charcoal sweater makes the outfit overly dark and heavy for a celebratory daytime commencement photo.",
+            "ask": "ivory or cream fine-knit V-neck sweater or silk blouse"
+          }
+        }
+      ],
+      "min": 6,
+      "avg": 7,
+      "presentable_count": 2,
+      "pass": true
+    },
+    "new-years-eve-party@premium|men": {
+      "graded_at": "2026-11-21T19:45:12.291Z",
+      "set_built_at": 28891,
+      "outfits": [
+        {
+          "name": "Obsidian Sequin Statement",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "Cotton twill pleated trousers read slightly more daytime-smart than glamorous eveningwear alongside a satin scarf blazer and patent loafers",
+            "Outfit lacks an explicit sparkling or sequin element despite the prompt asking for a sparkling glamorous statement"
+          ],
+          "weak_piece": {
+            "slot": "bottom",
+            "reason": "Cotton twill trousers feel a bit too matte and business-casual next to the satin scarf blazer and patent loafers for a glamorous New Year's Eve look.",
+            "ask": "black satin-trim evening trousers"
+          }
+        },
+        {
+          "name": "Emerald Velvet Glamour",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "pastel mint green cropped blazer looks spring-like and lacks the sparkling, glamorous evening aesthetic requested for New Year's Eve"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "Pastel mint green reads like springtime rather than a sparkling, glamorous New Year's Eve statement piece.",
+            "ask": "black or metallic sequin dinner jacket or velvet blazer"
+          }
+        },
+        {
+          "name": "Liquid Silver",
+          "score": 4,
+          "presentable": false,
+          "issues": [
+            "sporty reflective windbreaker bomber clashes with tailored wool trousers and formal leather dress shoes",
+            "outfit reads as a confused mix of athletic streetwear and business casual rather than a sparkling glamorous New Year's Eve statement",
+            "chunky untucked cable-knit sweater completely hides the belt, leaving no visible festive accessory"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "The sporty reflective nylon bomber looks like athletic rainwater gear and clashes with the tailored trousers and dress shoes while missing the glamorous New Year's Eve brief.",
+            "ask": "sequin or metallic evening blazer"
+          }
+        }
+      ],
+      "min": 4,
+      "avg": 5.33,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "graduation-ceremony@premium|men": {
+      "graded_at": "2026-11-21T19:45:21.116Z",
+      "set_built_at": 22241,
+      "outfits": [
+        {
+          "name": "Timeless Navy",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "The blazer is Dark Navy while the trousers are Heathered Navy, creating a slight mismatch that looks like a near-miss suit",
+            "The belt has a casual matte finish with a silver buckle while the dress loafers are polished dark brown with gold hardware"
+          ],
+          "weak_piece": {
+            "slot": "accessory",
+            "reason": "The casual wide belt with a silver buckle clashes slightly with the sleek, gold-hardware dress loafers.",
+            "ask": "dark brown leather dress belt"
+          }
+        },
+        {
+          "name": "Warm Camel",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "flashy studded cross-buckle belt clashes heavily with the preppy oxford shirt and commencement occasion",
+            "pull-on easy trousers lack belt loops to accommodate a belt",
+            "heavy winter car coat is out of season for a typical spring/summer daytime graduation ceremony"
+          ],
+          "weak_piece": {
+            "slot": "accessory",
+            "reason": "The studded croc-embossed belt with a large cross buckle is far too edgy and flashy for a graduation ceremony and cannot be worn with pull-on trousers.",
+            "ask": "classic brown leather dress watch"
+          }
+        },
+        {
+          "name": "Charcoal & Wine",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "boxy cropped blazer is too trendy and ill-proportioned for a traditional daytime commencement ceremony",
+            "Separate charcoal blazer and charcoal trousers from different sets risk looking like a mismatched suit",
+            "heavy turtleneck sweater is unseasonable for a typical spring/early summer daytime graduation"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "The boxy cropped silhouette looks awkward with slim dress trousers and is too trendy for a graduation ceremony.",
+            "ask": "classic tailored navy or charcoal single-breasted blazer"
+          }
+        }
+      ],
+      "min": 5,
+      "avg": 5.67,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "black-tie-wedding@premium|men": {
+      "graded_at": "2026-11-21T19:45:23.584Z",
+      "set_built_at": 34062,
+      "outfits": [
+        {
+          "name": "Classic Black Tuxedo",
+          "score": 3,
+          "presentable": false,
+          "issues": [
+            "Missing a solid tie or bow tie required for black-tie dress code",
+            "Missing any visible accessory",
+            "Trousers are mismatched casual-fit pleated twill from a different brand rather than matching tuxedo trousers"
+          ],
+          "weak_piece": {
+            "slot": "bottom",
+            "reason": "Mismatched relaxed pleated twill trousers do not match the tuxedo jacket for black-tie attire",
+            "ask": "fitted black tuxedo trousers"
+          }
+        },
+        {
+          "name": "Classic Evening Tailoring",
+          "score": 2,
+          "presentable": false,
+          "issues": [
+            "accessory slot contains a pair of velvet loafers instead of an accessory",
+            "missing a solid tie or bow tie required for black tie",
+            "mismatched suit separates: black jacket paired with dark navy trousers instead of matching black trousers",
+            "missing a visible accessory",
+            "chunky lug-sole derby shoes are too casual for black tie"
+          ],
+          "weak_piece": {
+            "slot": "accessory",
+            "reason": "The accessory slot is filled with a pair of loafers instead of a required black-tie tie or bow tie.",
+            "ask": "solid black silk tie or bow tie"
+          }
+        },
+        {
+          "name": "Modern Monochrome Suit",
+          "score": 1,
+          "presentable": false,
+          "issues": [
+            "accessory slot contains a black long-sleeve crew t-shirt instead of an accessory",
+            "missing a visible accessory and formal neckwear (solid tie or bow tie) required for black tie",
+            "casual wool flight jacket instead of a matching formal suit or tuxedo jacket",
+            "backless loafer mules are far too casual for a black-tie wedding",
+            "butter yellow shirt is too casual for formal black-tie evening wear"
+          ],
+          "weak_piece": {
+            "slot": "accessory",
+            "reason": "The accessory slot is filled with a casual long-sleeve t-shirt instead of a formal tie or bow tie required for black tie.",
+            "ask": "solid black silk tie"
+          }
+        }
+      ],
+      "min": 1,
+      "avg": 2,
+      "presentable_count": 0,
+      "pass": false
+    },
+    "new-years-eve-party@premium|women": {
+      "graded_at": "2026-11-21T19:45:24.633Z",
+      "set_built_at": 32570,
+      "outfits": [
+        {
+          "name": "Silver Sequin Shine",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "basic corporate-style black leather pumps read too office-like for a glamorous New Year's Eve party dress"
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "Basic corporate-style black pumps feel too plain and office-like for an embellished New Year's Eve party look",
+            "ask": "silver metallic heels or embellished black evening sandals"
+          }
+        },
+        {
+          "name": "Burgundy Glitter Luxe",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "Chunky fold-over knee-high boots clash horribly with the ruffled mermaid hem of the midi dress and look far too heavy and edgy for a glamorous cocktail look.",
+            "The bag features a casual green stone bead charm that clashes with the burgundy and glamorous New Year's Eve theme."
+          ],
+          "weak_piece": {
+            "slot": "shoes",
+            "reason": "Chunky fold-over knee-high boots overwhelm the ruffled midi hem and undermine the glamorous dressy aesthetic.",
+            "ask": "strappy gold or black evening heels"
+          }
+        },
+        {
+          "name": "Emerald Beaded Glam",
+          "score": 4,
+          "presentable": false,
+          "issues": [
+            "nothing in the outfit is sparkling or glamorous as requested for New Year's Eve",
+            "olive green wooden-beaded halter jumpsuit reads as a casual summer vacation outfit rather than a winter NYE party look",
+            "boxy everyday wool coat and casual resin-beaded shoulder bag lack evening glamour"
+          ],
+          "weak_piece": {
+            "slot": "dress",
+            "reason": "The matte olive green jumpsuit with resort-style beads feels like summer vacation wear and has zero sparkle for New Year's Eve.",
+            "ask": "sequin or metallic evening jumpsuit or dress"
+          }
+        }
+      ],
+      "min": 4,
+      "avg": 5.33,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "tropical-resort-dinner@premium|men": {
+      "graded_at": "2026-11-21T19:45:32.128Z",
+      "set_built_at": 24427,
+      "outfits": [
+        {
+          "name": "Dark Navy Tailoring",
+          "score": 6,
+          "presentable": false,
+          "issues": [
+            "Oversized basic cotton crew t-shirt feels too casual and boxy under tailored wool suiting instead of reading as breezy elevated islandwear",
+            "Dark navy wool suit with dark brown dress loafers feels more like a standard city smart-casual look than tropical resort islandwear"
+          ],
+          "weak_piece": {
+            "slot": "top",
+            "reason": "A basic boxy cotton t-shirt lacks the breezy, elevated resort feel required for an island dinner.",
+            "ask": "white or light blue linen button-down shirt or knit polo"
+          }
+        },
+        {
+          "name": "Coastal Stripes",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "mixed metals between the gold belt buckle and silver chain necklace",
+            "shirt and necklace feel slightly downmarket for an elevated resort dinner given the remaining budget"
+          ],
+          "weak_piece": {
+            "slot": "jewelry",
+            "reason": "Clashes with the gold-toned buckle on the leather belt and cheapens the elevated resort aesthetic.",
+            "ask": "thin gold chain necklace"
+          }
+        },
+        {
+          "name": "Linen Sunset",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "drawstring pants do not have belt loops and cannot be worn with the belt",
+            "heavy studded western belt clashes with breezy tropical resort wear",
+            "casual canvas beach tote is out of place for an elevated dinner"
+          ],
+          "weak_piece": {
+            "slot": "accessory",
+            "reason": "The studded western belt clashes with the tropical aesthetic and cannot be worn with drawstring linen pants.",
+            "ask": "brown leather or woven wrist watch"
+          }
+        }
+      ],
+      "min": 5,
+      "avg": 6,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "black-tie-wedding@premium|women": {
+      "graded_at": "2026-11-21T19:45:36.678Z",
+      "set_built_at": 23686,
+      "outfits": [
+        {
+          "name": "Midnight Satin",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Burgundy Chiffon Gown",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "Silver rhinestones on the gown clash with the bright gold heels and gold clutch",
+            "Daytime heather wheat blanket coat is too casual in colour and style for a formal black-tie evening gown"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "The casual oatmeal daytime blanket coat clashes in formality and colour with a glamorous evening gown.",
+            "ask": "black formal evening wrap or tailored black wool evening coat"
+          }
+        },
+        {
+          "name": "Emerald & Gold",
+          "score": 5,
+          "presentable": false,
+          "issues": [
+            "casual boxy short wool jacket clashes with the formality and silhouette of a floor-length evening gown",
+            "chunky block-heel sandals and oversized quilted bag feel slightly too casual for strict black-tie evening wear"
+          ],
+          "weak_piece": {
+            "slot": "layer",
+            "reason": "a casual boxy short wool jacket ruins the formal silhouette of a black-tie evening gown",
+            "ask": "formal black evening wrap or faux fur stole"
+          }
+        }
+      ],
+      "min": 5,
+      "avg": 6,
+      "presentable_count": 1,
+      "pass": false
+    },
+    "tropical-resort-dinner@premium|women": {
+      "graded_at": "2026-11-21T19:45:43.799Z",
+      "set_built_at": 21988,
+      "outfits": [
+        {
+          "name": "Tan Linen Jumpsuit",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "cool-toned taupe utilitarian bag feels slightly too structured and daytime-casual compared to the warm tropical print and evening gold heels"
+          ],
+          "weak_piece": {
+            "slot": "bag",
+            "reason": "the structured cool-taupe leather crossbody clashes slightly with the warm resort vibe and evening gold accents",
+            "ask": "woven straw clutch or warm tan evening bag"
+          }
+        },
+        {
+          "name": "Ivory Silk Separates",
+          "score": 8,
+          "presentable": true,
+          "issues": [],
+          "weak_piece": null
+        },
+        {
+          "name": "Coral Linen Maxi",
+          "score": 7,
+          "presentable": true,
+          "issues": [
+            "heavy metallic box clutch feels too nightlife-formal for a breezy tropical resort dinner"
+          ],
+          "weak_piece": {
+            "slot": "bag",
+            "reason": "the textured metallic hard clutch feels too heavy and cocktail-formal for breezy island resortwear",
+            "ask": "woven straw or raffia evening clutch"
+          }
+        }
+      ],
+      "min": 7,
+      "avg": 7.33,
+      "presentable_count": 3,
+      "pass": true
     }
   }
 }
