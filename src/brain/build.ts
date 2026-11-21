@@ -26,7 +26,7 @@ const total = (pieces: Piece[]) => round2(pieces.reduce((s, p) => s + p.item.pri
 // Scoring
 // ---------------------------------------------------------------------------
 
-const NEVER = /\b(socks?|underwear|boxers?|briefs|thong|bra|bralette|lingerie|pajamas?|pyjamas?|robe|swim trunks|gift card|insoles?|shoe care|laces)\b/i;
+export const NEVER = /\b(socks?|underwear|boxers?|briefs|thong|bra|bralette|lingerie|pajamas?|pyjamas?|robe|swim trunks|gift card|insoles?|shoe care|laces)\b/i;
 const COLOURS = ['black', 'white', 'cream', 'ivory', 'navy', 'blue', 'grey', 'gray', 'charcoal', 'brown', 'tan', 'camel', 'beige', 'olive', 'green', 'burgundy', 'red', 'pink', 'blush', 'gold', 'silver', 'cognac', 'chocolate', 'khaki', 'sage', 'emerald', 'yellow', 'orange', 'purple', 'lavender', 'denim', 'taupe', 'stone', 'oatmeal'];
 const MATERIALS = ['leather', 'suede', 'wool', 'linen', 'cotton', 'silk', 'satin', 'denim', 'knit', 'cashmere', 'corduroy', 'velvet', 'canvas', 'chiffon', 'patent'];
 

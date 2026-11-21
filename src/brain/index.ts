@@ -1,6 +1,6 @@
 // Outfits track: the public entry points other tracks import.
 // buildOutfits serves the mock (the three looks in public/fixture.json with believable timing)
-// unless ALICE_BRAIN=live, which runs the real builder in build.ts. swapPiece is still the mock.
+// unless ALICE_BRAIN=live, which runs the real builder in build.ts and the real swap in swap.ts.
 // Signatures stay fixed either way.
 //
 // Pace is set by ALICE_MOCK_PACE:
@@ -10,6 +10,7 @@
 import { readFileSync } from 'node:fs';
 import type { Brief, BuildResult, Outfit, Piece } from '../types.ts';
 import { calllog } from '../calllog.ts';
+import { wantedColour, titleHas } from './words.ts';
 
 type Pace = 'library' | 'live' | '0';
 
@@ -96,47 +97,34 @@ async function buildMock(brief: Brief, opts: BuildOptions = {}): Promise<BuildRe
   return result;
 }
 
-// Colour words a shopper might say, with the title words that count as a match.
-const COLOURS: Record<string, string[]> = {
-  black: ['black', 'onyx', 'jet', 'charcoal'],
-  white: ['white', 'ivory', 'cream', 'bone', 'off-white', 'ecru'],
-  brown: ['brown', 'tan', 'cognac', 'chocolate', 'camel', 'taupe', 'mocha', 'espresso', 'chestnut', 'coffee'],
-  navy: ['navy', 'midnight'],
-  blue: ['blue', 'navy', 'denim', 'indigo', 'cobalt'],
-  grey: ['grey', 'gray', 'charcoal', 'heather', 'slate'],
-  gray: ['grey', 'gray', 'charcoal', 'heather', 'slate'],
-  green: ['green', 'olive', 'sage', 'khaki', 'forest'],
-  red: ['red', 'burgundy', 'wine', 'maroon', 'crimson'],
-  beige: ['beige', 'sand', 'khaki', 'stone', 'oatmeal', 'cream'],
-  silver: ['silver', 'chrome', 'steel'],
-  gold: ['gold', 'brass'],
-  pink: ['pink', 'blush', 'rose'],
-};
-
-function wantedColour(request: string): { word: string; matches: string[] } | null {
-  const words = request.toLowerCase().match(/[a-z-]+/g) ?? [];
-  // "swap the black boots for brown boots": the colour asked for is the last one named.
-  for (let i = words.length - 1; i >= 0; i--) {
-    if (COLOURS[words[i]]) return { word: words[i], matches: COLOURS[words[i]] };
-  }
-  return null;
-}
-
-const titleHas = (title: string, words: string[]) => {
-  const t = title.toLowerCase();
-  return words.some((w) => new RegExp(`\\b${w}\\b`).test(t));
-};
-
 export interface SwapResult { outfit: Outfit; piece: Piece; note?: string }
 export interface SwapOptions { room?: string }
 
 export async function swapPiece(outfit: Outfit, slot: string, request: string, brief: Brief, opts: SwapOptions = {}): Promise<SwapResult> {
   const started = performance.now();
-  log(opts.room, 'swap_start', { outfit: outfit?.number, slot, request, mock: true });
-  const result = await swapInner(outfit, slot, request, brief);
+  const live = (process.env.ALICE_BRAIN ?? '').toLowerCase() === 'live';
+  log(opts.room, 'swap_start', { outfit: outfit?.number, slot, request, mock: !live });
+  let result: SwapResult;
+  let extra: Record<string, unknown> = {};
+  if (live) {
+    try {
+      const { swapLive } = await import('./swap.ts');
+      const out = await swapLive(outfit, slot, request, brief);
+      extra = { query: out.query, tried: out.tried, price: out.piece?.item?.price, store: out.piece?.item?.store };
+      result = { outfit: out.outfit, piece: out.piece, ...(out.note ? { note: out.note } : {}) };
+    } catch (err) {
+      // Never throw to the agent: keep the look as it was and say so.
+      const look = clone(outfit);
+      const kept = look.pieces.find((p) => p.slot === slot) ?? look.pieces[0];
+      result = { outfit: look, piece: kept, note: `Couldn't reach the stores for a new ${slot}; kept the current one.` };
+      extra = { error: (err as Error)?.message ?? String(err) };
+    }
+  } else {
+    result = await swapInner(outfit, slot, request, brief);
+  }
   log(opts.room, 'swap_done', {
     outfit: result.outfit.number, slot, request, piece: result.piece?.item?.title,
-    total: result.outfit.total, note: result.note, swap_ms: Math.round(performance.now() - started),
+    total: result.outfit.total, note: result.note, swap_ms: Math.round(performance.now() - started), ...extra,
   });
   return result;
 }
