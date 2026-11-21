@@ -1270,9 +1270,13 @@ export function mountStore(root, { onTalk } = {}) {
       (data) => {
         if (reqId !== boutique.reqId) return;
         boutique.looksPending = false;
+        // Keep only looks made for this department: a piece tagged for the other one rules the look out
+        const fitsDepartment = (lk) =>
+          !Array.isArray(lk.pieces) ||
+          lk.pieces.every((p) => !p?.item?.department || p.item.department === dept);
         boutique.looks =
           data && Array.isArray(data.looks)
-            ? data.looks.filter((lk) => lk && typeof lk === 'object').slice(0, 6)
+            ? data.looks.filter((lk) => lk && typeof lk === 'object' && fitsDepartment(lk)).slice(0, 6)
             : [];
         syncBoutiqueBodyClass();
         if (state.view === 'boutique' && boutiqueRefs) {
