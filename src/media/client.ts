@@ -20,6 +20,8 @@ const DEFAULT_TIMEOUTS: Record<string, number> = {
   productShot: 12_000,
   collage: 15_000,
   tryOn: 120_000,
+  tryOnScene: 50_000,
+  tryOnVideo: 130_000,
   ping: 5_000,
 };
 

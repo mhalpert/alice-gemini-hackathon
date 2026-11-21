@@ -340,3 +340,93 @@ export async function runTryOnInspector(
     return { result: null, ms, error: message };
   }
 }
+
+export async function runSceneSafetyGate(
+  studioJpeg: Buffer,
+  sceneJpeg: Buffer,
+  pieces: Piece[],
+  opts?: { timeoutMs?: number; model?: string },
+): Promise<{ same_person: number; all_pieces: number; ms: number } | null> {
+  const t0 = Date.now();
+  const model = opts?.model || process.env.ALICE_MODEL_GATE || DEFAULT_GATE_MODEL;
+  const timeoutMs =
+    opts?.timeoutMs ?? Number(process.env.ALICE_TRYON_GATE_TIMEOUT_MS ?? GATE_TIMEOUT_MS);
+
+  try {
+    const key = process.env.GOOGLE_TRYON_API_KEY || process.env.GOOGLE_API_KEY;
+    if (!key) throw new Error('missing API key');
+
+    const [studioB64, sceneB64] = await Promise.all([
+      shrinkForVision(studioJpeg, 512),
+      shrinkForVision(sceneJpeg, 512),
+    ]);
+
+    const { listText } = formatPiecesForInspect(pieces);
+
+    const res = await fetch(DECISIONS_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-goog-api-key': key,
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+      body: JSON.stringify({
+        model,
+        input: [
+          {
+            type: 'text',
+            text: `Compare Image 2 (the person placed in a real-world scene) against Image 1 (the studio reference photo of the shopper in the outfit).\nOutfit pieces:\n${listText}`,
+          },
+          { type: 'text', text: 'Image 1 — Studio reference photo:' },
+          { type: 'image', data: studioB64, mime_type: 'image/jpeg' },
+          { type: 'text', text: 'Image 2 — Scene photo to verify:' },
+          { type: 'image', data: sceneB64, mime_type: 'image/jpeg' },
+        ],
+        questions: {
+          same_person: {
+            type: 'noul',
+            instructions:
+              'Is the person in Image 2 clearly the exact same person as in Image 1 (same face, hair, skin tone, and build)? Answer no if a different face or person was substituted.',
+          },
+          all_pieces: {
+            type: 'noul',
+            instructions:
+              'Is the person in Image 2 wearing the same outfit from Image 1 with every listed garment and shoe present and matching in colour and style?',
+          },
+        },
+      }),
+    });
+
+    const body = (await res.json().catch(() => ({}))) as {
+      error?: { message?: string };
+      usage?: { input_tokens?: number };
+      usageMetadata?: { promptTokenCount?: number };
+      answers?: Record<string, { noul?: number }>;
+    };
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${body?.error?.message ?? 'scene gate failed'}`.slice(0, 200));
+    }
+
+    const ms = Date.now() - t0;
+    void recordCost({
+      model,
+      job: 'tryon-gate',
+      input_tokens: body?.usage?.input_tokens ?? body?.usageMetadata?.promptTokenCount ?? 0,
+      output_tokens: 0,
+      ms,
+    });
+
+    const same_person = Number(body?.answers?.same_person?.noul);
+    const all_pieces = Number(body?.answers?.all_pieces?.noul);
+    if (!Number.isFinite(same_person) || !Number.isFinite(all_pieces)) {
+      return null;
+    }
+
+    return { same_person, all_pieces, ms };
+  } catch (err) {
+    const ms = Date.now() - t0;
+    console.error(`[media] scene-gate skipped (${ms}ms): ${(err as Error)?.message ?? err}`);
+    return null;
+  }
+}

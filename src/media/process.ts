@@ -1,6 +1,7 @@
 import path from 'node:path';
 import type { Item, Outfit } from '../types.ts';
 import { buildCollage } from './collage.ts';
+import { renderTryOnScene, renderTryOnVideo } from './extras.ts';
 import { REPO_ROOT } from './pure.ts';
 import { getProductShot } from './shots.ts';
 import { renderTryOn } from './tryon-render.ts';
@@ -54,6 +55,24 @@ async function handleOp(op: string, args: unknown): Promise<unknown> {
         opts?: { label?: string };
       };
       return renderTryOn(personJpeg ?? null, outfit, opts);
+    }
+
+    case 'tryOnScene': {
+      const { studio, outfit, opts } = (args ?? {}) as {
+        studio: { path: string };
+        outfit: Outfit;
+        opts: { setting: string; label?: string };
+      };
+      return renderTryOnScene(studio, outfit, opts);
+    }
+
+    case 'tryOnVideo': {
+      const { still, outfit, opts } = (args ?? {}) as {
+        still: { path: string };
+        outfit: Outfit;
+        opts: { setting: string; label?: string; seconds?: number };
+      };
+      return renderTryOnVideo(still, outfit, opts);
     }
 
     default:
