@@ -759,6 +759,198 @@ export interface TryOnInspectorResult {
 
 export type TryOnCheckPath = 'pass' | 'redo' | 'redo_skipped' | 'inspector_overruled';
 
+export type ShopperPhotoStatus = 'camera' | 'none' | 'test';
+
+export interface ShopperPhotoScores {
+  person_visible: number;
+  torso_visible: number;
+  usable: number;
+}
+
+export interface ShopperPhotoCheckResult {
+  scores: ShopperPhotoScores | null;
+  ms: number;
+  cached?: boolean;
+  error?: string;
+}
+
+export interface ShopperPhotoDecision {
+  useSnapshot: boolean;
+  shopper_photo: ShopperPhotoStatus;
+  shopper_notes?: string;
+  scores: ShopperPhotoScores | null;
+  ms: number;
+  cached?: boolean;
+}
+
+export const SHOPPER_PHOTO_THRESHOLD = 0.5;
+export const SHOPPER_PHOTO_FACE_ONLY_NOTE = 'only the face is visible';
+
+export function hashImageBytes(bytes: Uint8Array | Buffer): string {
+  return crypto.createHash('sha256').update(bytes).digest('hex');
+}
+
+export function evaluateShopperPhoto(
+  scores: ShopperPhotoScores | null,
+  ms: number,
+  cached = false,
+): ShopperPhotoDecision {
+  if (!scores) {
+    return {
+      useSnapshot: true,
+      shopper_photo: 'camera',
+      scores: null,
+      ms,
+      cached,
+    };
+  }
+
+  if (scores.person_visible < SHOPPER_PHOTO_THRESHOLD) {
+    return {
+      useSnapshot: false,
+      shopper_photo: 'none',
+      scores,
+      ms,
+      cached,
+    };
+  }
+
+  return {
+    useSnapshot: true,
+    shopper_photo: 'camera',
+    ...(scores.torso_visible < SHOPPER_PHOTO_THRESHOLD
+      ? { shopper_notes: SHOPPER_PHOTO_FACE_ONLY_NOTE }
+      : {}),
+    scores,
+    ms,
+    cached,
+  };
+}
+
+export interface ShopperPhotoCache {
+  check(bytes: Uint8Array | Buffer): Promise<ShopperPhotoCheckResult>;
+  clear(): void;
+  size(): number;
+}
+
+export function createShopperPhotoCache(
+  checkFn: (bytes: Buffer) => Promise<ShopperPhotoCheckResult>,
+): ShopperPhotoCache {
+  const cache = new Map<string, ShopperPhotoScores | null>();
+  const inflight = new Map<string, Promise<ShopperPhotoCheckResult>>();
+
+  async function check(bytes: Uint8Array | Buffer): Promise<ShopperPhotoCheckResult> {
+    const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+    const key = hashImageBytes(buf);
+
+    if (cache.has(key)) {
+      return {
+        scores: cache.get(key) ?? null,
+        ms: 0,
+        cached: true,
+      };
+    }
+
+    const pending = inflight.get(key);
+    if (pending) {
+      const res = await pending;
+      return {
+        scores: res.scores,
+        ms: 0,
+        cached: true,
+      };
+    }
+
+    const p = (async (): Promise<ShopperPhotoCheckResult> => {
+      try {
+        const res = await checkFn(buf);
+        cache.set(key, res.scores);
+        return res;
+      } catch (err) {
+        cache.set(key, null);
+        return {
+          scores: null,
+          ms: 0,
+          error: (err as Error)?.message ?? String(err),
+        };
+      } finally {
+        inflight.delete(key);
+      }
+    })();
+
+    inflight.set(key, p);
+    return p;
+  }
+
+  return {
+    check,
+    clear: () => {
+      cache.clear();
+      inflight.clear();
+    },
+    size: () => cache.size,
+  };
+}
+
+export interface ResolveShopperPhotoDeps<TImage> {
+  personInput: Uint8Array | Buffer | null;
+  checkPhoto: (bytes: Uint8Array | Buffer) => Promise<ShopperPhotoCheckResult>;
+  prepareSnapshot: (bytes: Uint8Array | Buffer) => Promise<TImage>;
+  getTestShopper: () => Promise<TImage>;
+}
+
+export interface ResolveShopperPhotoResult<TImage> {
+  shopper: TImage;
+  shopper_photo: ShopperPhotoStatus;
+  shopper_notes?: string;
+  shopper_photo_scores?: ShopperPhotoScores | null;
+  ms_shopper_photo: number;
+}
+
+export async function resolveShopperPhoto<TImage>(
+  deps: ResolveShopperPhotoDeps<TImage>,
+): Promise<ResolveShopperPhotoResult<TImage>> {
+  if (!deps.personInput || deps.personInput.byteLength === 0) {
+    const shopper = await deps.getTestShopper();
+    return {
+      shopper,
+      shopper_photo: 'test',
+      ms_shopper_photo: 0,
+    };
+  }
+
+  let checkRes: ShopperPhotoCheckResult;
+  try {
+    checkRes = await deps.checkPhoto(deps.personInput);
+  } catch (err) {
+    checkRes = {
+      scores: null,
+      ms: 0,
+      error: (err as Error)?.message ?? String(err),
+    };
+  }
+
+  const decision = evaluateShopperPhoto(checkRes.scores, checkRes.ms, checkRes.cached);
+  if (decision.useSnapshot) {
+    const shopper = await deps.prepareSnapshot(deps.personInput);
+    return {
+      shopper,
+      shopper_photo: decision.shopper_photo,
+      ...(decision.shopper_notes ? { shopper_notes: decision.shopper_notes } : {}),
+      shopper_photo_scores: decision.scores,
+      ms_shopper_photo: decision.ms,
+    };
+  }
+
+  const shopper = await deps.getTestShopper();
+  return {
+    shopper,
+    shopper_photo: decision.shopper_photo,
+    shopper_photo_scores: decision.scores,
+    ms_shopper_photo: decision.ms,
+  };
+}
+
 export interface TryOnCheck {
   gate: TryOnGateScores | null;
   inspector: TryOnInspectorResult | null;
@@ -771,6 +963,10 @@ export interface TryOnCheck {
   ms_gate: number;
   ms_inspector: number;
   ms_total: number;
+  shopper_photo?: ShopperPhotoStatus;
+  shopper_notes?: string;
+  shopper_photo_scores?: ShopperPhotoScores | null;
+  ms_shopper_photo?: number;
 }
 
 export const GATE_PASS_THRESHOLD = 0.6;
