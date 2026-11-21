@@ -5,6 +5,7 @@ import {
   createCallStateStore,
   createInitialCallState,
   extractNameFromFact,
+  normalizeSlotKey,
   reduceCallState,
   summarize,
 } from '../src/agent/state.ts';
@@ -336,4 +337,43 @@ test('merge_sizes replaces previously remembered sizes on explicit correction an
     bottom: '30x34',
     shoes: '8.5 wide',
   });
+});
+
+test('CallStateStore keeps recent shopper turns deduplicated and capped without emitting call_state updates', () => {
+  const sent: string[] = [];
+  const logs: Array<{ room: string; ev: string }> = [];
+  const appContext = new AppContextSender({
+    send: (text) => sent.push(text),
+    initialState: 'listening',
+  });
+  const store = createCallStateStore({
+    roomName: 'turns-room',
+    appContext,
+    log: (room, ev) => logs.push({ room, ev }),
+  });
+
+  store.recordShopperTurn('Medium top, 32 waist, shoes 10 and a half.', 'item-1');
+  // Duplicate by itemId (e.g. both UserInputTranscribed and ConversationItemAdded) does not double-store.
+  store.recordShopperTurn('Medium top, 32 waist, shoes 10 and a half.', 'item-1');
+  // Consecutive identical text without itemId is also deduplicated.
+  store.recordShopperTurn('Medium top, 32 waist, shoes 10 and a half.');
+  assert.deepEqual(store.getRecentShopperTurns(), [
+    'Medium top, 32 waist, shoes 10 and a half.',
+  ]);
+  assert.equal(sent.length, 0, 'recording shopper turns must not spam CALL STATE');
+  assert.equal(logs.length, 0);
+
+  // Caps at last 10 turns.
+  for (let i = 2; i <= 12; i++) {
+    store.recordShopperTurn(`turn ${i}`, `item-${i}`);
+  }
+  const recent = store.getRecentShopperTurns();
+  assert.equal(recent.length, 10);
+  assert.equal(recent[0], 'turn 3');
+  assert.equal(recent[9], 'turn 12');
+
+  // normalizeSlotKey maps outerwear/blazer/jacket to layer.
+  assert.equal(normalizeSlotKey('outerwear'), 'layer');
+  assert.equal(normalizeSlotKey('blazer'), 'layer');
+  assert.equal(normalizeSlotKey('jacket'), 'layer');
 });

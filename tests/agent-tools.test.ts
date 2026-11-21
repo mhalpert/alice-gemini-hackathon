@@ -1878,3 +1878,330 @@ test('add_to_bag schema allows exact sizes and explicit corrections replace earl
   assert.equal(receivedSizes.length, 2);
   assert.match(dedupedClean, /^Already in the bag\./);
 });
+
+test('show_on_me and add_to_bag never ask for jacket, belt, or accessory sizes and log inferred sizes', async () => {
+  const logs: RecordedLog[] = [];
+  const { page } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-infer', log: () => {} });
+  const receivedSizes: Array<Record<string, string>> = [];
+
+  const layeredOutfit: Outfit = {
+    number: 1,
+    name: 'SoHo Evening',
+    difference: 'Jacket, trouser, belt, and cap.',
+    story: 'Sharp city look.',
+    total: 290,
+    pieces: [
+      {
+        slot: 'top',
+        why: 'Clean base.',
+        item: makeItem({ id: 'i-top', variant_id: 'v-top', title: 'Heavyweight Tee', price: 40, sizes: ['S', 'M', 'L'] }),
+      },
+      {
+        slot: 'bottom',
+        why: 'Tailored drape.',
+        item: makeItem({ id: 'i-bot', variant_id: 'v-bot', title: 'Relaxed Chino', price: 65, sizes: ['30', '32', '34'] }),
+      },
+      {
+        slot: 'layer',
+        why: 'Structure.',
+        item: makeItem({ id: 'i-lay', variant_id: 'v-lay', title: 'Suede Overshirt Jacket', price: 95, sizes: ['S', 'M', 'L'] }),
+      },
+      {
+        slot: 'shoes',
+        why: 'Finishes the stance.',
+        item: makeItem({ id: 'i-sho', variant_id: 'v-sho', title: 'Suede Derby', price: 50, sizes: ['9', '10', '11'] }),
+      },
+      {
+        slot: 'accessory',
+        why: 'Pulls waist together.',
+        item: makeItem({ id: 'i-belt', variant_id: 'v-belt', title: 'Italian Leather Belt', price: 25, sizes: ['30', '32', '34', '36'] }),
+      },
+      {
+        slot: 'bag',
+        why: 'Everyday carry.',
+        item: makeItem({ id: 'i-bag', variant_id: 'v-bag', title: 'Nylon Crossbody Bag', price: 15, sizes: ['Small', 'Medium', 'Large'] }),
+      },
+    ],
+  };
+
+  const tools = createAgentTools({
+    room: 'r-infer',
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    page,
+    state,
+    deps: makeFakeDeps({
+      async buildOutfits(_brief, opts) {
+        opts?.onOutfit?.(layeredOutfit, 0);
+        return {
+          outfits: [layeredOutfit],
+          source: 'live',
+          timing: { first_outfit_ms: 40, total_ms: 40 },
+          problems: [],
+        };
+      },
+      async addToBag(_outfit, sizes): Promise<BagOut> {
+        receivedSizes.push({ ...sizes });
+        return {
+          carts: [
+            {
+              store: 'Everlane',
+              store_domain: 'everlane.myshopify.com',
+              cart_id: 'cart-infer-1',
+              continue_url: 'https://everlane.com/cart/infer-1',
+              total_usd: 290,
+              added: layeredOutfit.pieces.map((p) => ({
+                variant_id: p.item.variant_id,
+                title: p.item.title,
+                size: sizes[p.slot.toLowerCase()] ?? null,
+              })),
+              not_added: [],
+              ms: 30,
+            },
+          ],
+          summary: 'Added 6 items.',
+          total_usd: 290,
+        };
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute({ occasion: 'dinner', budget_usd: 350 }, fakeToolOpts('b1'));
+  await flushMicrotasks();
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+
+  // 1) show_on_me asks ONLY for top, bottom, and shoe sizes (never jacket/layer/belt/accessory/bag).
+  const showRes = await tools.show_on_me.execute({}, fakeToolOpts('s1'));
+  assert.match(showRes, /top, bottom, and shoe sizes/i);
+  assert.doesNotMatch(showRes, /jacket|layer|belt|accessory|bag size/i);
+
+  // 2) add_to_bag with only top -> reports ONLY bottom and shoes missing (never layer/accessory/belt/bag).
+  const notDone = await tools.add_to_bag.execute({ sizes: { top: 'M' } }, fakeToolOpts('bag-1'));
+  assert.equal(notDone.startsWith('NOT DONE:'), true);
+  assert.match(notDone, /Still need sizes for: bottom, shoes\./);
+  assert.doesNotMatch(notDone, /\b(?:layer|jacket|belt|accessory|bag)\b/i);
+
+  // 3) add_to_bag with bottom + shoes -> infers layer=M, accessory(belt)=32, bag=Medium, logs inferred, adds note!
+  const done = await tools.add_to_bag.execute(
+    { sizes: { bottom: '32', shoes: '10' } },
+    fakeToolOpts('bag-2'),
+  );
+  assert.equal(receivedSizes.length, 1);
+  assert.equal(receivedSizes[0]!.top, 'M');
+  assert.equal(receivedSizes[0]!.bottom, '32');
+  assert.equal(receivedSizes[0]!.shoes, '10');
+  assert.equal(receivedSizes[0]!.layer, 'M');
+  assert.equal(receivedSizes[0]!.accessory, '32');
+  assert.equal(receivedSizes[0]!.bag, 'Medium');
+  assert.match(done, /matched the jacket to their top size and the belt to their waist/i);
+
+  // Inferred sizes must be logged in the bag event, without polluting state.sizes.
+  const bagLog = logs.find((l) => l.ev === 'bag');
+  assert.ok(bagLog);
+  assert.deepEqual(bagLog!.data?.inferred, { layer: 'M', belt: '32', bag: 'Medium' });
+  assert.deepEqual(state.get().sizes, { top: 'M', bottom: '32', shoes: '10' });
+});
+
+test('add_to_bag auto-infers multi-size belt or accessory discovered by store when Item.sizes was empty', async () => {
+  const logs: RecordedLog[] = [];
+  const { page } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-store-infer', log: () => {} });
+  let storeCalls = 0;
+
+  const outfit: Outfit = {
+    number: 1,
+    name: 'City Crisp',
+    difference: 'Clean trouser look with belt and cuff.',
+    story: 'Effortless.',
+    total: 180,
+    pieces: [
+      { slot: 'top', why: 'Base.', item: makeItem({ id: 't1', variant_id: 'vt', title: 'Cotton Polo', price: 60, sizes: ['S', 'M', 'L'] }) },
+      { slot: 'bottom', why: 'Leg.', item: makeItem({ id: 'b1', variant_id: 'vb', title: 'Tailored Pant', price: 80, sizes: ['30', '32', '34'] }) },
+      { slot: 'accessory', why: 'Finish.', item: makeItem({ id: 'a1', variant_id: 'va', title: 'Woven Belt', price: 40, sizes: [] }) },
+    ],
+  };
+
+  const tools = createAgentTools({
+    room: 'r-store-infer',
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    page,
+    state,
+    deps: makeFakeDeps({
+      async buildOutfits(_brief, opts) {
+        opts?.onOutfit?.(outfit, 0);
+        return { outfits: [outfit], source: 'live', timing: { first_outfit_ms: 20, total_ms: 20 }, problems: [] };
+      },
+      async addToBag(_outfit, sizes): Promise<BagOut> {
+        storeCalls++;
+        // First call: store has S/M/L on the belt (Item.sizes was empty) and refuses raw "32" or missing accessory.
+        if (storeCalls === 1) {
+          return {
+            carts: [
+              {
+                store: 'Everlane',
+                store_domain: 'everlane.myshopify.com',
+                cart_id: null,
+                continue_url: null,
+                total_usd: null,
+                added: [],
+                not_added: [
+                  {
+                    variant_id: 'va',
+                    title: 'Woven Belt',
+                    slot: 'accessory',
+                    reason: 'no accessory size given (sizes: S, M, L)',
+                  } as BagLineNotAdded,
+                ],
+                ms: 10,
+              },
+            ],
+            summary: 'NOT DONE: Woven Belt (accessory) still need a size.',
+            total_usd: 0,
+          };
+        }
+        return {
+          carts: [
+            {
+              store: 'Everlane',
+              store_domain: 'everlane.myshopify.com',
+              cart_id: 'cart-si-1',
+              continue_url: 'https://everlane.com/cart/si-1',
+              total_usd: 180,
+              added: [
+                { variant_id: 'vt', title: 'Cotton Polo', size: sizes.top },
+                { variant_id: 'vb', title: 'Tailored Pant', size: sizes.bottom },
+                { variant_id: 'va', title: 'Woven Belt', size: sizes.accessory },
+              ],
+              not_added: [],
+              ms: 15,
+            },
+          ],
+          summary: 'Added 3 items.',
+          total_usd: 180,
+        };
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute({ occasion: 'dinner', budget_usd: 250 }, fakeToolOpts('b1'));
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+
+  const res = await tools.add_to_bag.execute(
+    { sizes: { top: 'M', bottom: '32' } },
+    fakeToolOpts('bag-si-1'),
+  );
+  assert.equal(storeCalls, 2);
+  assert.match(res, /^Added 3 pieces, total \$180/);
+  assert.match(res, /Woven Belt \(size M\)/);
+  assert.match(res, /matched the belt to their waist/i);
+  const bagLog = logs.find((l) => l.ev === 'bag');
+  assert.deepEqual(bagLog?.data?.inferred, { belt: 'M' });
+});
+
+test('add_to_bag recovers omitted sizes from recent shopper turns and logs size_mismatch without overriding', async () => {
+  const logs: RecordedLog[] = [];
+  const { page } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-speech-net', log: () => {} });
+  const receivedSizes: Array<Record<string, string>> = [];
+
+  const tools = createAgentTools({
+    room: 'r-speech-net',
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    page,
+    state,
+    deps: makeFakeDeps({
+      async addToBag(_outfit, sizes): Promise<BagOut> {
+        receivedSizes.push({ ...sizes });
+        return {
+          carts: [
+            {
+              store: 'Everlane',
+              store_domain: 'everlane.myshopify.com',
+              cart_id: 'cart-net-1',
+              continue_url: 'https://everlane.com/cart/net-1',
+              total_usd: 160,
+              added: [
+                { variant_id: 'var-top-m', title: 'Merino Knit Polo - Espresso', size: sizes.top },
+                { variant_id: 'var-bottom-1', title: 'Pleated Wool Trouser - Charcoal', size: sizes.bottom },
+                { variant_id: 'var-shoes-1', title: 'Minimal Leather Sneaker - White', size: sizes.shoes },
+              ],
+              not_added: [],
+              ms: 20,
+            },
+          ],
+          summary: 'Added 3 items.',
+          total_usd: 160,
+        };
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute({ occasion: 'dinner', budget_usd: 250 }, fakeToolOpts('b1'));
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+
+  // Exact real-call failure: shopper typed all 3 sizes, model only passed top and bottom!
+  state.recordShopperTurn('Medium top, 32 waist, shoes 10 and a half.', 'typed-1');
+
+  const res = await tools.add_to_bag.execute(
+    { sizes: { top: 'medium', bottom: '32' } },
+    fakeToolOpts('bag-net-1'),
+  );
+  assert.match(res, /^Added 3 pieces, total \$160/);
+  assert.equal(receivedSizes.length, 1);
+  assert.equal(receivedSizes[0]!.top, 'medium');
+  assert.equal(receivedSizes[0]!.bottom, '32');
+  assert.equal(receivedSizes[0]!.shoes, '10.5');
+  assert.equal(state.get().sizes.shoes, '10.5');
+  // Equivalent spellings ("medium" vs "M", "32" vs "32") must NOT log size_mismatch.
+  assert.equal(logs.filter((l) => l.ev === 'size_mismatch').length, 0);
+
+  // If model passes a size differing from what the most recent shopper turn states,
+  // do NOT override the model's value, but log size_mismatch with both values.
+  state.recordShopperTurn('Actually 30 by 34 pants and large top.', 'typed-2');
+  await tools.add_to_bag.execute(
+    { sizes: { top: 'S', bottom: '30x34', shoes: '10.5' } },
+    fakeToolOpts('bag-net-2'),
+  );
+  assert.equal(receivedSizes.length, 2);
+  assert.equal(receivedSizes[1]!.top, 'S', 'model value must NOT be overridden on mismatch');
+  assert.equal(receivedSizes[1]!.bottom, '30x34');
+
+  const mismatches = logs.filter((l) => l.ev === 'size_mismatch');
+  assert.equal(mismatches.length, 1);
+  assert.deepEqual(mismatches[0]!.data, {
+    slot: 'top',
+    model: 'S',
+    shopper: 'L',
+  });
+});
+
+test('createAgentTools invokes onToolResult callback when build_outfits, show_on_me, and add_to_bag finish', async () => {
+  const { page } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-onresult', log: () => {} });
+  const results: Array<{ name: string; callId: string; text: string }> = [];
+
+  const tools = createAgentTools({
+    room: 'r-onresult',
+    log: () => {},
+    page,
+    state,
+    onToolResult: (ev) => results.push(ev),
+    deps: makeFakeDeps(),
+  });
+
+  await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute({ occasion: 'date', budget_usd: 200 }, fakeToolOpts('b1'));
+  await flushMicrotasks();
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+  await tools.show_on_me.execute({}, fakeToolOpts('s1'));
+  await tools.add_to_bag.execute({ sizes: { top: 'M', shoes: '10' } }, fakeToolOpts('bag1'));
+
+  const names = results.map((r) => r.name);
+  assert.ok(names.includes('build_outfits'));
+  assert.ok(names.includes('show_on_me'));
+  assert.ok(names.includes('add_to_bag'));
+  assert.equal(results.find((r) => r.name === 'build_outfits')?.callId, 'b1');
+});

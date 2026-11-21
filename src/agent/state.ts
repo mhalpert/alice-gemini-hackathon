@@ -128,7 +128,16 @@ export function normalizeSlotKey(rawSlot: string): string {
   }
   if (clean === 'accessories') return 'accessory';
   if (clean === 'dresses') return 'dress';
-  if (clean === 'layers' || clean === 'jacket' || clean === 'coat') return 'layer';
+  if (
+    clean === 'layers' ||
+    clean === 'jacket' ||
+    clean === 'coat' ||
+    clean === 'outerwear' ||
+    clean === 'blazer' ||
+    clean === 'cardigan'
+  ) {
+    return 'layer';
+  }
   return clean;
 }
 
@@ -542,16 +551,21 @@ export interface CallStateStoreOptions {
   initial?: Partial<CallState>;
 }
 
+const MAX_SHOPPER_TURNS = 10;
+
 export interface CallStateStore {
   get(): CallState;
   dispatch(action: CallStateAction): string[];
   summarize(): string;
   pushSummary(): string;
+  recordShopperTurn(text: string, itemId?: string | null): void;
+  getRecentShopperTurns(): readonly string[];
 }
 
 export function createCallStateStore(options: CallStateStoreOptions): CallStateStore {
   const logFn = options.log ?? calllog;
   let current = createInitialCallState(options.initial);
+  const recentShopperTurns: Array<{ text: string; itemId?: string }> = [];
 
   function pushSummary(): string {
     const text = summarize(current);
@@ -568,10 +582,45 @@ export function createCallStateStore(options: CallStateStoreOptions): CallStateS
     return changed;
   }
 
+  function recordShopperTurn(text: string, itemId?: string | null): void {
+    const clean = typeof text === 'string' ? text.trim().replace(/\s+/g, ' ') : '';
+    if (!clean) return;
+    const cleanId = typeof itemId === 'string' && itemId.trim().length > 0 ? itemId.trim() : undefined;
+
+    if (cleanId) {
+      const existing = recentShopperTurns.find((entry) => entry.itemId === cleanId);
+      if (existing) {
+        if (clean.length > existing.text.length) {
+          existing.text = clean;
+        }
+        return;
+      }
+    }
+
+    const last = recentShopperTurns[recentShopperTurns.length - 1];
+    if (last && last.text.toLowerCase() === clean.toLowerCase()) {
+      if (cleanId && !last.itemId) {
+        last.itemId = cleanId;
+      }
+      return;
+    }
+
+    recentShopperTurns.push({ text: clean, ...(cleanId ? { itemId: cleanId } : {}) });
+    if (recentShopperTurns.length > MAX_SHOPPER_TURNS) {
+      recentShopperTurns.splice(0, recentShopperTurns.length - MAX_SHOPPER_TURNS);
+    }
+  }
+
+  function getRecentShopperTurns(): readonly string[] {
+    return recentShopperTurns.map((entry) => entry.text);
+  }
+
   return {
     get: () => current,
     dispatch,
     summarize: () => summarize(current),
     pushSummary,
+    recordShopperTurn,
+    getRecentShopperTurns,
   };
 }
