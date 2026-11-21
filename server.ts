@@ -170,11 +170,73 @@ async function readOptionalJsonBody(req: IncomingMessage): Promise<Record<string
   });
 }
 
+type ParsedByteRange =
+  | { kind: 'none' }
+  | { kind: 'ignore' }
+  | { kind: 'invalid' }
+  | { kind: 'range'; start: number; end: number };
+
+function parseSingleByteRange(rangeHeader: string | undefined, totalSize: number): ParsedByteRange {
+  if (!rangeHeader || !rangeHeader.trim()) {
+    return { kind: 'none' };
+  }
+  const trimmed = rangeHeader.trim();
+  if (!/^bytes=/i.test(trimmed)) {
+    return { kind: 'invalid' };
+  }
+  const spec = trimmed.slice(6).trim();
+  if (!spec) {
+    return { kind: 'invalid' };
+  }
+  if (spec.includes(',')) {
+    return { kind: 'ignore' };
+  }
+  const match = /^(\d*)-(\d*)$/.exec(spec);
+  if (!match || (match[1] === '' && match[2] === '')) {
+    return { kind: 'invalid' };
+  }
+  if (totalSize <= 0) {
+    return { kind: 'invalid' };
+  }
+
+  const rawStart = match[1];
+  const rawEnd = match[2];
+
+  // Suffix range: bytes=-suffix
+  if (rawStart === '') {
+    const suffix = Number(rawEnd);
+    if (!Number.isSafeInteger(suffix) || suffix <= 0) {
+      return { kind: 'invalid' };
+    }
+    const start = Math.max(0, totalSize - suffix);
+    return { kind: 'range', start, end: totalSize - 1 };
+  }
+
+  const start = Number(rawStart);
+  if (!Number.isSafeInteger(start) || start < 0 || start >= totalSize) {
+    return { kind: 'invalid' };
+  }
+
+  // Open-ended range: bytes=start-
+  if (rawEnd === '') {
+    return { kind: 'range', start, end: totalSize - 1 };
+  }
+
+  // Closed range: bytes=start-end
+  const requestedEnd = Number(rawEnd);
+  if (!Number.isSafeInteger(requestedEnd) || requestedEnd < start) {
+    return { kind: 'invalid' };
+  }
+  const end = Math.min(requestedEnd, totalSize - 1);
+  return { kind: 'range', start, end };
+}
+
 async function serveFile(
   res: ServerResponse,
   method: string,
   filePath: string,
   extraHeaders: Record<string, string>,
+  rangeOpts?: { enableRange: boolean; rangeHeader?: string },
 ): Promise<void> {
   let stat: fs.Stats;
   try {
@@ -189,21 +251,59 @@ async function serveFile(
     return;
   }
 
+  const enableRange = Boolean(rangeOpts?.enableRange);
+  let status = 200;
+  let start: number | undefined;
+  let end: number | undefined;
+  let contentLength = stat.size;
+  const rangeHeaders: Record<string, string> = {};
+
+  if (enableRange) {
+    rangeHeaders['Accept-Ranges'] = 'bytes';
+    const parsed = parseSingleByteRange(rangeOpts?.rangeHeader, stat.size);
+    if (parsed.kind === 'invalid') {
+      const headers416: Record<string, string> = {
+        'Content-Range': `bytes */${stat.size}`,
+        'Accept-Ranges': 'bytes',
+        'X-Content-Type-Options': 'nosniff',
+        ...extraHeaders,
+      };
+      if (method === 'HEAD') {
+        res.writeHead(416, { ...headers416, 'Content-Length': '0' });
+        res.end();
+      } else {
+        sendText(res, 416, 'Range Not Satisfiable', headers416);
+      }
+      return;
+    }
+    if (parsed.kind === 'range') {
+      status = 206;
+      start = parsed.start;
+      end = parsed.end;
+      contentLength = end - start + 1;
+      rangeHeaders['Content-Range'] = `bytes ${start}-${end}/${stat.size}`;
+    }
+  }
+
   const headers: Record<string, string> = {
     'Content-Type': contentTypeFor(filePath),
-    'Content-Length': String(stat.size),
+    'Content-Length': String(contentLength),
     'X-Content-Type-Options': 'nosniff',
+    ...rangeHeaders,
     ...extraHeaders,
   };
 
   if (method === 'HEAD') {
-    res.writeHead(200, headers);
+    res.writeHead(status, headers);
     res.end();
     return;
   }
 
   await new Promise<void>((resolve) => {
-    const stream = fs.createReadStream(filePath);
+    const stream =
+      start !== undefined && end !== undefined
+        ? fs.createReadStream(filePath, { start, end })
+        : fs.createReadStream(filePath);
     let settled = false;
     const done = (): void => {
       if (!settled) {
@@ -213,7 +313,7 @@ async function serveFile(
     };
 
     stream.once('open', () => {
-      res.writeHead(200, headers);
+      res.writeHead(status, headers);
       stream.pipe(res);
     });
 
@@ -1015,10 +1115,24 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
           return;
         }
 
-        await serveFile(res, method, filePath, {
-          'Cache-Control': 'public, max-age=3600',
-          'Access-Control-Allow-Origin': '*',
-        });
+        const rawRange = req.headers.range;
+        const rangeHeader =
+          typeof rawRange === 'string'
+            ? rawRange
+            : Array.isArray(rawRange)
+              ? rawRange[0]
+              : undefined;
+
+        await serveFile(
+          res,
+          method,
+          filePath,
+          {
+            'Cache-Control': 'public, max-age=3600',
+            'Access-Control-Allow-Origin': '*',
+          },
+          { enableRange: true, rangeHeader },
+        );
         return;
       }
 
