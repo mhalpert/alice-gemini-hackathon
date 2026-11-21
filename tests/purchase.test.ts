@@ -1454,9 +1454,11 @@ describe('placeOrder safety gates, cart locks, session cap, polling, and purging
   }
 
   it('H1: same cart cannot be bought twice (supersedes earlier unplaced order, blocks re-prepare and re-place after send)', async () => {
-    const { purchase, bag, reviewed: order1, calls } = await setupPrepared();
+    const { purchase, bag, reviewed: order1, calls, advanceClock } = await setupPrepared();
 
-    // Second prepareOrder on the SAME bag supersedes order1 and purges its raw instrument (L3)
+    // Advance past the 8s unchanged-bag reuse window so the second prepareOrder creates a fresh
+    // review that supersedes order1 and purges its raw instrument (L3).
+    advanceClock(8_001);
     const order2 = await purchase.prepareOrder(bag);
     assert.notEqual(order2.order_id, order1.order_id);
     assert.equal(purchase._debugStats().pendingReviews, 1);
@@ -2638,6 +2640,665 @@ describe('re-made bag double-charge protection (R1 unclear store, R2 already ord
     assert.equal(res2.stores[0].status, 'placed');
     assert.equal(res2.stores[0].order_number, 'ORD-RETRY-OK');
     assert.equal(calls.filter((c) => c.name === 'complete_checkout').length, 2);
+  });
+});
+
+describe('checkout fulfillment line_item_ids (FIX 1, Addendum A & B) and repeat prepareOrder reuse (FIX 2, Addendum C)', () => {
+  function jsonRpcError(message: string): Response {
+    return new Response(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        error: { code: -32602, message },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  }
+
+  function validateUpdateMethods(args: any): string | null {
+    const methods = args?.checkout?.fulfillment?.methods;
+    if (!Array.isArray(methods)) return null;
+    for (let i = 0; i < methods.length; i += 1) {
+      const ids = methods[i]?.line_item_ids;
+      if (
+        !Array.isArray(ids) ||
+        ids.length === 0 ||
+        !ids.every((x: unknown) => typeof x === 'string' && x.trim().length > 0)
+      ) {
+        return `$.checkout.fulfillment.methods[${i}].line_item_ids: required property missing`;
+      }
+    }
+    return null;
+  }
+
+  const twoItemBag: BagOut = {
+    carts: [
+      {
+        store: 'Fashion Nova',
+        store_domain: 'fnova.myshopify.com',
+        cart_id: 'cart-fn-1',
+        continue_url: 'https://fnova.myshopify.com/cart/fn-1',
+        total_usd: 47.96,
+        added: [
+          {
+            variant_id: 'gid://shopify/ProductVariant/fn-1',
+            title: 'Straight Jeans',
+            size: '34',
+            slot: 'bottom',
+            image: 'https://cdn.example.com/fn1.jpg',
+            price: 27.96,
+            item_id: 'prod-fn-1',
+          } as any,
+          {
+            variant_id: 'gid://shopify/ProductVariant/fn-2',
+            title: 'Crew Tee',
+            size: 'L',
+            slot: 'top',
+            image: 'https://cdn.example.com/fn2.jpg',
+            price: 20.0,
+            item_id: 'prod-fn-2',
+          } as any,
+        ],
+        not_added: [],
+        ms: 10,
+      },
+    ],
+    summary: 'Bag ready',
+    total_usd: 47.96,
+  };
+
+  function twoLineItems() {
+    return [
+      {
+        id: 'line-a',
+        item: { id: 'gid://shopify/ProductVariant/fn-1', title: 'Straight Jeans', price: 2796 },
+        quantity: 1,
+        totals: [{ type: 'total', amount: 2796 }],
+      },
+      {
+        id: 'line-b',
+        item: { id: 'gid://shopify/ProductVariant/fn-2', title: 'Crew Tee', price: 2000 },
+        quantity: 1,
+        totals: [{ type: 'total', amount: 2000 }],
+      },
+    ];
+  }
+
+  it('store checkout with no methods: constructs method with all line_item_ids, logs order_checkout_update, and is ready ONLY when store returns default destination selected (Addendum B)', async () => {
+    const logs: Array<{ ev: string; data?: Record<string, unknown> }> = [];
+    setCallRoom(VALID_ROOM);
+    setCallLogSink((_room, ev, data) => logs.push({ ev, data }));
+    try {
+      // Sub-case 1: store returns default destination selected after update -> ready=true
+      {
+        let clock = 50_000_000;
+        const { auth, completeSignIn } = makeSignedInAuth('tok_fn_nomethods_1', () => clock);
+        await completeSignIn();
+        const updates: any[] = [];
+
+        const mcp = createShopMcp({
+          fetch: async (_u, init) => {
+            const body = JSON.parse(String(init?.body ?? '{}'));
+            const name = body.params?.name;
+            const args = body.params?.arguments ?? {};
+            if (name === 'get_account') return jsonRpcOk(makeFakeAccount());
+            if (name === 'create_checkout') {
+              const doc = makeCheckoutDoc({
+                id: 'chk_fn_1',
+                status: 'incomplete',
+                totalCents: 4796,
+                line_items: twoLineItems(),
+              });
+              doc.fulfillment = { methods: [] };
+              return jsonRpcOk(doc);
+            }
+            if (name === 'update_checkout') {
+              const errMsg = validateUpdateMethods(args);
+              if (errMsg) return jsonRpcError(errMsg);
+              updates.push(args.checkout);
+              return jsonRpcOk(
+                makeCheckoutDoc({
+                  id: 'chk_fn_1',
+                  status: 'ready_for_complete',
+                  totalCents: 4796,
+                  line_items: twoLineItems(),
+                  withAddress: true,
+                }),
+              );
+            }
+            throw new Error(`Unexpected ${name}`);
+          },
+          isPurchaseEnabled: () => true,
+          getAuthToken: () => auth.getToken(),
+        });
+
+        const purchase = createPurchaseClient({
+          mcp,
+          auth,
+          now: () => clock,
+          isPurchaseEnabled: () => true,
+          getRoom: () => VALID_ROOM,
+          isHarnessEnv: () => false,
+        });
+
+        const review = await purchase.prepareOrder(twoItemBag);
+        assert.equal(updates.length, 1);
+        assert.deepEqual(updates[0].fulfillment.methods[0].line_item_ids, ['line-a', 'line-b']);
+        assert.equal(updates[0].fulfillment.methods[0].type, 'shipping');
+        assert.equal(updates[0].fulfillment.methods[0].selected_destination_id, 'addr-brooklyn-1');
+        assert.equal(review.stores[0].ready, true);
+        assert.equal(review.address_label, 'Brooklyn, NY');
+
+        const updLog = logs.find((l) => l.ev === 'order_checkout_update');
+        assert.ok(updLog);
+        assert.deepEqual(updLog.data, {
+          store: 'Fashion Nova',
+          had_methods: false,
+          filled_line_item_ids: true,
+        });
+      }
+
+      // Sub-case 2 (Addendum B): store ignores our address and returns a different destination -> NOT ready, label from store
+      {
+        let clock = 50_100_000;
+        const { auth, completeSignIn } = makeSignedInAuth('tok_fn_nomethods_2', () => clock);
+        await completeSignIn();
+        const otherDest = makeFakeAddress({
+          id: 'addr-other',
+          address_locality: 'Austin',
+          address_region: 'TX',
+        });
+
+        const mcp = createShopMcp({
+          fetch: async (_u, init) => {
+            const body = JSON.parse(String(init?.body ?? '{}'));
+            const name = body.params?.name;
+            const args = body.params?.arguments ?? {};
+            if (name === 'get_account') return jsonRpcOk(makeFakeAccount());
+            if (name === 'create_checkout') {
+              const doc = makeCheckoutDoc({
+                id: 'chk_fn_2',
+                status: 'incomplete',
+                totalCents: 4796,
+                line_items: twoLineItems(),
+              });
+              delete (doc as any).fulfillment;
+              return jsonRpcOk(doc);
+            }
+            if (name === 'update_checkout') {
+              const errMsg = validateUpdateMethods(args);
+              if (errMsg) return jsonRpcError(errMsg);
+              return jsonRpcOk(
+                makeCheckoutDoc({
+                  id: 'chk_fn_2',
+                  status: 'ready_for_complete',
+                  totalCents: 4796,
+                  line_items: twoLineItems(),
+                  withAddress: true,
+                  address: otherDest,
+                }),
+              );
+            }
+            throw new Error(`Unexpected ${name}`);
+          },
+          isPurchaseEnabled: () => true,
+          getAuthToken: () => auth.getToken(),
+        });
+
+        const purchase = createPurchaseClient({
+          mcp,
+          auth,
+          now: () => clock,
+          isPurchaseEnabled: () => true,
+          getRoom: () => VALID_ROOM,
+          isHarnessEnv: () => false,
+        });
+
+        const review = await purchase.prepareOrder(twoItemBag);
+        assert.equal(review.stores[0].ready, false);
+        assert.equal(review.address_label, 'Austin, TX');
+        assert.ok(review.stores[0].continue_url);
+      }
+    } finally {
+      setCallLogSink(null);
+      setCallRoom(null);
+    }
+  });
+
+  it('store method missing line_item_ids is filled while preserving other method fields; partial store line_item_ids is sent back UNCHANGED (Addendum A)', async () => {
+    const logs: Array<{ ev: string; data?: Record<string, unknown> }> = [];
+    setCallRoom(VALID_ROOM);
+    setCallLogSink((_room, ev, data) => logs.push({ ev, data }));
+    try {
+      // Missing line_item_ids -> filled with all line item ids, other method fields preserved
+      {
+        let clock = 51_000_000;
+        const { auth, completeSignIn } = makeSignedInAuth('tok_fn_missing_ids', () => clock);
+        await completeSignIn();
+        const updates: any[] = [];
+
+        const mcp = createShopMcp({
+          fetch: async (_u, init) => {
+            const body = JSON.parse(String(init?.body ?? '{}'));
+            const name = body.params?.name;
+            const args = body.params?.arguments ?? {};
+            if (name === 'get_account') return jsonRpcOk(makeFakeAccount());
+            if (name === 'create_checkout') {
+              const doc = makeCheckoutDoc({
+                id: 'chk_missing',
+                status: 'incomplete',
+                totalCents: 4796,
+                line_items: twoLineItems(),
+              });
+              doc.fulfillment = {
+                methods: [
+                  {
+                    id: 'meth-store-1',
+                    type: 'shipping',
+                    destinations: [],
+                    custom_store_flag: 'keep-me',
+                  },
+                ],
+              };
+              return jsonRpcOk(doc);
+            }
+            if (name === 'update_checkout') {
+              const errMsg = validateUpdateMethods(args);
+              if (errMsg) return jsonRpcError(errMsg);
+              updates.push(args.checkout);
+              return jsonRpcOk(
+                makeCheckoutDoc({
+                  id: 'chk_missing',
+                  status: 'ready_for_complete',
+                  totalCents: 4796,
+                  line_items: twoLineItems(),
+                  withAddress: true,
+                }),
+              );
+            }
+            throw new Error(`Unexpected ${name}`);
+          },
+          isPurchaseEnabled: () => true,
+          getAuthToken: () => auth.getToken(),
+        });
+
+        const purchase = createPurchaseClient({
+          mcp,
+          auth,
+          now: () => clock,
+          isPurchaseEnabled: () => true,
+          getRoom: () => VALID_ROOM,
+          isHarnessEnv: () => false,
+        });
+
+        const review = await purchase.prepareOrder(twoItemBag);
+        assert.equal(review.stores[0].ready, true);
+        assert.equal(updates.length, 1);
+        assert.equal(updates[0].fulfillment.methods[0].id, 'meth-store-1');
+        assert.equal(updates[0].fulfillment.methods[0].custom_store_flag, 'keep-me');
+        assert.deepEqual(updates[0].fulfillment.methods[0].line_item_ids, ['line-a', 'line-b']);
+        const updLog1 = logs.find((l) => l.ev === 'order_checkout_update');
+        assert.ok(updLog1);
+        assert.deepEqual(updLog1.data, {
+          store: 'Fashion Nova',
+          had_methods: true,
+          filled_line_item_ids: true,
+        });
+      }
+
+      // Addendum A: store method ALREADY has partial line_item_ids: ['line-a'] -> sent back UNCHANGED, never widened
+      {
+        logs.length = 0;
+        let clock = 51_100_000;
+        const { auth, completeSignIn } = makeSignedInAuth('tok_fn_partial_ids', () => clock);
+        await completeSignIn();
+        const updates: any[] = [];
+
+        const mcp = createShopMcp({
+          fetch: async (_u, init) => {
+            const body = JSON.parse(String(init?.body ?? '{}'));
+            const name = body.params?.name;
+            const args = body.params?.arguments ?? {};
+            if (name === 'get_account') return jsonRpcOk(makeFakeAccount());
+            if (name === 'create_checkout') {
+              const doc = makeCheckoutDoc({
+                id: 'chk_partial',
+                status: 'incomplete',
+                totalCents: 4796,
+                line_items: twoLineItems(),
+              });
+              doc.fulfillment = {
+                methods: [
+                  {
+                    id: 'meth-partial',
+                    type: 'shipping',
+                    line_item_ids: ['line-a'],
+                    destinations: [],
+                  },
+                ],
+              };
+              return jsonRpcOk(doc);
+            }
+            if (name === 'update_checkout') {
+              const errMsg = validateUpdateMethods(args);
+              if (errMsg) return jsonRpcError(errMsg);
+              updates.push(args.checkout);
+              return jsonRpcOk(
+                makeCheckoutDoc({
+                  id: 'chk_partial',
+                  status: 'ready_for_complete',
+                  totalCents: 4796,
+                  line_items: twoLineItems(),
+                  withAddress: true,
+                }),
+              );
+            }
+            throw new Error(`Unexpected ${name}`);
+          },
+          isPurchaseEnabled: () => true,
+          getAuthToken: () => auth.getToken(),
+        });
+
+        const purchase = createPurchaseClient({
+          mcp,
+          auth,
+          now: () => clock,
+          isPurchaseEnabled: () => true,
+          getRoom: () => VALID_ROOM,
+          isHarnessEnv: () => false,
+        });
+
+        const review = await purchase.prepareOrder(twoItemBag);
+        assert.equal(review.stores[0].ready, true);
+        assert.equal(updates.length, 1);
+        assert.deepEqual(
+          updates[0].fulfillment.methods[0].line_item_ids,
+          ['line-a'],
+          'partial line_item_ids from store must be sent back unchanged and never widened',
+        );
+        const updLog2 = logs.find((l) => l.ev === 'order_checkout_update');
+        assert.ok(updLog2);
+        assert.deepEqual(updLog2.data, {
+          store: 'Fashion Nova',
+          had_methods: true,
+          filled_line_item_ids: false,
+        });
+      }
+    } finally {
+      setCallLogSink(null);
+      setCallRoom(null);
+    }
+  });
+
+  it('delivery-option update also carries line_item_ids; checkout with no line item string ids sends zero update_checkout and hands off with link', async () => {
+    // Sub-case 1: delivery-option update carries line_item_ids
+    {
+      let clock = 52_000_000;
+      const { auth, completeSignIn } = makeSignedInAuth('tok_fn_delivery', () => clock);
+      await completeSignIn();
+      const updates: any[] = [];
+      let updateCount = 0;
+
+      const mcp = createShopMcp({
+        fetch: async (_u, init) => {
+          const body = JSON.parse(String(init?.body ?? '{}'));
+          const name = body.params?.name;
+          const args = body.params?.arguments ?? {};
+          if (name === 'get_account') return jsonRpcOk(makeFakeAccount());
+          if (name === 'create_checkout') {
+            const doc = makeCheckoutDoc({
+              id: 'chk_deliv',
+              status: 'incomplete',
+              totalCents: 4796,
+              line_items: twoLineItems(),
+            });
+            doc.fulfillment = { methods: [] };
+            return jsonRpcOk(doc);
+          }
+          if (name === 'update_checkout') {
+            const errMsg = validateUpdateMethods(args);
+            if (errMsg) return jsonRpcError(errMsg);
+            updates.push(args.checkout);
+            updateCount += 1;
+            if (updateCount === 1) {
+              // Store returns address applied, still incomplete with 1 delivery option and missing line_item_ids
+              const doc = makeCheckoutDoc({
+                id: 'chk_deliv',
+                status: 'incomplete',
+                totalCents: 4796,
+                line_items: twoLineItems(),
+                withAddress: true,
+              });
+              (doc.fulfillment.methods[0] as any).groups = [
+                { id: 'grp-1', options: [{ id: 'ship-std', title: 'Standard' }] },
+              ];
+              return jsonRpcOk(doc);
+            }
+            return jsonRpcOk(
+              makeCheckoutDoc({
+                id: 'chk_deliv',
+                status: 'ready_for_complete',
+                totalCents: 4796,
+                line_items: twoLineItems(),
+                withAddress: true,
+              }),
+            );
+          }
+          throw new Error(`Unexpected ${name}`);
+        },
+        isPurchaseEnabled: () => true,
+        getAuthToken: () => auth.getToken(),
+      });
+
+      const purchase = createPurchaseClient({
+        mcp,
+        auth,
+        now: () => clock,
+        isPurchaseEnabled: () => true,
+        getRoom: () => VALID_ROOM,
+        isHarnessEnv: () => false,
+      });
+
+      const review = await purchase.prepareOrder(twoItemBag);
+      assert.equal(review.stores[0].ready, true);
+      assert.equal(updates.length, 2);
+      assert.deepEqual(updates[1].fulfillment.methods[0].line_item_ids, ['line-a', 'line-b']);
+      assert.equal(updates[1].fulfillment.methods[0].groups[0].selected_option_id, 'ship-std');
+    }
+
+    // Sub-case 2: checkout line_items lack string ids -> NO update_checkout sent, hand-off with link
+    {
+      let clock = 52_100_000;
+      const { auth, completeSignIn } = makeSignedInAuth('tok_fn_noids', () => clock);
+      await completeSignIn();
+      let updateCalls = 0;
+
+      const mcp = createShopMcp({
+        fetch: async (_u, init) => {
+          const body = JSON.parse(String(init?.body ?? '{}'));
+          const name = body.params?.name;
+          if (name === 'get_account') return jsonRpcOk(makeFakeAccount());
+          if (name === 'create_checkout') {
+            const doc = makeCheckoutDoc({
+              id: 'chk_noids',
+              status: 'incomplete',
+              totalCents: 4796,
+              line_items: [
+                {
+                  item: { id: 'gid://shopify/ProductVariant/fn-1', title: 'Straight Jeans', price: 2796 },
+                  quantity: 1,
+                },
+                {
+                  item: { id: 'gid://shopify/ProductVariant/fn-2', title: 'Crew Tee', price: 2000 },
+                  quantity: 1,
+                },
+              ],
+            });
+            doc.fulfillment = { methods: [] };
+            return jsonRpcOk(doc);
+          }
+          if (name === 'update_checkout') {
+            updateCalls += 1;
+            throw new Error('update_checkout must NOT be called when checkout has no line item string ids');
+          }
+          throw new Error(`Unexpected ${name}`);
+        },
+        isPurchaseEnabled: () => true,
+        getAuthToken: () => auth.getToken(),
+      });
+
+      const purchase = createPurchaseClient({
+        mcp,
+        auth,
+        now: () => clock,
+        isPurchaseEnabled: () => true,
+        getRoom: () => VALID_ROOM,
+        isHarnessEnv: () => false,
+      });
+
+      const review = await purchase.prepareOrder(twoItemBag);
+      assert.equal(updateCalls, 0);
+      assert.equal(review.stores[0].ready, false);
+      assert.equal(review.stores[0].status, 'handoff');
+      assert.ok(review.stores[0].continue_url);
+    }
+  });
+
+  it('FIX 2 + Addendum C: 3 prepareOrder calls for same bag -> 1 create_checkout & same order_id; original 2m expiry kept; changed bag, placeOrder, or sign-out ends reuse', async () => {
+    let clock = 60_000_000;
+    let activeRoom: string | null = VALID_ROOM;
+    const { auth, completeSignIn } = makeSignedInAuth('tok_fix2_reuse_1', () => clock, {
+      getRoom: () => activeRoom,
+    });
+    await completeSignIn();
+
+    let createCalls = 0;
+    let completeCalls = 0;
+    const checkoutById = new Map<string, string>();
+    const mcp = createShopMcp({
+      fetch: async (_u, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}'));
+        const name = body.params?.name;
+        const args = body.params?.arguments ?? {};
+        if (name === 'get_account') return jsonRpcOk(makeFakeAccount());
+        if (name === 'create_checkout') {
+          createCalls += 1;
+          await new Promise((r) => setTimeout(r, 15));
+          const id = `chk_reuse_${createCalls}`;
+          const cid = String(args.checkout?.cart_id ?? '');
+          const variantId =
+            cid === 'cart-ev-changed'
+              ? 'gid://shopify/ProductVariant/222'
+              : 'gid://shopify/ProductVariant/111';
+          checkoutById.set(id, variantId);
+          return jsonRpcOk(
+            makeCheckoutDoc({
+              id,
+              status: 'ready_for_complete',
+              withAddress: true,
+              variantId,
+            }),
+          );
+        }
+        if (name === 'get_checkout') {
+          const variantId = checkoutById.get(String(args.id ?? '')) ?? 'gid://shopify/ProductVariant/111';
+          return jsonRpcOk(
+            makeCheckoutDoc({
+              id: args.id,
+              status: 'ready_for_complete',
+              withAddress: true,
+              variantId,
+            }),
+          );
+        }
+        if (name === 'complete_checkout') {
+          completeCalls += 1;
+          return jsonRpcOk(
+            makeCheckoutDoc({
+              id: args.id,
+              status: 'completed',
+              withAddress: true,
+              order: { order_number: `ORD-${completeCalls}` },
+            }),
+          );
+        }
+        throw new Error(`Unexpected ${name}`);
+      },
+      isPurchaseEnabled: () => true,
+      getAuthToken: () => auth.getToken(),
+      now: () => clock,
+    });
+
+    const purchase = createPurchaseClient({
+      mcp,
+      auth,
+      now: () => clock,
+      isPurchaseEnabled: () => true,
+      getRoom: () => activeRoom,
+      isHarnessEnv: () => false,
+    });
+
+    const bag1 = makeBag();
+    // 2 concurrent in-flight + 1 sequential within 8s -> 1 create_checkout, exact same order_id & object
+    const [r1, r2] = await Promise.all([purchase.prepareOrder(bag1), purchase.prepareOrder(bag1)]);
+    clock += 5_000;
+    const r3 = await purchase.prepareOrder(bag1);
+    assert.equal(createCalls, 1);
+    assert.equal(r1.order_id, r2.order_id);
+    assert.equal(r1.order_id, r3.order_id);
+    assert.equal(r3, r1);
+
+    // Addendum C: original 2-minute age limit is NOT extended by the reuse at +5s!
+    // At t = +120_000ms from original creation (only 115s since reuse), placeOrder must expire.
+    clock += 115_000;
+    const expPlace = await purchase.placeOrder(r1.order_id, {
+      idempotencyKey: 'k-exp',
+      confirmedByTap: true,
+    });
+    assert.equal(completeCalls, 0);
+    assert.match(expPlace.stores[0].note ?? '', /expired/i);
+
+    // After placeOrder / expiry, reuse ended -> fresh prepareOrder creates a new order_id
+    const r4 = await purchase.prepareOrder(bag1);
+    assert.equal(createCalls, 2);
+    assert.notEqual(r4.order_id, r1.order_id);
+
+    // Changed bag -> new order_id and ends reuse for old bag
+    const bag2 = makeBag([
+      {
+        store: 'Everlane',
+        domain: 'm34kzg-ke.myshopify.com',
+        cartId: 'cart-ev-changed',
+        total: 68,
+        variantId: 'gid://shopify/ProductVariant/222',
+        itemId: 'prod-2',
+        title: 'Oxford Shirt',
+      },
+    ]);
+    const rChanged = await purchase.prepareOrder(bag2);
+    assert.equal(createCalls, 3);
+    assert.notEqual(rChanged.order_id, r4.order_id);
+
+    // Returning to bag1 immediately does NOT return stale r4 (changed bag ended reuse)
+    const rBackTo1 = await purchase.prepareOrder(bag1);
+    assert.equal(createCalls, 4);
+    assert.notEqual(rBackTo1.order_id, r4.order_id);
+
+    // placeOrder started on rBackTo1 ends reuse even if refused pre-flight
+    await purchase.placeOrder(rBackTo1.order_id, {
+      idempotencyKey: 'k-notap',
+      confirmedByTap: false,
+    });
+    const rAfterPlace = await purchase.prepareOrder(bag1);
+    assert.equal(createCalls, 5);
+    assert.notEqual(rAfterPlace.order_id, rBackTo1.order_id);
+
+    // sign-out / endCall ends reuse
+    purchase.endCall();
+    await completeSignIn();
+    const rAfterSignOut = await purchase.prepareOrder(bag1);
+    assert.equal(createCalls, 6);
+    assert.notEqual(rAfterSignOut.order_id, rAfterPlace.order_id);
   });
 });
 
