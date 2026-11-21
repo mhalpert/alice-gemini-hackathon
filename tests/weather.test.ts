@@ -1,6 +1,6 @@
 import { beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { clearWeatherCache, forecast, resolveDate } from '../src/weather.ts';
+import { clearWeatherCache, forecast, resolveDate, warmWeather } from '../src/weather.ts';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -9,15 +9,15 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function makeGeocodeFixture(name = 'New York', lat = 40.71427, lon = -74.00597) {
+function makeGeocodeFixture(name = 'Denver', lat = 39.7392, lon = -104.9903) {
   return {
     results: [
       {
-        id: 5128581,
+        id: 5419384,
         name,
         latitude: lat,
         longitude: lon,
-        timezone: 'America/New_York',
+        timezone: 'America/Denver',
       },
     ],
     generationtime_ms: 0.3,
@@ -105,6 +105,10 @@ describe('resolveDate', () => {
     { label: 'tonight', when: 'tonight', now: wednesday, expected: '2026-11-18' },
     { label: 'tomorrow', when: 'tomorrow', now: wednesday, expected: '2026-11-19' },
     { label: 'Saturday from Wednesday', when: 'Saturday', now: wednesday, expected: '2026-11-21' },
+    { label: 'this Saturday from Wednesday', when: 'this Saturday', now: wednesday, expected: '2026-11-21' },
+    { label: 'this Saturday when today is Saturday', when: 'this Saturday', now: saturday, expected: '2026-11-21' },
+    { label: 'Saturday night from Wednesday', when: 'Saturday night', now: wednesday, expected: '2026-11-21' },
+    { label: 'Saturday evening from Wednesday', when: 'Saturday evening', now: wednesday, expected: '2026-11-21' },
     { label: 'Saturday when today is Saturday (today counts)', when: 'Saturday', now: saturday, expected: '2026-11-21' },
     { label: 'Saturday from Sunday', when: 'Saturday', now: sunday, expected: '2026-11-28' },
     { label: 'Wednesday when today is Wednesday (today counts)', when: 'Wednesday', now: wednesday, expected: '2026-11-18' },
@@ -129,14 +133,11 @@ describe('resolveDate', () => {
 describe('forecast', () => {
   const wednesday = new Date('2026-11-18T17:00:00Z'); // 2026-11-18 12:00 EST
 
-  test('maps forecast fixture into Weather fields and spoken line', async () => {
+  test('built-in table hit (New York, this Saturday) makes exactly one fetch without geocoding', async () => {
     const requestedUrls: string[] = [];
     const mockFetch: typeof fetch = async (input) => {
       const url = String(input);
       requestedUrls.push(url);
-      if (url.startsWith('https://geocoding-api.open-meteo.com/v1/search')) {
-        return jsonResponse(makeGeocodeFixture('New York', 40.71427, -74.00597));
-      }
       if (url.startsWith('https://api.open-meteo.com/v1/forecast')) {
         return jsonResponse(
           makeForecastFixture('2026-11-21', {
@@ -152,18 +153,19 @@ describe('forecast', () => {
       throw new Error(`unexpected url: ${url}`);
     };
 
-    const result = await forecast('New York', 'Saturday', { now: wednesday, fetch: mockFetch });
+    const result = await forecast('New York', 'this Saturday', { now: wednesday, fetch: mockFetch });
 
-    assert.equal(requestedUrls.length, 2);
-    assert.ok(requestedUrls[0]!.includes('name=New%20York'));
-    assert.ok(requestedUrls[1]!.includes('start_date=2026-11-21'));
-    assert.ok(requestedUrls[1]!.includes('end_date=2026-11-21'));
-    assert.ok(requestedUrls[1]!.includes('temperature_unit=fahrenheit'));
-    assert.ok(requestedUrls[1]!.includes('wind_speed_unit=mph'));
+    assert.equal(requestedUrls.length, 1);
+    assert.ok(requestedUrls[0]!.startsWith('https://api.open-meteo.com/v1/forecast?'));
+    assert.ok(requestedUrls[0]!.includes('start_date=2026-11-21'));
+    assert.ok(requestedUrls[0]!.includes('end_date=2026-11-21'));
+    assert.ok(requestedUrls[0]!.includes('temperature_unit=fahrenheit'));
+    assert.ok(requestedUrls[0]!.includes('wind_speed_unit=mph'));
 
     assert.equal(result.ok, true);
     assert.equal(result.source, 'forecast');
     assert.equal(result.place, 'New York');
+    assert.equal(result.assumed_place, undefined);
     assert.equal(result.date, '2026-11-21');
     assert.equal(result.temp_f, 48);
     assert.equal(result.high_f, 52);
@@ -179,14 +181,81 @@ describe('forecast', () => {
     assert.ok(result.ms >= 0);
   });
 
-  test('falls back to daily mean when 19:00 hourly value is missing and defaults empty place to New York', async () => {
+  test('extracts date from combined place string ("New York / this Saturday" and "Miami tomorrow")', async () => {
     const requestedUrls: string[] = [];
     const mockFetch: typeof fetch = async (input) => {
       const url = String(input);
       requestedUrls.push(url);
-      if (url.includes('geocoding-api')) {
-        return jsonResponse(makeGeocodeFixture('New York', 40.71, -74.01));
+      if (url.includes('start_date=2026-11-21')) {
+        return jsonResponse(
+          makeForecastFixture('2026-11-21', { high: 55, low: 42, eveningTemp: 49, wind: 8, rain: 0, wmo: 1 }),
+        );
       }
+      if (url.includes('start_date=2026-11-19')) {
+        return jsonResponse(
+          makeForecastFixture('2026-11-19', { high: 80, low: 68, eveningTemp: 74, wind: 10, rain: 20, wmo: 2 }),
+        );
+      }
+      throw new Error(`unexpected url: ${url}`);
+    };
+
+    const ny = await forecast('New York / this Saturday', undefined, { now: wednesday, fetch: mockFetch });
+    assert.equal(ny.ok, true);
+    assert.equal(ny.place, 'New York');
+    assert.equal(ny.date, '2026-11-21');
+    assert.equal(ny.assumed_place, undefined);
+    assert.equal(
+      ny.line,
+      'Saturday in New York: about 49°F in the evening, mostly clear; high 55, low 42.',
+    );
+
+    const miami = await forecast('Miami tomorrow', undefined, { now: wednesday, fetch: mockFetch });
+    assert.equal(miami.ok, true);
+    assert.equal(miami.place, 'Miami');
+    assert.equal(miami.date, '2026-11-19');
+    assert.equal(miami.assumed_place, undefined);
+    assert.equal(
+      miami.line,
+      'Tomorrow in Miami: about 74°F in the evening, partly cloudy, 20% chance of rain; high 80, low 68.',
+    );
+    assert.equal(requestedUrls.length, 2);
+  });
+
+  test('strips venue words from messy place string ("Brooklyn rooftop", "Saturday night") and hits table in one fetch', async () => {
+    const requestedUrls: string[] = [];
+    const mockFetch: typeof fetch = async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.startsWith('https://api.open-meteo.com/v1/forecast')) {
+        return jsonResponse(
+          makeForecastFixture('2026-11-21', { high: 54, low: 43, eveningTemp: 47, wind: 9, rain: 15, wmo: 2 }),
+        );
+      }
+      throw new Error(`unexpected url: ${url}`);
+    };
+
+    const result = await forecast('Brooklyn rooftop', 'Saturday night', {
+      now: wednesday,
+      fetch: mockFetch,
+    });
+
+    assert.equal(requestedUrls.length, 1);
+    assert.equal(result.ok, true);
+    assert.equal(result.source, 'forecast');
+    assert.equal(result.place, 'Brooklyn');
+    assert.equal(result.date, '2026-11-21');
+    assert.equal(result.assumed_place, undefined);
+    assert.equal(
+      result.line,
+      'Saturday in Brooklyn: about 47°F in the evening, partly cloudy, 15% chance of rain; high 54, low 43.',
+    );
+  });
+
+  test('falls back to daily mean when 19:00 hourly value is missing and assumes New York for empty place', async () => {
+    const requestedUrls: string[] = [];
+    const mockFetch: typeof fetch = async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
       return jsonResponse(
         makeForecastFixture('2026-11-18', {
           high: 60,
@@ -201,29 +270,84 @@ describe('forecast', () => {
     };
 
     const result = await forecast('   ', undefined, { now: wednesday, fetch: mockFetch });
-    assert.ok(requestedUrls[0]!.includes('name=New%20York'));
+    assert.equal(requestedUrls.length, 1);
     assert.equal(result.ok, true);
     assert.equal(result.place, 'New York');
+    assert.equal(result.assumed_place, true);
     assert.equal(result.temp_f, 50);
     assert.equal(result.conditions, 'clear');
     assert.equal(result.line, 'Today in New York: around 50°F, clear; high 60, low 40.');
   });
 
-  test('geocode miss returns source: none, ok: false, empty line without calling forecast', async () => {
-    let calls = 0;
-    const mockFetch: typeof fetch = async () => {
-      calls += 1;
-      return jsonResponse({ generationtime_ms: 0.2 });
+  test('unknown place misses geocoder, falls back to New York with assumed_place: true and ok: true', async () => {
+    const requestedUrls: string[] = [];
+    const mockFetch: typeof fetch = async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.includes('geocoding-api')) {
+        return jsonResponse({ generationtime_ms: 0.2 });
+      }
+      if (url.includes('api.open-meteo.com/v1/forecast')) {
+        return jsonResponse(
+          makeForecastFixture('2026-11-18', {
+            high: 58,
+            low: 44,
+            eveningTemp: 50,
+            wind: 7,
+            rain: 0,
+            wmo: 1,
+          }),
+        );
+      }
+      throw new Error(`unexpected url: ${url}`);
     };
 
     const result = await forecast('Zxqvkjblarg', 'today', { now: wednesday, fetch: mockFetch });
-    assert.equal(calls, 1);
-    assert.equal(result.ok, false);
-    assert.equal(result.source, 'none');
-    assert.equal(result.line, '');
-    assert.equal(result.temp_f, null);
-    assert.equal(result.high_f, null);
-    assert.equal(result.low_f, null);
+    assert.equal(requestedUrls.length, 2);
+    assert.ok(requestedUrls[0]!.includes('geocoding-api'));
+    assert.ok(requestedUrls[1]!.includes('latitude=40.7128'));
+    assert.equal(result.ok, true);
+    assert.equal(result.source, 'forecast');
+    assert.equal(result.place, 'New York');
+    assert.equal(result.assumed_place, true);
+    assert.equal(
+      result.line,
+      'Today in New York: about 50°F in the evening, mostly clear; high 58, low 44.',
+    );
+
+    // Subsequent explicit New York call uses cache without leaking assumed_place
+    const explicitNy = await forecast('New York', 'today', { now: wednesday, fetch: mockFetch });
+    assert.equal(requestedUrls.length, 2);
+    assert.equal(explicitNy.ok, true);
+    assert.equal(explicitNy.assumed_place, undefined);
+  });
+
+  test('tries cleaned text, first two words, then first word against geocoder for unlisted cities', async () => {
+    const geocodedNames: string[] = [];
+    const mockFetch: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.includes('geocoding-api')) {
+        const parsed = new URL(url);
+        const name = parsed.searchParams.get('name') ?? '';
+        geocodedNames.push(name);
+        if (name === 'Santa Barbara') {
+          return jsonResponse(makeGeocodeFixture('Santa Barbara', 34.4208, -119.6982));
+        }
+        return jsonResponse({ generationtime_ms: 0.2 });
+      }
+      return jsonResponse(
+        makeForecastFixture('2026-11-18', { high: 70, low: 55, eveningTemp: 64, wind: 6, rain: 0, wmo: 0 }),
+      );
+    };
+
+    const result = await forecast('Santa Barbara vineyard dinner', 'today', {
+      now: wednesday,
+      fetch: mockFetch,
+    });
+    assert.deepEqual(geocodedNames, ['Santa Barbara vineyard dinner', 'Santa Barbara']);
+    assert.equal(result.ok, true);
+    assert.equal(result.place, 'Santa Barbara');
+    assert.equal(result.assumed_place, undefined);
   });
 
   test('fetch rejection never throws and returns ok: false, source: none', async () => {
@@ -237,9 +361,41 @@ describe('forecast', () => {
     assert.equal(result.line, '');
   });
 
-  test('fetch timeout aborts within 1.5 s budget, never throws, and returns ok: false', async () => {
+  test('cold budget is 3.5 s (survives 1.8 s cold call), then warm budget is 1.5 s', async () => {
+    // 1. Cold call takes 1.8s -> succeeds because cold budget is 3.5s
+    const slowColdFetch: typeof fetch = async (_input, init) =>
+      new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          resolve(
+            jsonResponse(
+              makeForecastFixture('2026-11-21', {
+                high: 55,
+                low: 43,
+                eveningTemp: 49,
+                wind: 7,
+                rain: 0,
+                wmo: 1,
+              }),
+            ),
+          );
+        }, 1800);
+        init?.signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new DOMException('Aborted', 'AbortError'));
+        });
+      });
+
+    const coldResult = await forecast('New York', 'this Saturday', {
+      now: wednesday,
+      fetch: slowColdFetch,
+    });
+    assert.equal(coldResult.ok, true);
+    assert.equal(coldResult.source, 'forecast');
+    assert.ok(coldResult.ms >= 1700 && coldResult.ms < 3000, `expected ~1800ms, got ${coldResult.ms}ms`);
+
+    // 2. Module is now warm -> hanging call aborts at 1.5s
     let aborted = false;
-    const mockFetch: typeof fetch = (_input, init) =>
+    const hangingFetch: typeof fetch = (_input, init) =>
       new Promise((_resolve, reject) => {
         init?.signal?.addEventListener('abort', () => {
           aborted = true;
@@ -247,12 +403,54 @@ describe('forecast', () => {
         });
       });
 
-    const result = await forecast('Boston', 'today', { now: wednesday, fetch: mockFetch });
+    const warmResult = await forecast('Boston', 'today', { now: wednesday, fetch: hangingFetch });
+    assert.equal(warmResult.ok, false);
+    assert.equal(warmResult.source, 'none');
+    assert.equal(warmResult.line, '');
+    assert.equal(aborted, true);
+    assert.ok(warmResult.ms >= 1400 && warmResult.ms < 2500, `expected ~1500ms, got ${warmResult.ms}ms`);
+  });
+
+  test('cold hanging fetch aborts at 3.5 s budget and never throws', async () => {
+    let aborted = false;
+    const hangingFetch: typeof fetch = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          aborted = true;
+          reject(new DOMException('Aborted', 'AbortError'));
+        });
+      });
+
+    const result = await forecast('Boston', 'today', { now: wednesday, fetch: hangingFetch });
     assert.equal(result.ok, false);
     assert.equal(result.source, 'none');
     assert.equal(result.line, '');
     assert.equal(aborted, true);
-    assert.ok(result.ms >= 1400 && result.ms < 2500, `expected ~1500ms, got ${result.ms}ms`);
+    assert.ok(result.ms >= 3400 && result.ms < 4500, `expected ~3500ms, got ${result.ms}ms`);
+  });
+
+  test('warmWeather primes cache in background and never throws', async () => {
+    let calls = 0;
+    const mockFetch: typeof fetch = async () => {
+      calls += 1;
+      return jsonResponse(
+        makeForecastFixture('2026-11-18', { high: 61, low: 48, eveningTemp: 54, wind: 6, rain: 0, wmo: 0 }),
+      );
+    };
+
+    const warmed = await warmWeather('New York', { now: wednesday, fetch: mockFetch });
+    assert.equal(warmed.ok, true);
+    assert.equal(calls, 1);
+
+    const cached = await forecast('New York', 'today', { now: wednesday, fetch: mockFetch });
+    assert.equal(cached.ok, true);
+    assert.equal(calls, 1);
+
+    const failFetch: typeof fetch = async () => {
+      throw new Error('boom');
+    };
+    const failedWarm = await warmWeather('Boston', { now: wednesday, fetch: failFetch });
+    assert.equal(failedWarm.ok, false);
   });
 
   test('12 days out returns season without any fetch call', async () => {
@@ -308,7 +506,7 @@ describe('forecast', () => {
       calls += 1;
       const url = String(input);
       if (url.includes('geocoding-api')) {
-        return jsonResponse(makeGeocodeFixture('Chicago', 41.88, -87.63));
+        return jsonResponse(makeGeocodeFixture('Denver', 39.74, -104.99));
       }
       return jsonResponse(
         makeForecastFixture('2026-11-19', {
@@ -322,14 +520,14 @@ describe('forecast', () => {
       );
     };
 
-    const first = await forecast('Chicago', 'tomorrow', { now: wednesday, fetch: mockFetch });
+    const first = await forecast('Denver', 'tomorrow', { now: wednesday, fetch: mockFetch });
     assert.equal(first.ok, true);
     assert.equal(first.conditions, 'light rain');
     assert.equal(calls, 2);
 
     // Second call 5 minutes later with different casing -> cache hit
     const fiveMinLater = new Date(wednesday.getTime() + 5 * 60 * 1000);
-    const second = await forecast('  chicago ', '2026-11-19', {
+    const second = await forecast('  denver ', '2026-11-19', {
       now: fiveMinLater,
       fetch: mockFetch,
     });
@@ -339,7 +537,7 @@ describe('forecast', () => {
 
     // Third call 11 minutes later -> cache expired (forecast refetched; geocode cached)
     const elevenMinLater = new Date(wednesday.getTime() + 11 * 60 * 1000);
-    const third = await forecast('Chicago', '2026-11-19', {
+    const third = await forecast('Denver', '2026-11-19', {
       now: elevenMinLater,
       fetch: mockFetch,
     });
