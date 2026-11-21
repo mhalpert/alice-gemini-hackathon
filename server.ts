@@ -1,14 +1,24 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
+import https from 'node:https';
 import path from 'node:path';
 import { AccessToken, RoomAgentDispatch, RoomConfiguration } from 'livekit-server-sdk';
+import { calllog as defaultCalllog } from './src/calllog.ts';
+
+export type CallLogFn = (room: string, ev: string, data?: Record<string, unknown>) => void;
 
 export interface AliceServerOptions {
   publicDir?: string;
   tryonDir?: string;
   env?: Record<string, string | undefined>;
+  calllog?: CallLogFn;
+}
+
+export interface AliceHttpsServerOptions extends AliceServerOptions {
+  cert: string | Buffer;
+  key: string | Buffer;
 }
 
 const TOKEN_TTL_SECONDS = 1800;
@@ -185,9 +195,21 @@ function timingSafeMatches(supplied: string, expected: string): boolean {
   return crypto.timingSafeEqual(a, b);
 }
 
-export function createAliceServer(opts: AliceServerOptions = {}): http.Server {
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (normalized === 'localhost' || normalized === '::1') {
+    return true;
+  }
+  const ipv4 = normalized.startsWith('::ffff:') ? normalized.slice(7) : normalized;
+  return /^127\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d)$/.test(
+    ipv4,
+  );
+}
+
+export function createAliceHandler(opts: AliceServerOptions = {}): RequestListener {
   const startedAt = Date.now();
   const rateBuckets = new Map<string, number[]>();
+  const logSink = opts.calllog ?? defaultCalllog;
 
   function checkRateLimit(remoteAddr: string): { allowed: boolean; retryAfterS: number } {
     const now = Date.now();
@@ -376,6 +398,11 @@ export function createAliceServer(opts: AliceServerOptions = {}): http.Server {
 
         const token = await at.toJwt();
         logExtra = `room=${room}`;
+        try {
+          logSink(room, 'token', { identity, agent });
+        } catch {
+          // calllog must never affect the response
+        }
 
         sendJson(
           res,
@@ -492,9 +519,18 @@ export function createAliceServer(opts: AliceServerOptions = {}): http.Server {
     }
   }
 
-  return http.createServer((req, res) => {
+  return (req: IncomingMessage, res: ServerResponse): void => {
     void handleRequest(req, res);
-  });
+  };
+}
+
+export function createAliceServer(opts: AliceServerOptions = {}): http.Server {
+  return http.createServer(createAliceHandler(opts));
+}
+
+export function createAliceHttpsServer(opts: AliceHttpsServerOptions): https.Server {
+  const { cert, key, ...handlerOpts } = opts;
+  return https.createServer({ cert, key }, createAliceHandler(handlerOpts));
 }
 
 if (import.meta.main) {
@@ -505,14 +541,46 @@ if (import.meta.main) {
   }
   const port = Number(process.env.PORT || 3000);
   const host = process.env.HOST || '127.0.0.1';
-  const server = createAliceServer();
+  const certPath = process.env.ALICE_TLS_CERT;
+  const keyPath = process.env.ALICE_TLS_KEY;
+
+  let scheme: 'http' | 'https' = 'http';
+  let server: http.Server | https.Server;
+
+  if (certPath && keyPath) {
+    try {
+      const cert = fs.readFileSync(certPath);
+      const key = fs.readFileSync(keyPath);
+      server = createAliceHttpsServer({ cert, key });
+      scheme = 'https';
+    } catch (err) {
+      console.warn(
+        `[server] TLS cert/key unreadable (${(err as Error)?.message ?? String(err)}); falling back to HTTP`,
+      );
+      server = createAliceServer();
+    }
+  } else {
+    if (certPath || keyPath) {
+      console.warn(
+        '[server] TLS requires both ALICE_TLS_CERT and ALICE_TLS_KEY; falling back to HTTP',
+      );
+    }
+    server = createAliceServer();
+  }
+
   server.listen(port, host, () => {
     const livekitConfigured = Boolean(
       process.env.LIVEKIT_URL && process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET,
     );
     const passcodeRequired = Boolean(process.env.ALICE_PASSCODE);
+    const displayHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
     console.log(
-      `[server] listening on http://${host}:${port} livekit=${livekitConfigured} passcode=${passcodeRequired}`,
+      `[server] listening on ${scheme}://${displayHost}:${port} livekit=${livekitConfigured} passcode=${passcodeRequired}`,
     );
+    if (!isLoopbackHost(host) && !passcodeRequired) {
+      console.warn(
+        `[server] WARNING: bound to non-loopback host ${host} with empty ALICE_PASSCODE — /api/token is OPEN to the network! Set ALICE_PASSCODE in .env.local.`,
+      );
+    }
   });
 }
