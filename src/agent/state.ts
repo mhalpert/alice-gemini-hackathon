@@ -106,9 +106,24 @@ export function outfitToStateLook(outfit: Outfit, fallbackNumber?: number): Stat
 
 export function normalizeSlotKey(rawSlot: string): string {
   const clean = rawSlot.trim().toLowerCase();
-  if (clean === 'shoe') return 'shoes';
-  if (clean === 'tops') return 'top';
-  if (clean === 'bottoms' || clean === 'pants' || clean === 'trousers' || clean === 'jeans') {
+  if (
+    clean === 'shoe' ||
+    clean === 'sneaker' ||
+    clean === 'sneakers' ||
+    clean === 'boot' ||
+    clean === 'boots' ||
+    clean === 'footwear'
+  ) {
+    return 'shoes';
+  }
+  if (clean === 'tops' || clean === 'shirt' || clean === 'sweater') return 'top';
+  if (
+    clean === 'bottoms' ||
+    clean === 'pants' ||
+    clean === 'trousers' ||
+    clean === 'jeans' ||
+    clean === 'waist'
+  ) {
     return 'bottom';
   }
   if (clean === 'accessories') return 'accessory';
@@ -490,9 +505,14 @@ export function summarize(state: CallState): string {
 
   if (state.bag) {
     const storeNames = state.bag.stores.map((s) => `${s.store}(${s.added.length})`).join(', ');
-    const notAddedNote =
-      state.bag.notAdded.length > 0 ? `, skipped=${state.bag.notAdded.length}` : '';
     const linkNote = state.bag.links.length > 0 ? `, links=${state.bag.links.length}` : '';
+    const notAddedItems = state.bag.notAdded.map((na) => {
+      const cleanTitle = na.title.replace(/\s+/g, ' ').trim();
+      const cleanReason = na.reason.replace(/\s+/g, ' ').trim().replace(/\.$/, '');
+      return cleanReason ? `${cleanTitle} (${cleanReason})` : cleanTitle;
+    });
+    const notAddedNote =
+      notAddedItems.length > 0 ? `, NOT_ADDED=[${notAddedItems.join('; ')}]` : '';
     parts.push(`bag=[${storeNames || 'empty'} total=${formatMoney(state.bag.total)}${linkNote}${notAddedNote}]`);
   }
 

@@ -82,3 +82,35 @@ test('ALICE_SYSTEM_PROMPT encodes waiting, bag, camera-off try-on, and weather g
   // 4. Weather: mention in one short clause when known.
   assert.match(ALICE_SYSTEM_PROMPT, /mention the weather in one short clause when it is known/i);
 });
+
+test('ALICE_SYSTEM_PROMPT encodes polish2 rules: bag accuracy, size confirmation, pick brevity, and noisy-room handling', () => {
+  // 1. Conditional show_on_me sizing.
+  assert.match(ALICE_SYSTEM_PROMPT, /already have all sizes needed/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /ask only for the missing sizes/i);
+
+  // 2. Accuracy rule for bag items.
+  assert.match(
+    ALICE_SYSTEM_PROMPT,
+    /only say a piece is in the bag if the latest add_to_bag result lists it as added/i,
+  );
+  assert.match(ALICE_SYSTEM_PROMPT, /PARTLY DONE/);
+  assert.match(ALICE_SYSTEM_PROMPT, /never say a not-added piece is in the bag/i);
+
+  // 3. Noisy-room size confirmation, exact formats, conflicting sets, and corrections.
+  assert.match(ALICE_SYSTEM_PROMPT, /repeat the sizes back in one short clause/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /two different sets of sizes/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /8\.5 wide/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /30x34/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /later explicit correction.*replaces the remembered size/i);
+
+  // 4. pick_outfit brevity and walk order (~12s, 2-3 short sentences).
+  assert.match(ALICE_SYSTEM_PROMPT, /two or three short sentences/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /walk order/i);
+  assert.doesNotMatch(ALICE_SYSTEM_PROMPT, /four or five sentences/i);
+
+  // 5. General noisy-room rule.
+  assert.match(ALICE_SYSTEM_PROMPT, /fragment that does not fit the conversation/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never|do not respond.*call a tool on it/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /Was that for me\?/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /at most once/i);
+});

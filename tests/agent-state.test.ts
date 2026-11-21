@@ -251,3 +251,89 @@ test('createCallStateStore logs call_state changed keys and holds/coalesces thro
   assert.match(sent[0]!, /dept=men/);
   assert.match(sent[0]!, /camera=on/);
 });
+
+test('summarize includes NOT_ADDED piece titles and reasons in CALL STATE and clears them once bagged', () => {
+  let state = createInitialCallState();
+  state = reduceCallState(state, {
+    type: 'set_bag',
+    bag: {
+      stores: [
+        {
+          store: 'Everlane',
+          added: [{ title: 'Merino Knit Polo', slot: 'top', image: '', price: 45, size: 'M' }],
+          not_added: [],
+          subtotal: 45,
+        },
+        {
+          store: 'Steve Madden',
+          added: [],
+          not_added: [
+            {
+              title: 'Minimal Leather Sneaker',
+              slot: 'shoes',
+              image: '',
+              price: 55,
+              reason: 'EU sizes only.\n',
+            },
+          ],
+          subtotal: 0,
+        },
+      ],
+      total: 45,
+      links: [{ store: 'Everlane', url: 'https://everlane.com/cart/1' }],
+      notAdded: [
+        {
+          store: 'Steve Madden',
+          title: 'Minimal Leather Sneaker',
+          reason: 'EU sizes only.\n',
+        },
+      ],
+    },
+  }).state;
+
+  const partialSummary = summarize(state);
+  assert.equal(partialSummary.includes('\n'), false, 'CALL STATE must remain single-line');
+  assert.match(partialSummary, /NOT_ADDED=\[Minimal Leather Sneaker \(EU sizes only\)\]/);
+
+  // Subsequent clean bag clears NOT_ADDED from CALL STATE.
+  state = reduceCallState(state, {
+    type: 'set_bag',
+    bag: {
+      stores: [
+        {
+          store: 'Everlane',
+          added: [{ title: 'Merino Knit Polo', slot: 'top', image: '', price: 45, size: 'M' }],
+          not_added: [],
+          subtotal: 45,
+        },
+      ],
+      total: 45,
+      links: [{ store: 'Everlane', url: 'https://everlane.com/cart/2' }],
+      notAdded: [],
+    },
+  }).state;
+
+  const cleanSummary = summarize(state);
+  assert.doesNotMatch(cleanSummary, /NOT_ADDED=/);
+});
+
+test('merge_sizes replaces previously remembered sizes on explicit correction and preserves exact strings', () => {
+  let state = createInitialCallState();
+  state = reduceCallState(state, {
+    type: 'merge_sizes',
+    sizes: { top: 'L', pants: '36', sneakers: '12' },
+  }).state;
+  assert.deepEqual(state.sizes, { top: 'L', bottom: '36', shoes: '12' });
+
+  // Later explicit correction replaces remembered values and preserves half sizes, widths, and waist x inseam.
+  const corrected = reduceCallState(state, {
+    type: 'merge_sizes',
+    sizes: { top: 'medium', bottom: '30x34', shoes: '8.5 wide' },
+  });
+  assert.deepEqual(corrected.changed, ['sizes']);
+  assert.deepEqual(corrected.state.sizes, {
+    top: 'medium',
+    bottom: '30x34',
+    shoes: '8.5 wide',
+  });
+});
