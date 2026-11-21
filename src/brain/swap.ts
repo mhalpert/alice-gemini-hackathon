@@ -8,6 +8,7 @@ import { breaksDressCode, wrongSlot } from './words.ts';
 import { pieceCeiling, type Slot } from './plan.ts';
 import { generateJson, MODELS } from './gemini.ts';
 import { COLOUR_WORDS, TYPES, wantedColour, titleHas, colourOf, typeIn, SLOT_NOUN, type TypeMatch } from './words.ts';
+import { matchSizeLabel } from '../store/index.ts';
 
 // Slots where a title must name one of the slot's own product types (shoes stay shoes).
 const STRICT_SLOTS = new Set(['shoes', 'bottom', 'dress', 'bag', 'layer']);
@@ -16,9 +17,42 @@ const inSlot = (title: string, slot: string) =>
 
 type Search = (query: string, gender: Gender, opts: { limit?: number; maxPrice?: number }) => Promise<SearchResult>;
 
+export interface SwapSizes {
+  top?: string;
+  bottom?: string;
+  shoes?: string;
+}
+
 export interface LiveSwapOptions {
   search?: Search;               // tests pass a fake store
   rewrite?: boolean;             // name / story refresh with the fast model (default on)
+  sizes?: SwapSizes;             // shopper sizes; when given, prefer pieces in stock in that size
+}
+
+function sizeForSlot(slot: string, sizes?: SwapSizes): string | undefined {
+  if (!sizes) return undefined;
+  let raw: string | undefined;
+  switch (slot.trim().toLowerCase()) {
+    case 'top':
+    case 'layer':
+    case 'dress':
+      raw = sizes.top;
+      break;
+    case 'bottom':
+      raw = sizes.bottom;
+      break;
+    case 'shoes':
+      raw = sizes.shoes;
+      break;
+    default:
+      return undefined;
+  }
+  const trimmed = raw?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function cleanSizes(sizes: readonly string[] | undefined): string[] {
+  return (sizes ?? []).map((s) => s.trim()).filter(Boolean);
 }
 
 export interface SwapOut { outfit: Outfit; piece: Piece; note?: string; query?: string; tried?: string[] }
@@ -95,8 +129,11 @@ export async function swapLive(outfit: Outfit, slot: string, request: string, br
     !wrongSlot(i.title, slot) &&
     !breaksDressCode(i, slot, brief);
 
+  const wantedSize = sizeForSlot(slot, opts.sizes);
   const tried: string[] = [];
   let pick: Item | null = null;
+  let fallback: { item: Item; query: string } | null = null;
+  let sizeMissed = false;
   let query = queries[0];
   for (const q of queries) {
     tried.push(q);
@@ -109,9 +146,40 @@ export async function swapLive(outfit: Outfit, slot: string, request: string, br
       (ask.type && titleHas(i.title, ask.type.matches) ? 2 : 0) +
       (i.price + othersTotal <= brief.budget_usd ? 1.5 : 0) +
       (keepColour && titleHas(i.title, [keepColour, ...(COLOUR_WORDS[keepColour] ?? [])]) ? 4 : 0);
-    pick = ok.map((i) => ({ i, s: rank(i) })).sort((a, b) => b.s - a.s)[0].i;
+    const bestOf = (pool: Item[]) => pool.map((i) => ({ i, s: rank(i) })).sort((a, b) => b.s - a.s)[0].i;
+    if (wantedSize) {
+      const known: Item[] = [];
+      const unknown: Item[] = [];
+      for (const i of ok) {
+        const labels = cleanSizes(i.sizes);
+        if (labels.length === 0) {
+          unknown.push(i);
+        } else if (matchSizeLabel(wantedSize, labels, { slot, gender: brief.gender }) !== null) {
+          known.push(i);
+        }
+      }
+      if (known.length > 0) {
+        pick = bestOf(known);
+        query = q;
+        break;
+      }
+      if (unknown.length > 0) {
+        pick = bestOf(unknown);
+        query = q;
+        break;
+      }
+      if (!fallback) fallback = { item: bestOf(ok), query: q };
+      continue;
+    }
+    pick = bestOf(ok);
     query = q;
     break;
+  }
+
+  if (!pick && fallback) {
+    pick = fallback.item;
+    query = fallback.query;
+    sizeMissed = true;
   }
 
   if (!pick) {
@@ -145,6 +213,10 @@ export async function swapLive(outfit: Outfit, slot: string, request: string, br
   const notes: string[] = [];
   if (ask.cheaper) notes.push(`Saves $${round2(current.item.price - pick.price)}.`);
   if (look.total > brief.budget_usd) notes.push(`The look is now $${look.total}, $${round2(look.total - brief.budget_usd)} over the $${brief.budget_usd} budget.`);
+  if (sizeMissed && wantedSize) {
+    const left = cleanSizes(pick.sizes).slice(0, 12).join(', ');
+    notes.push(`Heads up: no ${slot} like that in size ${wantedSize}; this one is in ${left}.`);
+  }
   return { outfit: look, piece, ...(notes.length ? { note: notes.join(' ') } : {}), query, tried };
 }
 
