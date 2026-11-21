@@ -1,0 +1,9 @@
+# Planning doc: stays local, never committed
+SPEC.md
+
+# Secrets
+.env*
+
+# Local artifacts
+node_modules/
+data/
