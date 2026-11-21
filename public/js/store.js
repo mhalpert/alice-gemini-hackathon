@@ -1,9 +1,10 @@
 // Alice Store — renders the storefront and exposes synchronous page-action handlers.
 
-// Every nav item does something: the departments switch the boutique, the other two jump to a section.
+// Every nav item does something: the departments switch the boutique, the others jump to a section.
 const NAV_ITEMS = [
   'Women',
   'Men',
+  'Occasions',
   'Looks by Alice',
   'Stores',
 ];
@@ -229,6 +230,30 @@ async function fetchJson(url, { timeoutMs = BOUTIQUE_FETCH_TIMEOUT_MS, signal } 
   }
 }
 
+// Normalize /api/occasions rows, dropping missing or duplicate keys while keeping server order
+function normalizeOccasions(data) {
+  if (!data || !Array.isArray(data.occasions)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const raw of data.occasions) {
+    // A plain string is an occasion whose text is also its key
+    const entry =
+      typeof raw === 'string' ? { key: raw, label: raw.charAt(0).toUpperCase() + raw.slice(1) } : raw;
+    if (!entry || typeof entry !== 'object') continue;
+    const key = typeof entry.key === 'string' ? entry.key.trim() : '';
+    const label =
+      typeof entry.label === 'string' && entry.label.trim()
+        ? entry.label.trim()
+        : typeof entry.occasion === 'string'
+          ? entry.occasion.trim()
+          : '';
+    if (!key || !label || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ key, label });
+  }
+  return out;
+}
+
 // Renders the shop into `root` (the #store element) and returns the page-action handlers.
 export function mountStore(root, { onTalk } = {}) {
   if (!root || !(root instanceof HTMLElement)) {
@@ -260,10 +285,15 @@ export function mountStore(root, { onTalk } = {}) {
     department: 'women', // 'women' | 'men'
     looks: [],
     sections: [],
+    occasions: [],
+    selectedOccasion: null, // null for all looks, or { key, label }
+    occasionFilter: '',
     looksPending: false,
     storefrontPending: false,
     reqId: 0,
     abortController: null,
+    looksReqId: 0,
+    looksAbortController: null,
   };
 
   // Header search and product detail request guards
@@ -319,7 +349,11 @@ export function mountStore(root, { onTalk } = {}) {
   }
 
   function hasBoutiqueContent() {
-    return boutique.looks.length > 0 || boutique.sections.length > 0;
+    return (
+      boutique.looks.length > 0 ||
+      boutique.sections.length > 0 ||
+      (boutique.selectedOccasion !== null && boutique.occasions.length > 0)
+    );
   }
 
   function hasBoutiqueAvailable() {
@@ -337,6 +371,7 @@ export function mountStore(root, { onTalk } = {}) {
   // Build persistent store chrome
   const bagBadge = el('span', { className: 'bag-badge', hidden: true, 'aria-live': 'polite' }, '0');
   const navLinks = new Map();
+  const navItems = new Map();
 
   // Collapsible header search bar
   const searchInputEl = el('input', {
@@ -475,7 +510,9 @@ export function mountStore(root, { onTalk } = {}) {
               className: 'nav-link',
               onClick: (e) => {
                 e.preventDefault();
-                if (label === 'Looks by Alice') {
+                if (label === 'Occasions') {
+                  scrollToBoutique('.boutique-occasions-section');
+                } else if (label === 'Looks by Alice') {
                   // Alice's own looks from this call if there are any, otherwise the boutique's row of looks
                   if (state.outfits.size > 0) handlers.showAll({});
                   else scrollToBoutique('.boutique-looks-section');
@@ -487,7 +524,9 @@ export function mountStore(root, { onTalk } = {}) {
             label
           );
           navLinks.set(label, link);
-          return el('li', null, link);
+          const item = el('li', label === 'Occasions' ? { hidden: true } : null, link);
+          navItems.set(label, item);
+          return item;
         })
       )
     )
@@ -692,6 +731,17 @@ export function mountStore(root, { onTalk } = {}) {
       const active = boutiqueShown && boutique.department === label.toLowerCase();
       btn.classList.toggle('is-active', active);
       btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
+
+    const occasionsNavItem = navItems.get('Occasions');
+    if (occasionsNavItem) {
+      occasionsNavItem.hidden = boutique.occasions.length === 0 || !hasBoutiqueAvailable();
+    }
+
+    // "Stores" needs a store rail to jump to, and a short storefront reply may hold none
+    const storesNavItem = navItems.get('Stores');
+    if (storesNavItem) {
+      storesNavItem.hidden = !boutique.sections.some((sec) => sec.id.startsWith('from-'));
     }
 
     if (boutiqueRefs && boutiqueRefs.deptButtons) {
@@ -992,20 +1042,155 @@ export function mountStore(root, { onTalk } = {}) {
     );
   }
 
+  function getBoutiqueLooksTitle() {
+    return boutique.selectedOccasion
+      ? `Looks for ${boutique.selectedOccasion.label}`
+      : 'Looks by Alice';
+  }
+
+  // Update chip pressed state in place so selection keeps focus and scroll position
+  function syncOccasionChipSelection() {
+    if (!boutiqueRefs || !boutiqueRefs.occasionStrip) return;
+    const selectedKey = boutique.selectedOccasion ? boutique.selectedOccasion.key : null;
+    for (const btn of boutiqueRefs.occasionStrip.querySelectorAll('.boutique-occasion-chip')) {
+      const btnKey = btn.dataset.occasion || null;
+      const active = btnKey === selectedKey;
+      btn.classList.toggle('is-active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
+  }
+
+  function renderBoutiqueOccasionChips() {
+    if (!boutiqueRefs || !boutiqueRefs.occasionStrip) return;
+    const strip = boutiqueRefs.occasionStrip;
+    const needle = boutique.occasionFilter.trim().toLowerCase();
+    const visibleOccasions = needle
+      ? boutique.occasions.filter((occ) => occ.label.toLowerCase().includes(needle))
+      : boutique.occasions;
+
+    const allSelected = boutique.selectedOccasion === null;
+    const allChip = el(
+      'button',
+      {
+        type: 'button',
+        className: `boutique-occasion-chip${allSelected ? ' is-active' : ''}`,
+        'aria-pressed': allSelected ? 'true' : 'false',
+        onClick: () => selectOccasion(null),
+      },
+      'All looks'
+    );
+
+    const occasionChips = visibleOccasions.map((occ) => {
+      const selected = Boolean(
+        boutique.selectedOccasion && boutique.selectedOccasion.key === occ.key
+      );
+      return el(
+        'button',
+        {
+          type: 'button',
+          className: `boutique-occasion-chip${selected ? ' is-active' : ''}`,
+          'aria-pressed': selected ? 'true' : 'false',
+          dataset: { occasion: occ.key },
+          onClick: () => selectOccasion(occ),
+        },
+        occ.label
+      );
+    });
+
+    strip.replaceChildren(allChip, ...occasionChips);
+  }
+
+  function renderBoutiqueOccasionsSlot() {
+    if (!boutiqueRefs) return;
+    const { occasionsSlot } = boutiqueRefs;
+
+    if (boutique.occasions.length === 0) {
+      boutiqueRefs.occasionStrip = null;
+      occasionsSlot.replaceChildren();
+      occasionsSlot.hidden = true;
+      return;
+    }
+
+    const filterInput =
+      boutique.occasions.length > 16
+        ? el('input', {
+            type: 'text',
+            className: 'boutique-occasion-filter',
+            placeholder: 'Find an occasion',
+            'aria-label': 'Find an occasion',
+            autocomplete: 'off',
+            spellcheck: 'false',
+            value: boutique.occasionFilter,
+            onInput: (e) => {
+              boutique.occasionFilter = e.currentTarget.value;
+              renderBoutiqueOccasionChips();
+            },
+            onKeydown: (e) => {
+              if (e.key === 'Escape' && (e.currentTarget.value || boutique.occasionFilter)) {
+                e.preventDefault();
+                e.stopPropagation();
+                e.currentTarget.value = '';
+                boutique.occasionFilter = '';
+                renderBoutiqueOccasionChips();
+              }
+            },
+          })
+        : null;
+
+    const strip = el('div', {
+      className: 'boutique-occasions-strip',
+      role: 'group',
+      'aria-label': 'Occasions',
+    });
+
+    boutiqueRefs.occasionStrip = strip;
+    renderBoutiqueOccasionChips();
+
+    occasionsSlot.hidden = false;
+    occasionsSlot.replaceChildren(
+      el(
+        'section',
+        { className: 'boutique-occasions-section', 'aria-label': 'Shop by occasion' },
+        el(
+          'div',
+          { className: 'boutique-section-head boutique-occasions-head' },
+          el('h2', { className: 'boutique-section-title' }, 'Shop by occasion'),
+          filterInput
+        ),
+        strip
+      )
+    );
+  }
+
+  function selectOccasion(occasion) {
+    const next =
+      occasion && typeof occasion.key === 'string'
+        ? { key: occasion.key, label: occasion.label }
+        : null;
+    const currentKey = boutique.selectedOccasion ? boutique.selectedOccasion.key : null;
+    const nextKey = next ? next.key : null;
+    if (currentKey === nextKey) return;
+
+    boutique.selectedOccasion = next;
+    syncOccasionChipSelection();
+    loadBoutiqueLooks(boutique.department, next, boutique.reqId);
+  }
+
   function renderBoutiqueLooksSlot() {
     if (!boutiqueRefs) return;
     const { looksSlot } = boutiqueRefs;
+    const looksTitle = getBoutiqueLooksTitle();
 
     if (boutique.looksPending) {
       looksSlot.hidden = false;
       looksSlot.replaceChildren(
         el(
           'section',
-          { className: 'boutique-looks-section', 'aria-label': 'Looks by Alice', 'aria-busy': 'true' },
+          { className: 'boutique-looks-section', 'aria-label': looksTitle, 'aria-busy': 'true' },
           el(
             'div',
             { className: 'boutique-section-head' },
-            el('h2', { className: 'boutique-section-title' }, 'Looks by Alice')
+            el('h2', { className: 'boutique-section-title' }, looksTitle)
           ),
           el(
             'div',
@@ -1018,6 +1203,35 @@ export function mountStore(root, { onTalk } = {}) {
     }
 
     if (boutique.looks.length === 0) {
+      if (boutique.selectedOccasion) {
+        looksSlot.hidden = false;
+        looksSlot.replaceChildren(
+          el(
+            'section',
+            { className: 'boutique-looks-section', 'aria-label': looksTitle },
+            el(
+              'div',
+              { className: 'boutique-section-head' },
+              el('h2', { className: 'boutique-section-title' }, looksTitle)
+            ),
+            el(
+              'p',
+              { className: 'boutique-looks-empty' },
+              'Alice styles this one live. ',
+              el(
+                'button',
+                {
+                  type: 'button',
+                  className: 'boutique-looks-empty-cta',
+                  onClick: () => triggerTalk(),
+                },
+                'Talk to Alice'
+              )
+            )
+          )
+        );
+        return;
+      }
       looksSlot.replaceChildren();
       looksSlot.hidden = true;
       return;
@@ -1027,11 +1241,11 @@ export function mountStore(root, { onTalk } = {}) {
     looksSlot.replaceChildren(
       el(
         'section',
-        { className: 'boutique-looks-section', 'aria-label': 'Looks by Alice' },
+        { className: 'boutique-looks-section', 'aria-label': looksTitle },
         el(
           'div',
           { className: 'boutique-section-head' },
-          el('h2', { className: 'boutique-section-title' }, 'Looks by Alice')
+          el('h2', { className: 'boutique-section-title' }, looksTitle)
         ),
         el(
           'div',
@@ -1182,6 +1396,7 @@ export function mountStore(root, { onTalk } = {}) {
       deptSwitch
     );
 
+    const occasionsSlot = el('div', { className: 'boutique-slot' });
     const looksSlot = el('div', { className: 'boutique-slot' });
     const railsSlot = el('div', { className: 'boutique-slot' });
     const footerNote = el(
@@ -1190,13 +1405,14 @@ export function mountStore(root, { onTalk } = {}) {
       "Prices and stock come live from each store. Checkout happens on the store's own site."
     );
 
-    boutiqueRefs = { deptButtons, looksSlot, railsSlot, footerNote };
+    boutiqueRefs = { deptButtons, occasionsSlot, occasionStrip: null, looksSlot, railsSlot, footerNote };
 
+    renderBoutiqueOccasionsSlot();
     renderBoutiqueLooksSlot();
     renderBoutiqueRailsSlot();
 
     mainEl.replaceChildren(
-      el('div', { className: 'boutique-view' }, hero, looksSlot, railsSlot, footerNote)
+      el('div', { className: 'boutique-view' }, hero, occasionsSlot, looksSlot, railsSlot, footerNote)
     );
     updateNavActive();
   }
@@ -1251,23 +1467,93 @@ export function mountStore(root, { onTalk } = {}) {
     }
   }
 
+  // What each department's boutique showed, kept for the life of this page view so that switching
+  // between Women and Men does not repeat the same store searches. A reload starts fresh.
+  const boutiqueMemo = new Map(); // department -> { looks?, sections?, occasions? }
+
+  // Rails from a later reply replace the same rail and add the missing ones; store rails stay last
+  function mergeRails(existing, fresh) {
+    const byId = new Map();
+    for (const sec of [...existing, ...fresh]) byId.set(sec.id || sec.title, sec);
+    const isStoreRail = (sec) => sec.id.startsWith('from-');
+    return [...byId.values()].sort((x, y) => Number(isStoreRail(x)) - Number(isStoreRail(y)));
+  }
+
+  function rememberBoutique(dept, part, value) {
+    boutiqueMemo.set(dept, { ...boutiqueMemo.get(dept), [part]: value });
+  }
+
+  // Fetch boutique looks for the active department and optional occasion, ignoring stale replies
+  function loadBoutiqueLooks(dept, occasion, deptReqId, { render = true } = {}) {
+    if (boutique.looksAbortController) {
+      boutique.looksAbortController.abort();
+    }
+    const controller = new AbortController();
+    boutique.looksAbortController = controller;
+    const looksReqId = ++boutique.looksReqId;
+
+    boutique.looks = [];
+    boutique.looksPending = true;
+
+    if (render && state.view === 'boutique' && boutiqueRefs) {
+      renderBoutiqueLooksSlot();
+      updateBoutiqueFooterNote();
+    }
+
+    const encodedDept = encodeURIComponent(dept);
+    const url = occasion
+      ? `/api/looks?department=${encodedDept}&limit=6&occasion=${encodeURIComponent(occasion.key)}`
+      : `/api/looks?department=${encodedDept}&limit=6`;
+
+    fetchJson(url, { signal: controller.signal }).then((data) => {
+      if (deptReqId !== boutique.reqId || looksReqId !== boutique.looksReqId) return;
+      boutique.looksAbortController = null;
+      boutique.looksPending = false;
+      // Keep only looks made for this department: a piece tagged for the other one rules the look out
+      const fitsDepartment = (lk) =>
+        !Array.isArray(lk.pieces) ||
+        lk.pieces.every((p) => !p?.item?.department || p.item.department === dept);
+      boutique.looks =
+        data && Array.isArray(data.looks)
+          ? data.looks.filter((lk) => lk && typeof lk === 'object' && fitsDepartment(lk)).slice(0, 6)
+          : [];
+      if (!occasion && data && Array.isArray(data.looks)) rememberBoutique(dept, 'looks', boutique.looks);
+      syncBoutiqueBodyClass();
+      if (state.view === 'boutique' && boutiqueRefs) {
+        renderBoutiqueLooksSlot();
+      }
+      finishBoutiqueCheck();
+    });
+  }
+
   function loadBoutique(department) {
     const dept = department === 'men' ? 'men' : 'women';
     if (boutique.abortController) {
       boutique.abortController.abort();
     }
+    if (boutique.looksAbortController) {
+      boutique.looksAbortController.abort();
+      boutique.looksAbortController = null;
+    }
     const controller = new AbortController();
     boutique.abortController = controller;
     const reqId = ++boutique.reqId;
 
+    const kept = boutiqueMemo.get(dept);
+    const fromMemory = Boolean(kept && kept.looks && kept.sections && kept.occasions);
+
     boutique.department = dept;
-    boutique.looks = [];
-    boutique.sections = [];
-    boutique.looksPending = true;
-    boutique.storefrontPending = true;
+    boutique.looks = fromMemory ? kept.looks : [];
+    boutique.sections = fromMemory ? kept.sections : [];
+    boutique.occasions = fromMemory ? kept.occasions : [];
+    boutique.selectedOccasion = null;
+    boutique.occasionFilter = '';
+    boutique.looksPending = !fromMemory;
+    boutique.storefrontPending = !fromMemory;
 
     if (state.view === 'boutique') {
       if (boutiqueRefs) {
+        renderBoutiqueOccasionsSlot();
         renderBoutiqueLooksSlot();
         renderBoutiqueRailsSlot();
         updateBoutiqueFooterNote();
@@ -1275,51 +1561,66 @@ export function mountStore(root, { onTalk } = {}) {
       } else {
         renderBoutiqueView();
       }
+    } else {
+      updateNavActive();
+    }
+
+    if (fromMemory) {
+      syncBoutiqueBodyClass();
+      return;
     }
 
     const encodedDept = encodeURIComponent(dept);
 
-    // Fetch looks and storefront rails in parallel; ignore stale replies on department switch
-    fetchJson(`/api/looks?department=${encodedDept}&limit=6`, { signal: controller.signal }).then(
-      (data) => {
-        if (reqId !== boutique.reqId) return;
-        boutique.looksPending = false;
-        // Keep only looks made for this department: a piece tagged for the other one rules the look out
-        const fitsDepartment = (lk) =>
-          !Array.isArray(lk.pieces) ||
-          lk.pieces.every((p) => !p?.item?.department || p.item.department === dept);
-        boutique.looks =
-          data && Array.isArray(data.looks)
-            ? data.looks.filter((lk) => lk && typeof lk === 'object' && fitsDepartment(lk)).slice(0, 6)
-            : [];
-        syncBoutiqueBodyClass();
-        if (state.view === 'boutique' && boutiqueRefs) {
-          renderBoutiqueLooksSlot();
-        }
-        finishBoutiqueCheck();
-      }
-    );
+    // Fetch looks, storefront rails and occasions in parallel; ignore stale replies on department switch
+    loadBoutiqueLooks(dept, null, reqId, { render: false });
 
-    fetchJson(`/api/storefront?department=${encodedDept}`, { signal: controller.signal }).then(
+    // The storefront route answers within a time budget and marks a short reply as partial.
+    // A partial reply is shown at once, then asked for again (twice at most) and merged by rail.
+    const fetchStorefront = (attempt) => {
+      fetchJson(`/api/storefront?department=${encodedDept}`, { signal: controller.signal }).then(
+        (data) => {
+          if (reqId !== boutique.reqId) return;
+          boutique.storefrontPending = false;
+          const fresh =
+            data && Array.isArray(data.sections)
+              ? data.sections
+                  .filter((sec) => sec && typeof sec === 'object' && Array.isArray(sec.items))
+                  .map((sec) => ({
+                    id: typeof sec.id === 'string' ? sec.id : '',
+                    title: typeof sec.title === 'string' ? sec.title.trim() : '',
+                    items: sec.items.filter((it) => it && typeof it === 'object'),
+                  }))
+                  .filter((sec) => sec.items.length > 0)
+              : [];
+          const partial = Boolean(data && data.partial);
+          boutique.sections = mergeRails(attempt === 0 ? [] : boutique.sections, fresh);
+          if (boutique.sections.length > 0 && !partial) rememberBoutique(dept, 'sections', boutique.sections);
+          syncBoutiqueBodyClass();
+          if (state.view === 'boutique' && boutiqueRefs) {
+            renderBoutiqueRailsSlot();
+          }
+          updateNavActive();
+          finishBoutiqueCheck();
+          if (partial && attempt < 2) {
+            setTimeout(() => {
+              if (reqId === boutique.reqId) fetchStorefront(attempt + 1);
+            }, 2500);
+          }
+        }
+      );
+    };
+    fetchStorefront(0);
+
+    fetchJson(`/api/occasions?department=${encodedDept}`, { signal: controller.signal }).then(
       (data) => {
         if (reqId !== boutique.reqId) return;
-        boutique.storefrontPending = false;
-        boutique.sections =
-          data && Array.isArray(data.sections)
-            ? data.sections
-                .filter((sec) => sec && typeof sec === 'object' && Array.isArray(sec.items))
-                .map((sec) => ({
-                  id: typeof sec.id === 'string' ? sec.id : '',
-                  title: typeof sec.title === 'string' ? sec.title.trim() : '',
-                  items: sec.items.filter((it) => it && typeof it === 'object'),
-                }))
-                .filter((sec) => sec.items.length > 0)
-            : [];
-        syncBoutiqueBodyClass();
+        boutique.occasions = normalizeOccasions(data);
+        if (data) rememberBoutique(dept, 'occasions', boutique.occasions);
         if (state.view === 'boutique' && boutiqueRefs) {
-          renderBoutiqueRailsSlot();
+          renderBoutiqueOccasionsSlot();
         }
-        finishBoutiqueCheck();
+        updateNavActive();
       }
     );
   }
