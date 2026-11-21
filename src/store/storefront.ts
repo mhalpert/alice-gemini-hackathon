@@ -26,6 +26,7 @@ export interface StorefrontDeps {
   search?: (query: string, gender: Gender, opts?: SearchOpts) => Promise<SearchResult>;
   budgetMs?: number;
   perSearchBudgetMs?: number;
+  maxBuildMs?: number;
   now?: () => number;
   env?: Record<string, string | undefined>;
 }
@@ -56,6 +57,7 @@ interface RailSpec {
 
 const DEFAULT_STOREFRONT_BUDGET_MS = 4000;
 const DEFAULT_PER_SEARCH_BUDGET_MS = 2500;
+const DEFAULT_MAX_BUILD_MS = 15_000;
 const RAIL_LIMIT = 8;
 const THIN_RAIL_THRESHOLD = 4;
 const STOREFRONT_DESC_MAX = 160;
@@ -189,9 +191,23 @@ export function isValidShopifyGid(id: string): boolean {
   return typeof id === 'string' && id.length <= 200 && SHOPIFY_GID_RE.test(id);
 }
 
-interface InFlightBuild {
-  promise: Promise<StorefrontResult>;
+interface RailState {
+  spec: RailSpec;
+  items: Item[] | null;
+  settled: boolean;
+}
+
+interface StorefrontBuild {
+  gender: Gender;
+  startedAt: number;
+  states: RailState[];
+  searches: number;
+  settled: boolean;
+  dropped: boolean;
   joiners: number;
+  done: Promise<void>;
+  drop: () => void;
+  snapshot: (waitStart: number, shared: boolean, now: () => number) => StorefrontResult;
 }
 
 interface ReuseEntry {
@@ -206,54 +222,115 @@ export interface StorefrontCallOpts {
 export function createStorefront(
   deps?: StorefrontDeps,
 ): (gender: Gender, callOpts?: StorefrontCallOpts) => Promise<StorefrontResult> {
-  const inFlight = new Map<Gender, InFlightBuild>();
+  const inFlight = new Map<Gender, StorefrontBuild>();
   const reuseCache = new Map<Gender, ReuseEntry>();
 
-  async function buildDepartment(
-    gender: Gender,
-    flight: InFlightBuild,
-    budgetMsOverride?: number,
-  ): Promise<StorefrontResult> {
+  function startBuild(gender: Gender): StorefrontBuild {
     const now = deps?.now ?? (() => Date.now());
-    const t0 = now();
     const searchFn = deps?.search ?? defaultSearch;
-    const budgetMs = budgetMsOverride ?? deps?.budgetMs ?? DEFAULT_STOREFRONT_BUDGET_MS;
     const perSearchBudgetMs = deps?.perSearchBudgetMs ?? DEFAULT_PER_SEARCH_BUDGET_MS;
+    const maxBuildMs = deps?.maxBuildMs ?? DEFAULT_MAX_BUILD_MS;
 
     const rails = buildRailSpecs(gender);
-    let searches = 0;
-    let deadlinePassed = false;
-
-    interface RailState {
-      spec: RailSpec;
-      items: Item[] | null;
-      settled: boolean;
-    }
-
     const states: RailState[] = rails.map((spec) => ({
       spec,
       items: null,
       settled: false,
     }));
 
-    const runBoundedSearch = async (query: string, shops: string[]): Promise<Item[]> => {
-      searches += 1;
+    let safetyTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearSafetyTimer = (): void => {
+      if (safetyTimer !== undefined) {
+        clearTimeout(safetyTimer);
+        safetyTimer = undefined;
+      }
+    };
+
+    const build: StorefrontBuild = {
+      gender,
+      startedAt: now(),
+      states,
+      searches: 0,
+      settled: false,
+      dropped: false,
+      joiners: 0,
+      done: Promise.resolve(),
+      drop: () => {
+        build.dropped = true;
+        clearSafetyTimer();
+        if (inFlight.get(gender) === build) {
+          inFlight.delete(gender);
+        }
+      },
+      snapshot: (waitStart: number, shared: boolean, clock: () => number): StorefrontResult => {
+        const sections: StorefrontSection[] = [];
+        let anySectionPending = false;
+
+        for (const railState of build.states) {
+          if (!railState.settled) {
+            anySectionPending = true;
+          }
+          if (railState.items && railState.items.length > 0) {
+            sections.push({
+              id: railState.spec.id,
+              title: railState.spec.title,
+              items: railState.items,
+            });
+          }
+        }
+
+        const ms = Math.max(0, clock() - waitStart);
+        const meta: StorefrontMeta = shared
+          ? { searches: 0, shared: true }
+          : { searches: build.searches, shared: false };
+
+        if (!build.settled && anySectionPending) {
+          return {
+            department: gender,
+            sections,
+            ms,
+            storefront: meta,
+            partial: true,
+          };
+        }
+
+        return {
+          department: gender,
+          sections,
+          ms,
+          storefront: meta,
+        };
+      },
+    };
+
+    const runBoundedSearch = async (
+      query: string,
+      shops: string[],
+    ): Promise<{ items: Item[]; timedOut: boolean }> => {
+      build.searches += 1;
       let perTimer: ReturnType<typeof setTimeout> | undefined;
       try {
-        const callPromise = searchFn(query, gender, { shops, limit: RAIL_LIMIT });
-        callPromise.catch(() => {});
+        const callPromise = Promise.resolve()
+          .then(() => searchFn(query, gender, { shops, limit: RAIL_LIMIT }))
+          .then(
+            (res) => ({
+              kind: 'ok' as const,
+              items: res && Array.isArray(res.items) ? res.items : [],
+            }),
+            () => ({ kind: 'err' as const, items: [] as Item[] }),
+          );
 
-        const timeoutPromise = new Promise<null>((resolve) => {
-          perTimer = setTimeout(() => resolve(null), perSearchBudgetMs);
+        const timeoutPromise = new Promise<{ kind: 'timeout'; items: Item[] }>((resolve) => {
+          perTimer = setTimeout(() => resolve({ kind: 'timeout', items: [] }), perSearchBudgetMs);
           if (typeof perTimer.unref === 'function') {
             perTimer.unref();
           }
         });
 
-        const res = await Promise.race([callPromise, timeoutPromise]);
-        return res && Array.isArray(res.items) ? res.items : [];
+        const outcome = await Promise.race([callPromise, timeoutPromise]);
+        return { items: outcome.items, timedOut: outcome.kind === 'timeout' };
       } catch {
-        return [];
+        return { items: [], timedOut: false };
       } finally {
         if (perTimer !== undefined) {
           clearTimeout(perTimer);
@@ -265,16 +342,16 @@ export function createStorefront(
       const { spec } = railState;
       try {
         if (spec.kind === 'store' && spec.shop) {
-          const rawItems = await runBoundedSearch(spec.query, [spec.shop]);
-          railState.items = dedupeItems(rawItems, [], RAIL_LIMIT);
+          const res = await runBoundedSearch(spec.query, [spec.shop]);
+          railState.items = dedupeItems(res.items, [], RAIL_LIMIT);
         } else {
           // One plain search restricted to OTHER_SITES (cleaner photos; Fashion Nova has its own rail).
-          const primaryRaw = await runBoundedSearch(spec.query, OTHER_SITES);
-          let merged = dedupeItems(primaryRaw, [], RAIL_LIMIT);
-          // Only top up from ALL_SITES if this rail came back thin (< 4 items) and budget remains.
-          if (merged.length < THIN_RAIL_THRESHOLD && !deadlinePassed) {
-            const topUpRaw = await runBoundedSearch(spec.query, ALL_SITES);
-            merged = dedupeItems(primaryRaw, topUpRaw, RAIL_LIMIT);
+          const primary = await runBoundedSearch(spec.query, OTHER_SITES);
+          let merged = dedupeItems(primary.items, [], RAIL_LIMIT);
+          // Only top up from ALL_SITES if this rail came back thin (< 4 items), did not time out, and build is still active.
+          if (merged.length < THIN_RAIL_THRESHOLD && !primary.timedOut && !build.dropped) {
+            const topUp = await runBoundedSearch(spec.query, ALL_SITES);
+            merged = dedupeItems(primary.items, topUp.items, RAIL_LIMIT);
           }
           railState.items = merged;
         }
@@ -285,71 +362,65 @@ export function createStorefront(
       }
     });
 
-    let budgetTimer: ReturnType<typeof setTimeout> | undefined;
-    let timedOut = false;
+    // Hard safety net: drop a build that has not settled after maxBuildMs (15 s default)
+    // so a hung search cannot block the department forever.
+    safetyTimer = setTimeout(() => {
+      build.drop();
+    }, maxBuildMs);
+    if (typeof safetyTimer.unref === 'function') {
+      safetyTimer.unref();
+    }
 
-    try {
-      const allDone = Promise.all(allRailPromises).then(() => 'done' as const);
-      const budgetPromise = new Promise<'timeout'>((resolve) => {
-        budgetTimer = setTimeout(() => {
-          deadlinePassed = true;
-          resolve('timeout');
-        }, budgetMs);
-        if (typeof budgetTimer.unref === 'function') {
-          budgetTimer.unref();
+    build.done = Promise.all(allRailPromises).then(() => {
+      build.settled = true;
+      clearSafetyTimer();
+      if (inFlight.get(gender) === build) {
+        inFlight.delete(gender);
+      }
+
+      const settledMs = Math.max(0, now() - build.startedAt);
+      console.log(
+        `[store] storefront ${gender} searches=${build.searches} shared=${build.joiners > 0} ms=${settledMs}`,
+      );
+
+      // Only keep a finished result if optional reuse is explicitly enabled (> 0).
+      if (!build.dropped && getStorefrontReuseSeconds(deps?.env ?? process.env) > 0) {
+        const settledResult = build.snapshot(build.startedAt, false, now);
+        if (settledResult.sections.length > 0) {
+          reuseCache.set(gender, { t: now(), result: settledResult });
         }
-      });
-
-      const winner = await Promise.race([allDone, budgetPromise]);
-      timedOut = winner === 'timeout';
-      if (timedOut) {
-        deadlinePassed = true;
       }
-    } finally {
-      if (budgetTimer !== undefined) {
-        clearTimeout(budgetTimer);
-      }
-    }
+    });
 
-    const sections: StorefrontSection[] = [];
-    let anySectionDropped = false;
+    inFlight.set(gender, build);
+    return build;
+  }
 
-    for (const railState of states) {
-      if (!railState.settled) {
-        anySectionDropped = true;
-      }
-      if (railState.items && railState.items.length > 0) {
-        sections.push({
-          id: railState.spec.id,
-          title: railState.spec.title,
-          items: railState.items,
-        });
-      }
-    }
-
-    const ms = Math.max(0, now() - t0);
-    const wasShared = flight.joiners > 0;
-    console.log(
-      `[store] storefront ${gender} searches=${searches} shared=${wasShared} ms=${ms}`,
-    );
-
-    const baseResult: StorefrontResult =
-      timedOut && anySectionDropped
-        ? {
-            department: gender,
-            sections,
-            ms,
-            storefront: { searches, shared: false },
-            partial: true,
+  async function awaitBuildForRequest(
+    build: StorefrontBuild,
+    budgetMs: number,
+    waitStart: number,
+    shared: boolean,
+    now: () => number,
+  ): Promise<StorefrontResult> {
+    if (!build.settled) {
+      let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const budgetPromise = new Promise<'timeout'>((resolve) => {
+          budgetTimer = setTimeout(() => resolve('timeout'), budgetMs);
+          if (typeof budgetTimer.unref === 'function') {
+            budgetTimer.unref();
           }
-        : {
-            department: gender,
-            sections,
-            ms,
-            storefront: { searches, shared: false },
-          };
+        });
+        await Promise.race([build.done, budgetPromise]);
+      } finally {
+        if (budgetTimer !== undefined) {
+          clearTimeout(budgetTimer);
+        }
+      }
+    }
 
-    return baseResult;
+    return build.snapshot(waitStart, shared, now);
   }
 
   return async function loadStorefront(
@@ -359,6 +430,8 @@ export function createStorefront(
     const now = deps?.now ?? (() => Date.now());
     const env = deps?.env ?? process.env;
     const reuseS = getStorefrontReuseSeconds(env);
+    const maxBuildMs = deps?.maxBuildMs ?? DEFAULT_MAX_BUILD_MS;
+    const requestBudgetMs = callOpts?.budgetMs ?? deps?.budgetMs ?? DEFAULT_STOREFRONT_BUDGET_MS;
 
     // 1. Optional short reuse (OFF by default when ALICE_STOREFRONT_REUSE_S is 0/unset).
     if (reuseS > 0) {
@@ -378,41 +451,21 @@ export function createStorefront(
       reuseCache.clear();
     }
 
-    // 2. In-flight sharing: await the active build for this department instead of starting another.
+    // 2. In-flight sharing: join the active build for this department (unless it hit the 15 s safety net).
     const existing = inFlight.get(gender);
     if (existing) {
-      existing.joiners += 1;
-      const waitStart = now();
-      const base = await existing.promise;
-      const waitMs = Math.max(0, now() - waitStart);
-      return {
-        ...base,
-        ms: waitMs,
-        storefront: { searches: 0, shared: true },
-      };
-    }
-
-    const flight: InFlightBuild = {
-      promise: null as unknown as Promise<StorefrontResult>,
-      joiners: 0,
-    };
-
-    const runPromise = buildDepartment(gender, flight, callOpts?.budgetMs).finally(() => {
-      if (inFlight.get(gender) === flight) {
-        inFlight.delete(gender);
+      if (now() - existing.startedAt >= maxBuildMs) {
+        existing.drop();
+      } else {
+        existing.joiners += 1;
+        const waitStart = now();
+        return awaitBuildForRequest(existing, requestBudgetMs, waitStart, true, now);
       }
-    });
-    flight.promise = runPromise;
-    inFlight.set(gender, flight);
-
-    const result = await runPromise;
-
-    // Only keep a finished result if optional reuse is explicitly enabled (> 0).
-    if (getStorefrontReuseSeconds(deps?.env ?? process.env) > 0 && result.sections.length > 0) {
-      reuseCache.set(gender, { t: now(), result });
     }
 
-    return result;
+    const waitStart = now();
+    const build = startBuild(gender);
+    return awaitBuildForRequest(build, requestBudgetMs, waitStart, false, now);
   };
 }
 
