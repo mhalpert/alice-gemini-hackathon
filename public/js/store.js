@@ -3967,9 +3967,13 @@ export function mountStore(root, { onTalk } = {}) {
     bagBodyEl.classList.add('bag-panel-body--no-footer');
   }
 
-  function renderSearchView(query, items) {
+  // An optional title replaces the "Results for" heading; a rack shows up to twelve items
+  function renderSearchView(query, items, { title = '', rack = false } = {}) {
     const cleanQuery = query.trim();
-    const visibleItems = items.filter((it) => it && typeof it === 'object').slice(0, 8);
+    const cleanTitle = typeof title === 'string' ? title.trim().slice(0, 60) : '';
+    const visibleItems = items
+      .filter((it) => it && typeof it === 'object')
+      .slice(0, rack ? 12 : 8);
 
     const backButton =
       state.outfits.size > 0
@@ -4006,15 +4010,15 @@ export function mountStore(root, { onTalk } = {}) {
         el(
           'div',
           { className: 'breadcrumb' },
-          el('span', null, 'Search'),
+          el('span', null, cleanTitle ? 'From Alice' : 'Search'),
           el('span', { className: 'breadcrumb-sep', 'aria-hidden': 'true' }, '/'),
-          el('span', { className: 'breadcrumb-current' }, cleanQuery || 'All')
+          el('span', { className: 'breadcrumb-current' }, cleanTitle || cleanQuery || 'All')
         )
       ),
       el(
         'div',
         { className: 'collection-heading-row' },
-        el('h1', { className: 'collection-title' }, `Results for "${cleanQuery}"`),
+        el('h1', { className: 'collection-title' }, cleanTitle || `Results for "${cleanQuery}"`),
         visibleItems.length > 0
           ? el(
               'span',
@@ -4054,11 +4058,13 @@ export function mountStore(root, { onTalk } = {}) {
     }
 
     closeProductPanel();
-    state.lastSearch = { query: payload.query, items: payload.items };
+    const title = typeof payload.title === 'string' ? payload.title : '';
+    const rack = payload.rack === true;
+    state.lastSearch = { query: payload.query, items: payload.items, title, rack };
     state.searchFromBoutique = fromBoutique;
     state.view = 'search';
     if (markProducts) setHasProducts();
-    renderSearchView(payload.query, payload.items);
+    renderSearchView(payload.query, payload.items, { title, rack });
     window.scrollTo({ top: 0, behavior: 'smooth' });
     return { ok: true };
   }

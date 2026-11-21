@@ -86,7 +86,7 @@ export interface PageActions {
   reveal: { outfit: number; url?: string; kind?: TryOnKind };
   bagReady: { stores: BagStore[]; links: BagLink[]; total: number };
   say: { caption: string };
-  showSearch: { query: string; items: Item[] };
+  showSearch: { query: string; items: Item[]; title?: string; rack?: boolean }; // title replaces the "Results for" heading; rack shows up to 12 items
   showProduct: { item: Item; images: string[]; slot: string; why: string; sizes: string[]; details: string[]; description: string };
   hideProduct: Record<string, never>;
 }
