@@ -11,13 +11,6 @@ const NAV_ITEMS = [
 
 const COUNT_WORDS = ['Zero', 'One', 'Two', 'Three', 'Four', 'Five', 'Six'];
 
-// Module-level store for stubbed panels (built in a later task)
-const stubPanels = {
-  bag: null,
-  search: null,
-  product: null,
-};
-
 // Shared Shopify image sizing helper — always use this for store CDN URLs
 function sized(url, width) {
   if (!url || typeof url !== 'string') return '';
@@ -55,6 +48,26 @@ function formatPrice(amount) {
 function formatSlot(slot) {
   if (!slot || typeof slot !== 'string') return 'Piece';
   return slot.charAt(0).toUpperCase() + slot.slice(1).toLowerCase();
+}
+
+// Cut plain text at maxLen characters on a word boundary
+function truncateAtWord(text, maxLen = 700) {
+  if (typeof text !== 'string') return '';
+  const clean = text.trim();
+  if (clean.length <= maxLen) return clean;
+  const cut = clean.slice(0, maxLen);
+  if (clean.charAt(maxLen) === ' ') return `${cut.trimEnd()}…`;
+  const lastSpace = cut.lastIndexOf(' ');
+  const bounded = lastSpace > 0 ? cut.slice(0, lastSpace) : cut;
+  return `${bounded.trimEnd()}…`;
+}
+
+function itemMatches(a, b) {
+  if (!a || !b) return false;
+  if (a.id && b.id && a.id === b.id) return true;
+  if (a.variant_id && b.variant_id && a.variant_id === b.variant_id) return true;
+  if (a.url && b.url && a.url === b.url) return true;
+  return false;
 }
 
 function parseSubtitleMeta(subtitle, payload) {
@@ -181,6 +194,13 @@ function starSvg() {
   );
 }
 
+function closeSvg() {
+  return svgIcon('0 0 24 24', [
+    { tag: 'line', x1: '6', y1: '6', x2: '18', y2: '18' },
+    { tag: 'line', x1: '18', y1: '6', x2: '6', y2: '18' },
+  ]);
+}
+
 // Renders the shop into `root` (the #store element) and returns the page-action handlers.
 export function mountStore(root) {
   if (!root || !(root instanceof HTMLElement)) {
@@ -189,14 +209,21 @@ export function mountStore(root) {
 
   // Single state object for the entire shop view
   const state = {
-    view: 'empty', // 'empty' | 'looks' | 'picked'
+    view: 'empty', // 'empty' | 'looks' | 'picked' | 'search'
     outfits: new Map(), // look number -> Outfit
     media: new Map(), // look number -> { tryOnStatus, tryOnUrl, collageUrl, revealed, preloads }
     subtitleMeta: { raw: '', cleanSubtitle: '', occasion: '', budget: null },
     pickedOutfit: null,
     highlightedSlot: null,
     bagCount: 0,
+    bagData: null,
+    bagOpen: false,
+    productOpen: false,
+    lastSearch: null,
   };
+
+  // Optional hint set during local product-card clicks so multi-look items keep their look number
+  let pendingProductOutfit = null;
 
   function getMedia(num) {
     if (!state.media.has(num)) {
@@ -224,9 +251,13 @@ export function mountStore(root) {
     document.body.classList.add('has-products');
   }
 
-  // Contract helper for the upcoming bag drawer and product detail panel
+  // Contract helper for the bag drawer and product detail panel
   function setPanelOpen(isOpen) {
     document.body.classList.toggle('panel-open', Boolean(isOpen));
+  }
+
+  function syncPanelOpen() {
+    setPanelOpen(state.productOpen || state.bagOpen);
   }
 
   function sortedOutfits() {
@@ -267,7 +298,9 @@ export function mountStore(root) {
             className: 'icon-btn',
             'aria-label': 'Search',
             onClick: () => {
-              // Hook for the search panel task
+              if (state.lastSearch) {
+                handlers.showSearch(state.lastSearch);
+              }
             },
           },
           searchSvg()
@@ -279,7 +312,11 @@ export function mountStore(root) {
             className: 'icon-btn',
             'aria-label': 'Shopping bag',
             onClick: () => {
-              // Hook for the bag drawer task (will call setPanelOpen(true))
+              if (state.bagOpen) {
+                closeBagDrawer();
+              } else if (state.bagData) {
+                openBagDrawer();
+              }
             },
           },
           bagSvg(),
@@ -317,13 +354,17 @@ export function mountStore(root) {
 
   const mainEl = el('main', { className: 'store-main' });
 
-  // Clearly marked mount slots for upcoming bag drawer, search view, and product panel
+  // Persistent mount slots for bag drawer, search view, and product panel
+  const bagSlotEl = el('div', { id: 'store-bag-slot', dataset: { panel: 'bag' } });
+  const searchSlotEl = el('div', { id: 'store-search-slot', dataset: { panel: 'search' }, hidden: true });
+  const productSlotEl = el('div', { id: 'store-product-slot', dataset: { panel: 'product' } });
+
   const panelSlotsEl = el(
     'div',
     { className: 'store-panel-slots' },
-    el('div', { id: 'store-bag-slot', dataset: { panel: 'bag' } }),
-    el('div', { id: 'store-search-slot', dataset: { panel: 'search' } }),
-    el('div', { id: 'store-product-slot', dataset: { panel: 'product' } })
+    bagSlotEl,
+    searchSlotEl,
+    productSlotEl
   );
 
   const footerEl = el(
@@ -339,6 +380,92 @@ export function mountStore(root) {
 
   const shellEl = el('div', { className: 'store-shell' }, headerEl, mainEl, panelSlotsEl, footerEl);
   root.replaceChildren(shellEl);
+
+  // Persistent slide-in shells for the product page and bag drawer
+  const productBreadcrumbEl = el('div', { className: 'breadcrumb product-breadcrumb' });
+  const productBodyEl = el('div', { className: 'panel-body product-panel-body' });
+  const productLayerEl = el(
+    'div',
+    { className: 'panel-layer panel-layer--product', 'aria-hidden': 'true' },
+    el('div', {
+      className: 'panel-backdrop',
+      onClick: () => handlers.hideProduct({}),
+    }),
+    el(
+      'aside',
+      {
+        className: 'panel-sheet panel-sheet--product',
+        role: 'dialog',
+        'aria-modal': 'true',
+        'aria-label': 'Product details',
+      },
+      el(
+        'div',
+        { className: 'panel-head product-panel-head' },
+        productBreadcrumbEl,
+        el(
+          'button',
+          {
+            type: 'button',
+            className: 'panel-close-btn',
+            'aria-label': 'Close product details',
+            onClick: () => handlers.hideProduct({}),
+          },
+          closeSvg()
+        )
+      ),
+      productBodyEl
+    )
+  );
+  productSlotEl.replaceChildren(productLayerEl);
+
+  const bagBodyEl = el('div', { className: 'panel-body bag-panel-body' });
+  const bagFooterEl = el('div', { className: 'panel-footer bag-panel-footer' });
+  const bagLayerEl = el(
+    'div',
+    { className: 'panel-layer panel-layer--bag', 'aria-hidden': 'true' },
+    el('div', {
+      className: 'panel-backdrop',
+      onClick: () => closeBagDrawer(),
+    }),
+    el(
+      'aside',
+      {
+        className: 'panel-sheet panel-sheet--bag',
+        role: 'dialog',
+        'aria-modal': 'true',
+        'aria-label': 'Your bag',
+      },
+      el(
+        'div',
+        { className: 'panel-head bag-panel-head' },
+        el('h2', { className: 'bag-panel-title' }, 'Your bag'),
+        el(
+          'button',
+          {
+            type: 'button',
+            className: 'panel-close-btn',
+            'aria-label': 'Close bag',
+            dataset: { closeBag: 'true' },
+            onClick: () => closeBagDrawer(),
+          },
+          closeSvg()
+        )
+      ),
+      bagBodyEl,
+      bagFooterEl
+    )
+  );
+  bagSlotEl.replaceChildren(bagLayerEl);
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (state.productOpen) {
+      handlers.hideProduct({});
+    } else if (state.bagOpen) {
+      closeBagDrawer();
+    }
+  });
 
   function syncHeaderHeight() {
     const h = headerEl.offsetHeight;
@@ -423,8 +550,19 @@ export function mountStore(root) {
             }
             return;
           }
-          // Later task: call handlers.showProduct for this item
           e.preventDefault();
+          pendingProductOutfit =
+            typeof outfitNumber === 'number' && Number.isFinite(outfitNumber) ? outfitNumber : null;
+          handlers.showProduct({
+            item,
+            images: item.image ? [item.image] : [],
+            slot: piece?.slot || '',
+            why: piece?.why || '',
+            sizes: Array.isArray(item.sizes) ? item.sizes : [],
+            details: [],
+            description: typeof item.description === 'string' ? item.description : '',
+          });
+          pendingProductOutfit = null;
         },
       },
       el(
@@ -888,6 +1026,491 @@ export function mountStore(root) {
     };
   }
 
+  function leaveSearchView() {
+    if (!searchSlotEl.hidden || searchSlotEl.childNodes.length > 0) {
+      searchSlotEl.replaceChildren();
+      searchSlotEl.hidden = true;
+    }
+    mainEl.hidden = false;
+  }
+
+  // Resolve the look number only when the item belongs to a look currently on screen
+  function findLookNumberForItem(item, hintOutfitNumber) {
+    if (state.view === 'picked' && state.pickedOutfit !== null) {
+      const picked = state.outfits.get(state.pickedOutfit);
+      if (picked && (picked.pieces || []).some((p) => itemMatches(p?.item, item))) {
+        return state.pickedOutfit;
+      }
+      return null;
+    }
+    if (state.view === 'looks') {
+      if (typeof hintOutfitNumber === 'number' && state.outfits.has(hintOutfitNumber)) {
+        const hinted = state.outfits.get(hintOutfitNumber);
+        if (hinted && (hinted.pieces || []).some((p) => itemMatches(p?.item, item))) {
+          return hintOutfitNumber;
+        }
+      }
+      for (const look of sortedOutfits()) {
+        if ((look.pieces || []).some((p) => itemMatches(p?.item, item))) {
+          return look.number;
+        }
+      }
+    }
+    return null;
+  }
+
+  function closeProductPanel({ sync = true } = {}) {
+    state.productOpen = false;
+    productLayerEl.classList.remove('is-open');
+    productLayerEl.setAttribute('aria-hidden', 'true');
+    if (sync) syncPanelOpen();
+  }
+
+  function closeBagDrawer() {
+    state.bagOpen = false;
+    bagLayerEl.classList.remove('is-open');
+    bagLayerEl.setAttribute('aria-hidden', 'true');
+    syncPanelOpen();
+  }
+
+  function openBagDrawer() {
+    if (!state.bagData) return;
+    // Opening the bag closes the product page first without flickering panel-open
+    closeProductPanel({ sync: false });
+    state.bagOpen = true;
+    bagLayerEl.classList.add('is-open');
+    bagLayerEl.setAttribute('aria-hidden', 'false');
+    syncPanelOpen();
+  }
+
+  function renderProductPanel(payload, lookNum) {
+    const item = payload.item || {};
+    const slotText = typeof payload.slot === 'string' ? payload.slot.trim() : '';
+
+    // Breadcrumb: Looks by Alice [/ Look N] [/ Slot]
+    const crumbParts = ['Looks by Alice'];
+    if (lookNum !== null) crumbParts.push(`Look ${lookNum}`);
+    if (slotText) crumbParts.push(formatSlot(slotText));
+
+    const crumbNodes = [];
+    crumbParts.forEach((label, idx) => {
+      if (idx > 0) {
+        crumbNodes.push(el('span', { className: 'breadcrumb-sep', 'aria-hidden': 'true' }, '/'));
+      }
+      crumbNodes.push(
+        el('span', { className: idx === crumbParts.length - 1 ? 'breadcrumb-current' : null }, label)
+      );
+    });
+    productBreadcrumbEl.replaceChildren(...crumbNodes);
+
+    // Gallery: up to 6 unique images, falling back to item.image
+    const rawImages = Array.isArray(payload.images) ? payload.images : [];
+    const seenImages = new Set();
+    const galleryImages = [];
+    for (const src of rawImages) {
+      if (typeof src === 'string' && src.trim() && !seenImages.has(src.trim())) {
+        seenImages.add(src.trim());
+        galleryImages.push(src.trim());
+        if (galleryImages.length >= 6) break;
+      }
+    }
+    if (galleryImages.length === 0 && typeof item.image === 'string' && item.image.trim()) {
+      galleryImages.push(item.image.trim());
+    }
+
+    let gallerySection = null;
+    if (galleryImages.length > 0) {
+      const mainImg = el('img', {
+        className: 'product-gallery-img',
+        src: sized(galleryImages[0], 900),
+        alt: item.title || 'Garment',
+        decoding: 'async',
+      });
+
+      const thumbButtons = [];
+      const thumbsRow = el(
+        'div',
+        { className: 'product-gallery-thumbs', role: 'group', 'aria-label': 'Product images' },
+        galleryImages.map((url, idx) => {
+          const btn = el(
+            'button',
+            {
+              type: 'button',
+              className: `product-thumb${idx === 0 ? ' is-active' : ''}`,
+              'aria-label': `View image ${idx + 1}`,
+              'aria-pressed': idx === 0 ? 'true' : 'false',
+              onClick: () => {
+                mainImg.src = sized(url, 900);
+                thumbButtons.forEach((other, i) => {
+                  const active = i === idx;
+                  other.classList.toggle('is-active', active);
+                  other.setAttribute('aria-pressed', active ? 'true' : 'false');
+                });
+              },
+            },
+            el('img', {
+              className: 'product-thumb-img',
+              src: sized(url, 160),
+              alt: '',
+              loading: 'lazy',
+              decoding: 'async',
+            })
+          );
+          thumbButtons.push(btn);
+          return btn;
+        })
+      );
+
+      gallerySection = el(
+        'div',
+        { className: 'product-gallery' },
+        el('div', { className: 'product-gallery-main' }, mainImg),
+        thumbsRow
+      );
+    }
+
+    const ratingEl =
+      typeof item.rating === 'number' && Number.isFinite(item.rating)
+        ? el(
+            'span',
+            { className: 'product-rating' },
+            starSvg(),
+            el(
+              'span',
+              null,
+              item.rating_count !== null && item.rating_count !== undefined
+                ? `${item.rating.toFixed(1)} (${Number(item.rating_count).toLocaleString()})`
+                : item.rating.toFixed(1)
+            )
+          )
+        : null;
+
+    const eyebrowChildren = [];
+    if (item.store) {
+      eyebrowChildren.push(el('span', { className: 'product-store' }, item.store));
+    }
+    if (slotText) {
+      if (eyebrowChildren.length > 0) {
+        eyebrowChildren.push(el('span', { className: 'product-eyebrow-sep', 'aria-hidden': 'true' }, '·'));
+      }
+      eyebrowChildren.push(el('span', { className: 'product-panel-slot' }, formatSlot(slotText)));
+    }
+
+    const metaSection = el(
+      'div',
+      { className: 'product-panel-meta' },
+      eyebrowChildren.length > 0 ? el('div', { className: 'product-panel-eyebrow' }, eyebrowChildren) : null,
+      el('h2', { className: 'product-panel-title' }, item.title || ''),
+      el(
+        'div',
+        { className: 'product-panel-price-row' },
+        el('span', { className: 'product-panel-price' }, formatPrice(item.price)),
+        ratingEl
+      )
+    );
+
+    // Display-only size chips, falling back to item.sizes
+    const rawSizes =
+      Array.isArray(payload.sizes) && payload.sizes.length > 0
+        ? payload.sizes
+        : Array.isArray(item.sizes)
+          ? item.sizes
+          : [];
+    const sizes = rawSizes
+      .map((s) => (typeof s === 'string' ? s.trim() : ''))
+      .filter(Boolean);
+
+    const sizesSection =
+      sizes.length > 0
+        ? el(
+            'section',
+            { className: 'product-panel-block', 'aria-label': 'Available sizes' },
+            el('h3', { className: 'section-label' }, 'Sizes'),
+            el(
+              'div',
+              { className: 'size-chips' },
+              sizes.map((size) => el('span', { className: 'size-chip' }, size))
+            )
+          )
+        : null;
+
+    // Styling rationale box, hidden when empty
+    const whyText = typeof payload.why === 'string' ? payload.why.trim() : '';
+    const whySection = whyText
+      ? el(
+          'section',
+          { className: 'product-why-box' },
+          el('h3', { className: 'section-label product-why-heading' }, 'Why it works in the look'),
+          el('p', { className: 'product-why-text' }, whyText)
+        )
+      : null;
+
+    // Up to 5 details bullets and word-bounded 700-char description
+    const details = Array.isArray(payload.details)
+      ? payload.details
+          .map((d) => (typeof d === 'string' ? d.trim() : ''))
+          .filter(Boolean)
+          .slice(0, 5)
+      : [];
+
+    const rawDesc =
+      typeof payload.description === 'string' && payload.description.trim()
+        ? payload.description
+        : typeof item.description === 'string'
+          ? item.description
+          : '';
+    const descText = truncateAtWord(rawDesc, 700);
+
+    const copySection =
+      details.length > 0 || descText
+        ? el(
+            'section',
+            { className: 'product-panel-block' },
+            details.length > 0
+              ? el(
+                  'ul',
+                  { className: 'product-details-list' },
+                  details.map((bullet) => el('li', null, bullet))
+                )
+              : null,
+            descText ? el('p', { className: 'product-description' }, descText) : null
+          )
+        : null;
+
+    const externalHref = safeExternalUrl(item.url);
+    const storeLabel = typeof item.store === 'string' && item.store.trim() ? item.store.trim() : 'store';
+    const ctaSection = externalHref
+      ? el(
+          'div',
+          { className: 'product-panel-actions' },
+          el(
+            'a',
+            {
+              className: 'btn-primary product-panel-cta',
+              href: externalHref,
+              target: '_blank',
+              rel: 'noopener',
+            },
+            `View at ${storeLabel}`
+          )
+        )
+      : null;
+
+    productBodyEl.replaceChildren(
+      ...[gallerySection, metaSection, sizesSection, whySection, copySection, ctaSection].filter(Boolean)
+    );
+    productBodyEl.scrollTop = 0;
+  }
+
+  function renderBagDrawer({ stores, links, total }) {
+    const linkByStore = new Map();
+    for (const link of links) {
+      if (link && typeof link.store === 'string' && typeof link.url === 'string') {
+        const safeHref = safeExternalUrl(link.url);
+        if (safeHref) {
+          linkByStore.set(link.store, safeHref);
+          linkByStore.set(link.store.trim().toLowerCase(), safeHref);
+        }
+      }
+    }
+
+    if (stores.length === 0) {
+      bagBodyEl.replaceChildren(el('p', { className: 'bag-empty' }, 'Nothing in your bag yet.'));
+    } else {
+      const storeNodes = stores.map((storeObj) => {
+        const storeName =
+          typeof storeObj.store === 'string' && storeObj.store.trim()
+            ? storeObj.store.trim()
+            : 'Store';
+        const addedLines = Array.isArray(storeObj.added)
+          ? storeObj.added.filter((line) => line && typeof line === 'object')
+          : [];
+        const notAddedLines = Array.isArray(storeObj.not_added)
+          ? storeObj.not_added.filter((line) => line && typeof line === 'object')
+          : [];
+        const hasSubtotal =
+          typeof storeObj.subtotal === 'number' && Number.isFinite(storeObj.subtotal);
+        const checkoutUrl =
+          linkByStore.get(storeName) || linkByStore.get(storeName.toLowerCase()) || null;
+
+        const addedList =
+          addedLines.length > 0
+            ? el(
+                'ul',
+                { className: 'bag-lines' },
+                addedLines.map((line) => {
+                  const thumbUrl = sized(line.image, 160);
+                  const sizeText =
+                    typeof line.size === 'string' && line.size.trim() ? line.size.trim() : '';
+                  return el(
+                    'li',
+                    { className: 'bag-line' },
+                    el(
+                      'div',
+                      { className: 'bag-line-thumb' },
+                      thumbUrl
+                        ? el('img', {
+                            className: 'bag-line-img',
+                            src: thumbUrl,
+                            alt: line.title || 'Garment',
+                            loading: 'lazy',
+                            decoding: 'async',
+                          })
+                        : null
+                    ),
+                    el(
+                      'div',
+                      { className: 'bag-line-info' },
+                      el('span', { className: 'bag-line-title' }, line.title || ''),
+                      sizeText ? el('span', { className: 'bag-line-size' }, `Size ${sizeText}`) : null
+                    ),
+                    el('span', { className: 'bag-line-price' }, formatPrice(line.price))
+                  );
+                })
+              )
+            : null;
+
+        const subtotalRow = hasSubtotal
+          ? el(
+              'div',
+              { className: 'bag-store-subtotal' },
+              el('span', { className: 'bag-store-subtotal-label' }, 'Subtotal'),
+              el('span', { className: 'bag-store-subtotal-val' }, formatPrice(storeObj.subtotal))
+            )
+          : null;
+
+        const checkoutBtn = checkoutUrl
+          ? el(
+              'a',
+              {
+                className: 'btn-primary bag-checkout-btn',
+                href: checkoutUrl,
+                target: '_blank',
+                rel: 'noopener',
+              },
+              `Checkout at ${storeName}`
+            )
+          : null;
+
+        const notAddedBox =
+          notAddedLines.length > 0
+            ? el(
+                'div',
+                { className: 'bag-not-added', role: 'note' },
+                el('p', { className: 'bag-not-added-heading' }, 'Not added'),
+                el(
+                  'ul',
+                  { className: 'bag-not-added-list' },
+                  notAddedLines.map((na) =>
+                    el(
+                      'li',
+                      { className: 'bag-not-added-item' },
+                      el('span', { className: 'bag-not-added-title' }, na.title || ''),
+                      typeof na.reason === 'string' && na.reason.trim()
+                        ? el('span', { className: 'bag-not-added-reason' }, na.reason.trim())
+                        : null
+                    )
+                  )
+                )
+              )
+            : null;
+
+        return el(
+          'section',
+          { className: 'bag-store-section' },
+          el('h3', { className: 'bag-store-name' }, storeName),
+          addedList,
+          subtotalRow,
+          checkoutBtn,
+          notAddedBox
+        );
+      });
+
+      bagBodyEl.replaceChildren(...storeNodes);
+    }
+
+    const fallbackTotal = stores.reduce(
+      (sum, s) => sum + (typeof s.subtotal === 'number' && Number.isFinite(s.subtotal) ? s.subtotal : 0),
+      0
+    );
+    const displayTotal = total !== null ? total : fallbackTotal;
+
+    bagFooterEl.replaceChildren(
+      el(
+        'div',
+        { className: 'bag-total-row' },
+        el('span', { className: 'bag-total-label' }, 'Total'),
+        el('span', { className: 'bag-total-value' }, formatPrice(displayTotal))
+      ),
+      el('p', { className: 'bag-disclaimer' }, "You check out on each store's own site. Alice never pays.")
+    );
+    bagBodyEl.scrollTop = 0;
+  }
+
+  function renderSearchView(query, items) {
+    const cleanQuery = query.trim();
+    const visibleItems = items.filter((it) => it && typeof it === 'object').slice(0, 8);
+
+    const headerBand = el(
+      'section',
+      { className: 'collection-band search-band' },
+      el(
+        'div',
+        { className: 'search-top-bar' },
+        state.outfits.size > 0
+          ? el(
+              'button',
+              {
+                type: 'button',
+                className: 'back-link',
+                onClick: () => handlers.showAll({}),
+              },
+              arrowLeftSvg(),
+              'Back to your looks'
+            )
+          : null,
+        el(
+          'div',
+          { className: 'breadcrumb' },
+          el('span', null, 'Search'),
+          el('span', { className: 'breadcrumb-sep', 'aria-hidden': 'true' }, '/'),
+          el('span', { className: 'breadcrumb-current' }, cleanQuery || 'All')
+        )
+      ),
+      el(
+        'div',
+        { className: 'collection-heading-row' },
+        el('h1', { className: 'collection-title' }, `Results for "${cleanQuery}"`),
+        visibleItems.length > 0
+          ? el(
+              'span',
+              { className: 'shop-look-count' },
+              `${visibleItems.length} ${visibleItems.length === 1 ? 'item' : 'items'}`
+            )
+          : null
+      )
+    );
+
+    const resultsContent =
+      visibleItems.length === 0
+        ? el('p', { className: 'search-empty' }, 'Nothing in stock for that right now.')
+        : el(
+            'section',
+            { className: 'search-results-grid', 'aria-label': 'Search results' },
+            visibleItems.map((item) =>
+              buildProductCard({ slot: '', why: '', item }, null, {
+                compact: false,
+                pointed: false,
+              })
+            )
+          );
+
+    searchSlotEl.replaceChildren(headerBand, resultsContent);
+    mainEl.hidden = true;
+    searchSlotEl.hidden = false;
+    updateNavActive();
+  }
+
   // Wrap every page-action handler so it stays synchronous and never throws
   function safeHandler(fn) {
     return (payload) => {
@@ -904,6 +1527,9 @@ export function mountStore(root) {
       if (!payload || !Array.isArray(payload.outfits)) {
         return { ok: false, error: 'showOutfits requires an outfits array' };
       }
+
+      closeProductPanel();
+      leaveSearchView();
 
       if (payload.replace === true) {
         state.outfits.clear();
@@ -949,6 +1575,8 @@ export function mountStore(root) {
         return { ok: false, error: `Unknown outfit: ${payload.outfit}` };
       }
 
+      leaveSearchView();
+
       const nextSlot =
         typeof payload.piece === 'string' && payload.piece.trim() ? payload.piece.trim() : null;
       const samePicked =
@@ -987,6 +1615,8 @@ export function mountStore(root) {
       ) {
         return { ok: false, error: 'updateOutfit requires numeric outfit and outfit data with pieces' };
       }
+
+      closeProductPanel();
 
       const updated = normalizeOutfit({ ...payload.data, number: payload.outfit }, payload.outfit);
       state.outfits.set(payload.outfit, updated);
@@ -1071,6 +1701,8 @@ export function mountStore(root) {
     }),
 
     showAll: safeHandler(() => {
+      closeProductPanel();
+      leaveSearchView();
       state.pickedOutfit = null;
       state.highlightedSlot = null;
       activePickedRefs = null;
@@ -1101,6 +1733,7 @@ export function mountStore(root) {
         return { ok: false, error: `No try-on image ready for outfit ${payload.outfit}` };
       }
 
+      leaveSearchView();
       media.tryOnStatus = 'ready';
       const wasAlreadyRevealed = media.revealed;
       media.revealed = true;
@@ -1124,21 +1757,28 @@ export function mountStore(root) {
     }),
 
     // -----------------------------------------------------------------------
-    // Working stubs for panels built in the next task (#store-bag-slot,
-    // #store-search-slot, #store-product-slot). Toggle setPanelOpen(true/false)
-    // once those drawers/overlays are rendered.
+    // Panel handlers: bag drawer, search results, product detail sheet
     // -----------------------------------------------------------------------
 
     bagReady: safeHandler((payload) => {
       if (!payload || !Array.isArray(payload.stores)) {
         return { ok: false, error: 'bagReady requires a stores array' };
       }
-      stubPanels.bag = payload;
-      state.bagCount = payload.stores.reduce(
-        (sum, s) => sum + (Array.isArray(s?.added) ? s.added.length : 0),
+
+      const stores = payload.stores.filter((s) => s && typeof s === 'object');
+      const links = Array.isArray(payload.links) ? payload.links : [];
+      const total =
+        typeof payload.total === 'number' && Number.isFinite(payload.total) ? payload.total : null;
+
+      state.bagData = { stores, links, total };
+      state.bagCount = stores.reduce(
+        (sum, s) => sum + (Array.isArray(s.added) ? s.added.length : 0),
         0
       );
       updateBagBadge();
+      setHasProducts();
+      renderBagDrawer(state.bagData);
+      openBagDrawer();
       return { ok: true };
     }),
 
@@ -1146,10 +1786,13 @@ export function mountStore(root) {
       if (!payload || typeof payload.query !== 'string' || !Array.isArray(payload.items)) {
         return { ok: false, error: 'showSearch requires a query string and items array' };
       }
-      stubPanels.search = payload;
-      if (payload.items.length > 0) {
-        setHasProducts();
-      }
+
+      closeProductPanel();
+      state.lastSearch = { query: payload.query, items: payload.items };
+      state.view = 'search';
+      setHasProducts();
+      renderSearchView(payload.query, payload.items);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
       return { ok: true };
     }),
 
@@ -1157,14 +1800,19 @@ export function mountStore(root) {
       if (!payload || !payload.item || typeof payload.item !== 'object') {
         return { ok: false, error: 'showProduct requires an item object' };
       }
-      stubPanels.product = payload;
-      // Later task: render product sheet into #store-product-slot and call setPanelOpen(true)
+
+      const lookNum = findLookNumberForItem(payload.item, pendingProductOutfit);
+      setHasProducts();
+      renderProductPanel(payload, lookNum);
+      state.productOpen = true;
+      productLayerEl.classList.add('is-open');
+      productLayerEl.setAttribute('aria-hidden', 'false');
+      syncPanelOpen();
       return { ok: true };
     }),
 
     hideProduct: safeHandler(() => {
-      stubPanels.product = null;
-      setPanelOpen(false);
+      closeProductPanel();
       return { ok: true };
     }),
   };
