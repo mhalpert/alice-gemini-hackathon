@@ -1458,6 +1458,14 @@ export function mountStore(root, { onTalk } = {}) {
     }
   }
 
+  // What each department's boutique showed, kept for the life of this page view so that switching
+  // between Women and Men does not repeat the same store searches. A reload starts fresh.
+  const boutiqueMemo = new Map(); // department -> { looks?, sections?, occasions? }
+
+  function rememberBoutique(dept, part, value) {
+    boutiqueMemo.set(dept, { ...boutiqueMemo.get(dept), [part]: value });
+  }
+
   // Fetch boutique looks for the active department and optional occasion, ignoring stale replies
   function loadBoutiqueLooks(dept, occasion, deptReqId, { render = true } = {}) {
     if (boutique.looksAbortController) {
@@ -1492,6 +1500,7 @@ export function mountStore(root, { onTalk } = {}) {
         data && Array.isArray(data.looks)
           ? data.looks.filter((lk) => lk && typeof lk === 'object' && fitsDepartment(lk)).slice(0, 6)
           : [];
+      if (!occasion && data && Array.isArray(data.looks)) rememberBoutique(dept, 'looks', boutique.looks);
       syncBoutiqueBodyClass();
       if (state.view === 'boutique' && boutiqueRefs) {
         renderBoutiqueLooksSlot();
@@ -1513,14 +1522,17 @@ export function mountStore(root, { onTalk } = {}) {
     boutique.abortController = controller;
     const reqId = ++boutique.reqId;
 
+    const kept = boutiqueMemo.get(dept);
+    const fromMemory = Boolean(kept && kept.looks && kept.sections && kept.occasions);
+
     boutique.department = dept;
-    boutique.looks = [];
-    boutique.sections = [];
-    boutique.occasions = [];
+    boutique.looks = fromMemory ? kept.looks : [];
+    boutique.sections = fromMemory ? kept.sections : [];
+    boutique.occasions = fromMemory ? kept.occasions : [];
     boutique.selectedOccasion = null;
     boutique.occasionFilter = '';
-    boutique.looksPending = true;
-    boutique.storefrontPending = true;
+    boutique.looksPending = !fromMemory;
+    boutique.storefrontPending = !fromMemory;
 
     if (state.view === 'boutique') {
       if (boutiqueRefs) {
@@ -1534,6 +1546,11 @@ export function mountStore(root, { onTalk } = {}) {
       }
     } else {
       updateNavActive();
+    }
+
+    if (fromMemory) {
+      syncBoutiqueBodyClass();
+      return;
     }
 
     const encodedDept = encodeURIComponent(dept);
@@ -1556,6 +1573,7 @@ export function mountStore(root, { onTalk } = {}) {
                 }))
                 .filter((sec) => sec.items.length > 0)
             : [];
+        if (boutique.sections.length > 0) rememberBoutique(dept, 'sections', boutique.sections);
         syncBoutiqueBodyClass();
         if (state.view === 'boutique' && boutiqueRefs) {
           renderBoutiqueRailsSlot();
@@ -1568,6 +1586,7 @@ export function mountStore(root, { onTalk } = {}) {
       (data) => {
         if (reqId !== boutique.reqId) return;
         boutique.occasions = normalizeOccasions(data);
+        if (data) rememberBoutique(dept, 'occasions', boutique.occasions);
         if (state.view === 'boutique' && boutiqueRefs) {
           renderBoutiqueOccasionsSlot();
         }
