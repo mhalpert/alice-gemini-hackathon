@@ -1,0 +1,13 @@
+{
+  "name": "alice",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Alice: a live video AI stylist. Built at the Gemini 4 NYC Hackathon on 2026-11-21.",
+  "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "test": "node --test tests/"
+  }
+}
