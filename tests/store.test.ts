@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createShopMcp, ShopMcpError } from '../src/store/shopmcp.ts';
+import { redactSecrets } from '../src/store/auth.ts';
 import { setCallLogSink, setCallRoom } from '../src/store/log.ts';
 import { createSavedStore, savedKey } from '../src/store/saved.ts';
 import { toItem, wrongDepartment } from '../src/store/catalog.ts';
@@ -1422,5 +1423,41 @@ describe('searchByPhoto and searchLike', () => {
       setCallLogSink(null);
       setCallRoom(null);
     }
+  });
+
+  it('sets redirect:"error" on photo search calls while leaving plain text search unchanged', async () => {
+    const searchFixture = loadFixtureJson('search.json');
+    const seenInits: Array<{ hasImage: boolean; redirect?: string }> = [];
+
+    const fakeFetch: typeof fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}'));
+      const like = body?.params?.arguments?.catalog?.like;
+      const hasImage = Array.isArray(like) && like.some((e: any) => Boolean(e?.image));
+      seenInits.push({ hasImage, redirect: init?.redirect });
+      return jsonResponse(searchFixture);
+    };
+
+    const mcp = createShopMcp({ fetch: fakeFetch });
+    const store = createStore({ mcp, saved: createSavedStore({ dir: makeTempDir() }) });
+
+    await store.searchByPhoto(Buffer.from('small-jpeg-bytes'), 'men', { limit: 5 });
+    await store.search("men's loafers", 'men', { limit: 5 });
+
+    assert.equal(seenInits.length, 2);
+    assert.equal(seenInits[0].hasImage, true);
+    assert.equal(seenInits[0].redirect, 'error');
+    assert.equal(seenInits[1].hasImage, false);
+    assert.equal(seenInits[1].redirect, undefined);
+  });
+
+  it('redactSecrets handles a 3 MB secret string quickly via literal split/join and skips empty strings', () => {
+    const bigSecret = 'B'.repeat(3_000_000);
+    const input = `prefix ${bigSecret} suffix`;
+    const t0 = Date.now();
+    const out = redactSecrets(input, ['', null, undefined, bigSecret]);
+    const elapsedMs = Date.now() - t0;
+
+    assert.equal(out, 'prefix [REDACTED] suffix');
+    assert.ok(elapsedMs < 1000, `expected fast redaction on 3 MB secret, took ${elapsedMs}ms`);
   });
 });

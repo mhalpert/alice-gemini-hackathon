@@ -131,6 +131,15 @@ function isTimeoutError(err: unknown): boolean {
   return name === 'TimeoutError' || name === 'AbortError';
 }
 
+function hasImageArg(args: Record<string, unknown>): boolean {
+  const catalog = args?.catalog as { like?: unknown } | undefined;
+  const like = catalog?.like;
+  if (!Array.isArray(like)) return false;
+  return like.some(
+    (entry) => Boolean(entry && typeof entry === 'object' && (entry as { image?: unknown }).image),
+  );
+}
+
 function extractImageDataSecrets(args: Record<string, unknown>): string[] {
   const catalog = args?.catalog as { like?: unknown } | undefined;
   const like = catalog?.like;
@@ -138,7 +147,7 @@ function extractImageDataSecrets(args: Record<string, unknown>): string[] {
   const out: string[] = [];
   for (const entry of like) {
     const data = (entry as { image?: { data?: unknown } } | null)?.image?.data;
-    if (typeof data === 'string' && data.length >= 6) {
+    if (typeof data === 'string' && data.length > 0) {
       out.push(data);
     }
   }
@@ -287,6 +296,7 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
       if (hasAuthHeader && authHeader) {
         headers.Authorization = authHeader;
       }
+      const refuseRedirects = hasAuthHeader || hasImageArg(args);
 
       let res: Response;
       let rawText: string;
@@ -295,7 +305,7 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
           method: 'POST',
           headers,
           body,
-          ...(hasAuthHeader ? { redirect: 'error' as const } : {}),
+          ...(refuseRedirects ? { redirect: 'error' as const } : {}),
           signal: AbortSignal.timeout(timeoutMs),
         });
 
