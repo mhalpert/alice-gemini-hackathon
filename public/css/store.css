@@ -3614,6 +3614,261 @@ body.has-boutique #call .call-start__status:empty {
   }
 }
 
+/* Editorial motion: looks arrive, board drop-in, spotlight, reveal, swap */
+
+.look-card.is-look-entering {
+  animation: look-card-rise 420ms cubic-bezier(0.22, 1, 0.36, 1) var(--look-enter-delay, 0ms) backwards;
+}
+
+@keyframes look-card-rise {
+  0% {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.stage-panel.has-collage.is-board-awaiting-drop .stage-placeholder {
+  opacity: 1;
+}
+
+.stage-board-frame.is-board-awaiting-drop .stage-collage-img,
+.stage-board-frame.is-board-dropping .stage-collage-img {
+  opacity: 0;
+}
+
+.stage-panel.has-collage:not(.is-showing-tryon) .stage-board-layer.is-board-dropping {
+  opacity: 1;
+  transition: none;
+  background: var(--board);
+}
+
+.board-drop-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.board-drop-piece {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  animation: board-piece-drop 260ms cubic-bezier(0.22, 1, 0.36, 1) var(--drop-delay, 0ms) both;
+}
+
+@keyframes board-piece-drop {
+  0% {
+    opacity: 0;
+    transform: translateY(-18px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.board-spotlight-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 220ms ease;
+}
+
+.board-spotlight-veil.is-active {
+  opacity: 0.22;
+}
+
+.stage-panel:not(.has-collage) .board-spotlight-veil,
+.stage-panel.is-showing-tryon .board-spotlight-veil {
+  opacity: 0;
+}
+
+.board-spotlight-strip {
+  position: absolute;
+  inset: 0;
+  background: var(--ink);
+  transition: clip-path 350ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.board-spotlight-veil.is-snapping .board-spotlight-strip {
+  transition: none;
+}
+
+.board-spotlight-lift {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0;
+  transform: scale(1);
+  filter: drop-shadow(0 0 0 rgba(26, 23, 20, 0));
+  transition:
+    transform 350ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 350ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 220ms ease;
+}
+
+.board-spotlight-lift.is-lifted {
+  opacity: 1;
+  transform: scale(1.04);
+  filter: drop-shadow(0 12px 24px rgba(26, 23, 20, 0.22));
+}
+
+.board-spotlight-lift.is-settling {
+  opacity: 0;
+  transform: scale(1);
+  filter: drop-shadow(0 0 0 rgba(26, 23, 20, 0));
+  transition:
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 200ms ease;
+}
+
+.stage-panel:not(.has-collage) .board-spotlight-lift,
+.stage-panel.is-showing-tryon .board-spotlight-lift {
+  opacity: 0;
+}
+
+.board-spotlight-lift-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.stage-panel.has-collage.is-curtain-revealing .stage-board-layer {
+  opacity: 1;
+  transition: none;
+}
+
+.stage-panel.is-curtain-revealing .stage-tryon-layer {
+  opacity: 1;
+  transition: none;
+  animation: stage-curtain-open 700ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes stage-curtain-open {
+  0% {
+    clip-path: inset(0 50% 0 50%);
+  }
+  100% {
+    clip-path: inset(0 0% 0 0%);
+  }
+}
+
+.stage-tryon-layer.is-stage-crossfading {
+  transition: opacity 500ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.stage-crossfade-out {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center top;
+  pointer-events: none;
+}
+
+.stage-tryon-img,
+.stage-tryon-video {
+  position: relative;
+  z-index: 2;
+}
+
+.stage-tryon-img.is-crossfade-start {
+  opacity: 0;
+  transition: none;
+}
+
+.stage-tryon-img.is-crossfading {
+  opacity: 1;
+  transition: opacity 500ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.stage-tryon-img.is-scene-drifting {
+  transform-origin: center top;
+  animation: stage-scene-drift 8s ease-out both;
+}
+
+@keyframes stage-scene-drift {
+  0% {
+    transform: translate3d(-1.2%, 0, 0) scale(1.06);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+.stage-tryon-video.is-video-entering {
+  opacity: 0;
+  transform: scale(1.03);
+  transition: none;
+}
+
+.stage-tryon-video.is-video-crossfading {
+  opacity: 1;
+  transform: scale(1);
+  transition:
+    opacity 500ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 500ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.piece-note-item.is-swap-flip-out,
+.product-card.is-swap-flip-out {
+  animation: swap-flip-out 300ms cubic-bezier(0.55, 0.05, 0.68, 0.53) forwards;
+}
+
+.piece-note-item.is-swap-flip-in,
+.product-card.is-swap-flip-in {
+  animation: swap-flip-in 300ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes swap-flip-out {
+  0% {
+    transform: perspective(900px) rotateY(0deg);
+    opacity: 1;
+  }
+  100% {
+    transform: perspective(900px) rotateY(90deg);
+    opacity: 0.72;
+  }
+}
+
+@keyframes swap-flip-in {
+  0% {
+    transform: perspective(900px) rotateY(-90deg);
+    opacity: 0.72;
+  }
+  100% {
+    transform: perspective(900px) rotateY(0deg);
+    opacity: 1;
+  }
+}
+
+@media (max-width: 640px) {
+  .board-drop-layer,
+  .board-spotlight-veil,
+  .board-spotlight-lift {
+    display: none;
+  }
+
+  .stage-board-frame.is-board-awaiting-drop .stage-collage-img,
+  .stage-board-frame.is-board-dropping .stage-collage-img {
+    opacity: 1;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   body.call-live.has-products .store-shell,
   .panel-layer,
@@ -3636,7 +3891,14 @@ body.has-boutique #call .call-start__status:empty {
   .render-tile,
   .board-pointer-ring,
   .piece-note-item,
-  .order-undo-btn {
+  .order-undo-btn,
+  .board-spotlight-veil,
+  .board-spotlight-strip,
+  .board-spotlight-lift,
+  .board-spotlight-lift.is-settling,
+  .stage-tryon-layer.is-stage-crossfading,
+  .stage-tryon-img.is-crossfading,
+  .stage-tryon-video.is-video-crossfading {
     transition: none;
   }
 
@@ -3645,7 +3907,27 @@ body.has-boutique #call .call-start__status:empty {
   .tryon-badge.is-rendering::before,
   .stage-tryon-status.is-rendering::before,
   .order-status-placing::before,
-  .is-updated-flash {
+  .is-updated-flash,
+  .look-card.is-look-entering,
+  .board-drop-piece,
+  .stage-panel.is-curtain-revealing .stage-tryon-layer,
+  .stage-tryon-img.is-scene-drifting,
+  .piece-note-item.is-swap-flip-out,
+  .product-card.is-swap-flip-out,
+  .piece-note-item.is-swap-flip-in,
+  .product-card.is-swap-flip-in {
     animation: none;
+  }
+
+  .board-drop-layer,
+  .board-spotlight-veil,
+  .board-spotlight-lift,
+  .stage-crossfade-out {
+    display: none;
+  }
+
+  .stage-board-frame.is-board-awaiting-drop .stage-collage-img,
+  .stage-board-frame.is-board-dropping .stage-collage-img {
+    opacity: 1;
   }
 }
