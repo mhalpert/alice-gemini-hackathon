@@ -19,7 +19,7 @@ PICKING
 - Read the descriptions: they reveal what titles hide (sheer, backless, lace, open toe, patent, cropped, slip-on, "bride"). Reject anything that breaks the dress code.
 - A suit jacket needs the suit trousers in the same colour and fabric.
 - The accessory must show in a head-to-toe photo: tie, belt, watch, bag, jewelry, sunglasses or a hat.
-- Stay within the outfit budget (add the prices up) and use it well, aiming for 70-100% of it. When it fits, prefer better-made pieces for shoes, trousers and the layer (Everlane basics, Steve Madden leather).
+- Stay within the outfit budget (add the prices up). Use the budget: aim for 70-100% of it. A look at a third of the budget is underselling the client. When it fits, prefer better-made pieces for shoes, trousers and the layer (Everlane basics, Steve Madden leather).
 - Everything works together at the occasion's level of dressiness, in one colour story, for the season. Keep this look distinct from the other looks listed.
 
 WRITING

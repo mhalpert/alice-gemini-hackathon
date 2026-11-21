@@ -37,7 +37,7 @@ Inspect EVERY product photo alongside its assigned slot and product title. Judge
 
 HARD DRESS-CODE RULES (breaking any of these makes the look not presentable):
 - Match the exact dressiness the occasion calls for.
-- Weddings: never white, ivory, cream, or anything bridal.
+- Wedding guests: women never wear white, ivory, cream or anything bridal; men never wear a white or ivory suit or jacket, but a white dress shirt under a suit is classic and correct.
 - Job interviews: closed-toe shoes only (no sandals, slides, mules, or open toes); nothing sheer, cropped, backless, or flashy.
 - Black tie: a dark suit with its matching trousers and a solid tie (or an appropriately formal evening gown/outfit).
 - Season-appropriate fabrics and layers for the occasion and forecast (no heavy wool/velvet in heat, no flimsy summer-only pieces in cold).

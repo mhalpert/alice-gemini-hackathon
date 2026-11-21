@@ -189,10 +189,29 @@ const DRESS_WORDS = slotWords('dress');
 const CLOTHING_WORDS = [...TOP_WORDS, ...BOTTOM_WORDS, ...LAYER_WORDS, ...DRESS_WORDS];
 const BAG_WORDS = slotWords('bag');
 const ACCESSORY_OWN_WORDS = [
-  ...new Set([...slotWords('accessory'), 'hat', 'cap', 'beanie', 'belt', 'tie', 'watch', 'sunglasses', 'scarf']),
+  ...new Set([...slotWords('accessory'), 'hat', 'cap', 'beanie', 'belt', 'tie', 'watch', 'sunglasses', 'scarf', 'wallet']),
 ];
 const NON_TIE_ACCESSORY_WORDS = ACCESSORY_OWN_WORDS.filter((w) => w !== 'tie');
+const ACCESSORY_OR_JEWELRY_NON_TIE_WORDS = [
+  ...new Set([
+    ...NON_TIE_ACCESSORY_WORDS,
+    ...slotWords('jewelry'),
+    'belts', 'watches', 'hats', 'caps', 'scarves',
+    'necklaces', 'bracelets', 'wallets',
+  ]),
+];
 const NON_CLOTHING_SLOTS = new Set(['shoes', 'accessory', 'bag', 'jewelry']);
+
+function isAllCapsTitle(title: string): boolean {
+  return /[A-Z]/.test(title) && !/[a-z]/.test(title);
+}
+
+function hasAccessoryOrJewelryType(title: string): boolean {
+  return (
+    titleHas(title, ACCESSORY_OR_JEWELRY_NON_TIE_WORDS) ||
+    (titleHas(title, ['tie']) && !NOT_A_TIE.test(title))
+  );
+}
 
 function isOxfordTop(title: string): boolean {
   return titleHas(title, ['oxford']) && titleHas(title, ['shirt', 'shirts', 'blouse', 'top', 'polo']);
@@ -213,6 +232,9 @@ function namesOwnSlot(title: string, slot: string): boolean {
 // Guards each slot against product types that belong in a different slot group.
 export function wrongSlot(title: string, slot: string): boolean {
   if (namesOwnSlot(title, slot)) return false;
+  if ((slot === 'accessory' || slot === 'jewelry') && isAllCapsTitle(title) && !hasAccessoryOrJewelryType(title)) {
+    return true;
+  }
   if (slot !== 'shoes' && hasShoeType(title)) return true;
   if (slot !== 'bag' && titleHas(title, BAG_WORDS)) return true;
   if (NON_CLOTHING_SLOTS.has(slot) && titleHas(title, CLOTHING_WORDS)) return true;
