@@ -19,21 +19,23 @@ Built at the Gemini 4 NYC Hackathon on Saturday, November 21, 2026.
 5. You give your sizes. Alice builds one cart per store, says plainly what could not be
    added and why, and the page links to each store's own checkout.
 
-Nothing in the call is typed unless you want it to be. There is a "Type instead" box and a
-mute key for loud rooms.
+Nothing in the call is typed unless you want it to be. For loud rooms there is noise
+cancellation on your audio, a "Type instead" box and a mute key. While a slow step runs,
+Alice keeps talking in short lines, and she checks in if you go quiet. A video face for
+Alice is optional (`AVATAR=tavus`) and off by default.
 
 ## Models and what each one does
 
 | Model | Job in Alice | Code |
 | --- | --- | --- |
 | Gemini 4 Hydrogen | The stylist. Turns the occasion and budget into outfit ideas, then picks one real product for each slot from the store results. | `src/brain/plan.ts`, `src/brain/pick.ts` |
-| Gemini 4 Argon | The critic. Looks at the finished outfit's product photos, scores it against dress-code rules and names the weakest piece. Also grades the ready-made looks. | `src/brain/critic.ts`, `src/library/grade.ts` |
+| Gemini 4 Argon | The critic. Looks at the finished outfit's product photos, scores it against dress-code rules and names the weakest piece. Also grades the ready-made looks and judges the eval. | `src/brain/critic.ts`, `src/library/grade.ts` |
 | Gemini 4 Neon | The try-on inspector. Before a try-on is shown, it checks that the image is the same person wearing every listed piece, and sends it back for a redo if not. | `src/media/inspect.ts` |
 | Decisions API (`gemini-decision-1`) | Yes or no questions answered with a probability. For an outfit: does it fit the occasion, and does it hang together. For a try-on: is it the same person, and are the colours right. | `src/brain/gate.ts`, `src/media/inspect.ts` |
 | Gemini 3.8 Live | The call itself: listens, watches camera frames, speaks, and calls the tools that drive the page. | `src/agent/` |
 | Gemini Nano Banana 2.1 | Draws the try-on image and the on-location still. | `src/media/tryon-render.ts`, `src/media/extras.ts` |
 | Gemini Omni 1.2 Flash | Makes the short video of the picked look. | `src/media/extras.ts` |
-| Gemini 3.5 Flash Lite | Backup planner when Hydrogen is slow, the piece swap, and choosing the cleanest product photo. | `src/brain/plan.ts`, `src/brain/swap.ts`, `src/media/shots.ts` |
+| Gemini 3.5 Flash Lite | Backup planner when Hydrogen is slow, rewriting a look's lines after a swap, and choosing the cleanest product photo. | `src/brain/plan.ts`, `src/brain/swap.ts`, `src/media/shots.ts` |
 | Gemini Embedding 001 | Matches the occasion you say to a ready-made look. | `src/library/` |
 
 Products, prices, stock and carts come from the stores through Shop MCP (Fashion Nova,
@@ -62,7 +64,7 @@ but your own machine reach the page.
 
 ## Proof it works
 
-Three layers, all in this repo.
+Four layers, all in this repo.
 
 **Unit tests.** `npm test` runs more than 400 tests with no network and no keys: the page
 actions, sizing and bag rules, the planner's repair rules, the try-on checks, the call log
@@ -102,9 +104,38 @@ The run on `main` at 1:57 PM on the day (commit `a54a8b4`):
 In the same call the on-location still arrived 14 seconds after the pick and the video 31
 seconds after it, and the page showed each in turn.
 
-**Outfit quality against a baseline.** The outfit pipeline (plan, search, pick, gate,
-critic) is compared with a single model call given the same occasion, with Argon as the
-judge. Results go here.
+**Store and render checks.** One command each, run during the event by the back end track:
+
+- `npm run drill`: the store rate-limited, slow, down, returning garbage or dropping
+  connections. 8 of 8 pass: search falls back to saved results and the bag stays honest.
+- `npm run bag:matrix`: 41 live size cases across the four stores. Every failure was a size
+  that really was sold out.
+- `npm run inspector:check`: 4 of 4 deliberately bad try-ons caught and fixed, 0 of 4 good
+  ones flagged.
+- `npm run callstats`: turns cut off, response times, render and bag timings from any call
+  log.
+
+**Outfit quality against a baseline.** The outfit pipeline (plan, search, pick, gate) is
+compared with a baseline of one Flash Lite call that writes the search queries and takes
+the top store result for each piece. Argon judges both, on 22 occasions (20 test-kit briefs
+and the 2 demo briefs).
+
+| | Pipeline | One-call baseline |
+| --- | --- | --- |
+| Average score out of 10 | 6.1 | 5.1 |
+| Presentable sets | 13 of 22 | 3 of 22 |
+| Dress-code breaks | 0 | 4 |
+| Outfits over budget | 0 | 21 |
+| Time to first look (median) | 16.3 s | 1.8 s |
+
+A full build takes 18.9 seconds at the median and costs about 7 cents. On 5 deliberately
+messy briefs the team wrote, kept out of the numbers above, the pipeline averaged 5.8
+against 5.0 and neither side produced a presentable set. The per-occasion table and the
+weakest occasions are in `eval/results/RESULTS.md`. To rerun it (about 10 minutes and $2):
+
+```sh
+node --env-file-if-exists=.env.local eval/run.ts && node eval/report.ts
+```
 
 ### Where it fails
 
@@ -112,15 +143,23 @@ judge. Results go here.
   test pattern, not a person, so a harness pass says the plumbing works, not that a stranger's
   call will go well.
 - **Earlier runs failed.** A run at about 1:45 PM failed on pacing: Alice held the whole bag
-  back over one shoe size that was out of stock, and checked in on silence too often. A run on
-  another laptop at 2:00 PM scored 6 of 7; the miss was the check itself reading the wrong
-  field, and the bag was correct.
-- **Try-on is slow.** About 30 seconds from the pick to the first image, and longer when the
-  inspector sends an image back for a redo.
+  back over one shoe size that was out of stock, and checked in on silence too often (a fix
+  is in progress). A run on another laptop at 2:00 PM scored 6 of 7; the miss was the check
+  itself reading the wrong field, and the bag was correct.
+- **Outfit quality is uneven.** 13 of 22 occasions produced a set the judge called
+  presentable. Formal occasions are the weak spot.
+- **Try-on takes time.** About 20 to 25 seconds from the moment the looks appear (all three
+  render at once, so it is usually ready by the pick), and up to 40 when the inspector sends
+  one back. The harness shows 31 to 38 seconds because its camera is a test pattern, which
+  the inspector correctly rejects as not the shopper.
+- **Flat lays.** When a store only publishes photos of a model wearing the piece, the board
+  shows a crop of that photo below the chin, not a cut-out.
 - **Stock.** A size that is sold out is reported and left out of the cart. Alice does not
   pick the nearest size for you.
 - **Buying.** Alice fills the carts; you pay on each store's own checkout page. Placing the
-  order inside the call is behind a switch that is off by default.
+  order inside the call is behind a switch that is off by default. That path has only been
+  run against fakes and an independent test harness; the real account and order shapes are
+  unverified until a first real order.
 - **Ready-made looks.** For common occasions Alice starts from looks the builder prepared
   earlier in the day, re-checked for price and stock when served. Unusual occasions and
   budgets are built live and take longer.
@@ -130,7 +169,13 @@ judge. Results go here.
 
 The repo was created on the morning of November 21, 2026 and everything in it was written
 during the event. The ready-made looks in `src/library/sets.json` were generated that
-afternoon by this repo's own builder from live store results.
+afternoon by this repo's own builder from live store results. The agent and most of the
+store page were written with Google Antigravity (Gemini 4 Neon) from briefs the team wrote.
+
+A second session attacked the server and the store client during the event. Its findings
+are fixed on `main`: the token endpoint needs a passcode from another machine, occasion
+lookups cannot trigger paid calls, logs mask secrets, image downloads are limited to store
+CDNs, and renders are capped per call.
 
 ## Where things are
 
