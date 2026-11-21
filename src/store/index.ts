@@ -14,7 +14,7 @@ export type { ProductDetail } from './catalog.ts';
 
 export { createCart, getCart, updateCart } from './cart.ts';
 
-export { addToBag, matchSizeLabel } from './bag.ts';
+export { addToBag, matchSizeLabel, isSizeConverted } from './bag.ts';
 export type { BagLineAdded, BagLineNotAdded } from './bag.ts';
 
 export { STORES, ALL_SITES, OTHER_SITES } from './stores.ts';

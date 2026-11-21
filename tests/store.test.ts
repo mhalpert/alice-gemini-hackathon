@@ -423,6 +423,13 @@ describe('rate limiting, timeouts, and saved fallbacks', () => {
     const res = await store.search("men's leather loafers", 'men');
     assert.equal(res.source, 'saved-near');
     assert.equal(res.items.length, 3);
+
+    // Plural/singular word overlap: "men's navy chinos" matches saved "men's chino pants"
+    const chinoKey = savedKey("men's chino pants", 'men', { shops: ALL_SITES, limit: 24 });
+    saved.putSaved(chinoKey, "men's chino pants", 'men', savedItems);
+    const nearChino = await store.search("men's navy chinos", 'men');
+    assert.equal(nearChino.source, 'saved-near');
+    assert.equal(nearChino.items.length, 3);
   });
 
   it('search never throws when fetch rejects with no saved entries', async () => {
@@ -539,6 +546,89 @@ describe('lookup, getProduct, and sizeVariant', () => {
     const imgs = await store.productImages(item);
     assert.equal(imgs.length, 7);
     assert.equal(imgs[0], item.image);
+  });
+
+  it('sizeVariant sets both options on products with separate Size/Waist + Inseam/Length or companion Shoe size', async () => {
+    const baseFixture = loadFixtureJson('get_product.json');
+    const sentSelected: Array<Array<{ name: string; label: string }> | undefined> = [];
+
+    const fakeFetch: typeof fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      const reqSelected = body.params.arguments.catalog.selected as
+        | Array<{ name: string; label: string }>
+        | undefined;
+      sentSelected.push(reqSelected);
+
+      const cloned = structuredClone(baseFixture);
+      const id = body.params.arguments.catalog.id;
+
+      if (id === 'gid://shopify/ProductVariant/jean-1' || id === 'gid://shopify/p/jean') {
+        cloned.result.structuredContent.product.id = 'gid://shopify/p/jean';
+        cloned.result.structuredContent.product.options = [
+          {
+            name: 'Size',
+            values: [
+              { label: '28', available: true, exists: true },
+              { label: '29', available: true, exists: true },
+            ],
+          },
+          {
+            name: 'Inseam',
+            values: [
+              { label: '27.5” Inseam', available: true, exists: true },
+              { label: '29.5” Inseam', available: true, exists: true },
+            ],
+          },
+        ];
+        cloned.result.structuredContent.product.selected = reqSelected ?? [
+          { name: 'Size', label: '28' },
+          { name: 'Inseam', label: '27.5” Inseam' },
+        ];
+        cloned.result.structuredContent.product.variants[0].id = 'gid://shopify/ProductVariant/jean-29-295';
+      } else {
+        cloned.result.structuredContent.product.id = 'gid://shopify/p/heel';
+        cloned.result.structuredContent.product.options = [
+          {
+            name: 'Size',
+            values: [
+              { label: '7', available: true, exists: true },
+              { label: '8', available: true, exists: true },
+            ],
+          },
+          {
+            name: 'Shoe size',
+            values: [
+              { label: '7 US', available: false, exists: true },
+              { label: '8 US', available: false, exists: true },
+            ],
+          },
+        ];
+        cloned.result.structuredContent.product.selected = reqSelected ?? [
+          { name: 'Size', label: '7' },
+        ];
+        cloned.result.structuredContent.product.variants[0].id = 'gid://shopify/ProductVariant/heel-8';
+      }
+      return jsonResponse(cloned);
+    };
+
+    const mcp = createShopMcp({ fetch: fakeFetch });
+    const store = createStore({ mcp, saved: createSavedStore({ dir: makeTempDir() }) });
+
+    const jeanRes = await store.sizeVariant('gid://shopify/ProductVariant/jean-1', '29', {
+      gender: 'women',
+    });
+    assert.equal(jeanRes.ok, true);
+    assert.deepEqual(sentSelected[1], [
+      { name: 'Size', label: '29' },
+      { name: 'Inseam', label: '29.5” Inseam' },
+    ]);
+
+    // Companion "Shoe size" with no available values must NOT be added to selected
+    const heelRes = await store.sizeVariant('gid://shopify/ProductVariant/heel-7', '8', {
+      gender: 'women',
+    });
+    assert.equal(heelRes.ok, true);
+    assert.deepEqual(sentSelected[3], [{ name: 'Size', label: '8' }]);
   });
 });
 

@@ -44,6 +44,20 @@ export function savedKey(query: string, gender: Gender, opts?: SavedKeyOpts): st
   return `${q}|${gender}|${shops}|${maxPrice}|${limit}`;
 }
 
+function stemWord(word: string): string {
+  if (word.length <= 3) return word;
+  if (word.endsWith('ies') && word.length > 4) {
+    return `${word.slice(0, -3)}y`;
+  }
+  if (/(?:ch|sh|x|z|s)es$/.test(word) && word.length > 4) {
+    return word.slice(0, -2);
+  }
+  if (word.endsWith('s') && !word.endsWith('ss') && !word.endsWith('us')) {
+    return word.slice(0, -1);
+  }
+  return word;
+}
+
 function queryWords(query: string): Set<string> {
   const cleaned = query
     .toLowerCase()
@@ -51,7 +65,7 @@ function queryWords(query: string): Set<string> {
     .replace(/[^a-z0-9\s]+/g, ' ')
     .trim();
   if (!cleaned) return new Set();
-  return new Set(cleaned.split(/\s+/).filter(Boolean));
+  return new Set(cleaned.split(/\s+/).filter(Boolean).map(stemWord));
 }
 
 export function createSavedStore(opts?: SavedStoreOptions): SavedStore {

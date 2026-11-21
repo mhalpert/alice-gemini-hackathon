@@ -5,7 +5,7 @@ import type { Item, Outfit } from '../src/types.ts';
 import type { ProductDetail, SizeVariantResult } from '../src/store/catalog.ts';
 import type { CartLineInput, StoreCartResponse } from '../src/store/cart.ts';
 import type { BagLineAdded, BagLineNotAdded, BagStoreDeps } from '../src/store/bag.ts';
-import { createBag, matchSizeLabel } from '../src/store/bag.ts';
+import { createBag, matchSizeLabel, isSizeConverted } from '../src/store/bag.ts';
 import { createShopMcp } from '../src/store/shopmcp.ts';
 import { createStore } from '../src/store/factory.ts';
 import { createSavedStore } from '../src/store/saved.ts';
@@ -131,6 +131,91 @@ describe('matchSizeLabel', () => {
       }),
       '32x30',
     );
+  });
+
+  it('handles real store formats from live matrix: Everlane, Fashion Nova, Steve Madden, Kith, widths & prefixes', () => {
+    // Everlane women's dress: letter -> US numeric (preferring US over UK)
+    assert.equal(
+      matchSizeLabel(
+        'Medium',
+        ['14 UK', '16 UK', '0 US', '00 US', '2 US', '4 US', '6 US', '8 US', '10 US', '12 US', '14 US', '16 US'],
+        { slot: 'dress', gender: 'women' },
+      ),
+      '8 US',
+    );
+
+    // Everlane & Steve Madden women's denim: dress size 8 -> waist 29
+    assert.equal(
+      matchSizeLabel('8', ['23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35'], {
+        slot: 'bottom',
+        gender: 'women',
+      }),
+      '29',
+    );
+    assert.equal(
+      matchSizeLabel('8', ['24 US', '25 US', '29 US', '30 US', '31 US', '32 US', '33 US'], {
+        slot: 'bottom',
+        gender: 'women',
+      }),
+      '29 US',
+    );
+
+    // Fashion Nova juniors odd denim: misses 8 -> 9, waist 28 -> 7
+    const fnJuniors = ['0', '1', '3', '5', '7', '9', '11', '13', '15', '1X', '2X', '3X'];
+    assert.equal(matchSizeLabel('8', fnJuniors, { slot: 'bottom', gender: 'women' }), '9');
+    assert.equal(matchSizeLabel('28', fnJuniors, { slot: 'bottom', gender: 'women' }), '7');
+
+    // Everlane men's letter-sized trousers: waist 34 -> L (but never for layer!)
+    assert.equal(matchSizeLabel('34', ['XS', 'L'], { slot: 'bottom', gender: 'men' }), 'L');
+    assert.equal(matchSizeLabel('34', ['XS', 'L'], { slot: 'layer', gender: 'men' }), null);
+
+    // Additional real formats: W34 L32, 34/32, 11 M, US 11, M 11, M/L, 8 (M)
+    assert.equal(
+      matchSizeLabel('34', ['W32 L30', 'W34 L30', 'W34 L32'], { slot: 'bottom', gender: 'men' }),
+      'W34 L32',
+    );
+    assert.equal(
+      matchSizeLabel('34', ['32/30', '34/30', '34/32'], { slot: 'bottom', gender: 'men' }),
+      '34/32',
+    );
+    assert.equal(matchSizeLabel('size 11', ['10 M', '11 W', '11 M'], { slot: 'shoes', gender: 'men' }), '11 M');
+    assert.equal(matchSizeLabel('size 11', ['US 10', 'US 11', 'US 12'], { slot: 'shoes', gender: 'men' }), 'US 11');
+    assert.equal(matchSizeLabel('size 11', ['M 7', 'M 11'], { slot: 'shoes', gender: 'men' }), 'M 11');
+    assert.equal(matchSizeLabel('size 11', ['M 7'], { slot: 'shoes', gender: 'men' }), null);
+    assert.equal(matchSizeLabel('Medium', ['XS/S', 'M/L', 'XL'], { slot: 'top', gender: 'women' }), 'M/L');
+    assert.equal(matchSizeLabel('Medium', ['4 (S)', '8 (M)', '12 (L)'], { slot: 'dress', gender: 'women' }), '8 (M)');
+    assert.equal(matchSizeLabel('8', ['4 (S)', '8 (M)', '12 (L)'], { slot: 'dress', gender: 'women' }), '8 (M)');
+  });
+});
+
+describe('isSizeConverted', () => {
+  it('flags cross-system or different-value conversions as true', () => {
+    assert.equal(isSizeConverted('8', '29'), true);
+    assert.equal(isSizeConverted('8', '29 US'), true);
+    assert.equal(isSizeConverted('8', '9'), true);
+    assert.equal(isSizeConverted('28', '7'), true);
+    assert.equal(isSizeConverted('Medium', '8 US'), true);
+    assert.equal(isSizeConverted('8', 'M'), true);
+    assert.equal(isSizeConverted('8', 'Medium (M)'), true);
+    assert.equal(isSizeConverted('34', 'L'), true);
+    assert.equal(isSizeConverted('32x30', '32x32'), true);
+  });
+
+  it('does NOT flag mere formatting differences as converted', () => {
+    assert.equal(isSizeConverted('size 11', '11'), false);
+    assert.equal(isSizeConverted('Large', 'L'), false);
+    assert.equal(isSizeConverted('Large', 'Large (L)'), false);
+    assert.equal(isSizeConverted('34', '34 US'), false);
+    assert.equal(isSizeConverted('34', '34W'), false);
+    assert.equal(isSizeConverted('size 11', '11 M'), false);
+    assert.equal(isSizeConverted('size 11', 'US 11'), false);
+    assert.equal(isSizeConverted('ten and a half', '10.5'), false);
+    assert.equal(isSizeConverted('32', '32x32'), false);
+    assert.equal(isSizeConverted('Medium', 'M/L'), false);
+    assert.equal(isSizeConverted('8', '8 (M)'), false);
+    assert.equal(isSizeConverted('Medium', '8 (M)'), false);
+    assert.equal(isSizeConverted('XXL', '2X'), false);
+    assert.equal(isSizeConverted(null, 'One Size'), false);
   });
 });
 
@@ -559,6 +644,134 @@ describe('addToBag', () => {
     assert.equal(res.carts[0].added.length, 0);
     assert.equal(res.carts[0].not_added.length, 1);
     assert.equal(res.carts[0].not_added[0].reason, "XXL isn't in stock (sizes left: S, M)");
+  });
+
+  it('does NOT treat a single remaining shoe/clothing size (e.g. "M 7") as one-size', async () => {
+    const sneaker = makeItem({
+      id: 'gid://shopify/p/sneaker',
+      variant_id: 'gid://shopify/ProductVariant/sn-7',
+      title: 'The Court Sneaker',
+      price: 118,
+      store: 'Everlane',
+      store_domain: 'm34kzg-ke.myshopify.com',
+    });
+
+    let cartCalls = 0;
+    const deps: BagStoreDeps = {
+      async getProduct() {
+        return makeDetail(sneaker, 'Numeric shoe size', [{ label: 'M 7' }]);
+      },
+      async sizeVariant() {
+        throw new Error('should not call sizeVariant');
+      },
+      async createCart() {
+        cartCalls += 1;
+        throw new Error('should not create cart');
+      },
+    };
+
+    const { addToBag } = createBag(deps);
+    const outfit: Outfit = {
+      name: 'Look',
+      difference: 'Clean',
+      story: 'Clean',
+      total: 118,
+      pieces: [{ slot: 'shoes', why: 'sneakers', item: sneaker }],
+    };
+
+    const res = await addToBag(outfit, { shoes: 'size 11' }, 'men');
+    assert.equal(cartCalls, 0);
+    assert.equal(res.carts[0].added.length, 0);
+    assert.equal(res.carts[0].not_added.length, 1);
+    const na = res.carts[0].not_added[0] as BagLineNotAdded;
+    assert.equal(na.reason, "size 11 isn't in stock (sizes left: M 7)");
+    assert.equal(na.asked_size, 'size 11');
+    assert.equal(na.size_converted, undefined);
+  });
+
+  it('sets asked_size and size_converted on converted lines and reports each converted piece once in summary', async () => {
+    const jean = makeItem({
+      id: 'gid://shopify/p/jean',
+      variant_id: 'gid://shopify/ProductVariant/jean-28',
+      title: 'Way-High Jean',
+      price: 118,
+      store: 'Everlane',
+      store_domain: 'm34kzg-ke.myshopify.com',
+      department: 'women',
+    });
+    const tee = makeItem({
+      id: 'gid://shopify/p/tee',
+      variant_id: 'gid://shopify/ProductVariant/tee-s',
+      title: 'Organic Tee',
+      price: 38,
+      store: 'Everlane',
+      store_domain: 'm34kzg-ke.myshopify.com',
+      department: 'women',
+    });
+
+    const deps: BagStoreDeps = {
+      async getProduct(id) {
+        if (id === jean.variant_id) {
+          return makeDetail(jean, 'Size', [
+            { label: '27' },
+            { label: '28' },
+            { label: '29' },
+            { label: '30' },
+          ]);
+        }
+        return makeDetail(tee, 'Size', [{ label: 'S' }, { label: 'M' }, { label: 'L' }]);
+      },
+      async sizeVariant(variantId, size) {
+        return {
+          ok: true,
+          variant_id: `${variantId}-${size}`,
+          size,
+          available: true,
+          sizes_available: [size],
+          nearest: null,
+        };
+      },
+      async createCart() {
+        return {
+          cart_id: 'cart-ev',
+          continue_url: 'https://m34kzg-ke.myshopify.com/cart/c/1',
+          total_usd: 156,
+          line_items: [],
+          messages: [],
+          ms: 25,
+        };
+      },
+    };
+
+    const { addToBag } = createBag(deps);
+    const outfit: Outfit = {
+      name: 'Casual',
+      difference: 'Clean',
+      story: 'Clean',
+      total: 156,
+      pieces: [
+        { slot: 'bottom', why: 'jeans', item: jean },
+        { slot: 'top', why: 'tee', item: tee },
+      ],
+    };
+
+    const res = await addToBag(outfit, { bottom: '8', top: 'Medium' }, 'women');
+    const added = res.carts[0].added as BagLineAdded[];
+    assert.equal(added.length, 2);
+
+    const jeanLine = added.find((l) => l.slot === 'bottom')!;
+    assert.equal(jeanLine.size, '29');
+    assert.equal(jeanLine.asked_size, '8');
+    assert.equal(jeanLine.size_converted, true);
+
+    const teeLine = added.find((l) => l.slot === 'top')!;
+    assert.equal(teeLine.size, 'M');
+    assert.equal(teeLine.asked_size, 'Medium');
+    assert.equal(teeLine.size_converted, undefined);
+
+    assert.ok(res.summary.includes('Way-High Jean went in as 29 (you said 8).'));
+    assert.equal(res.summary.split('Way-High Jean went in as 29').length - 1, 1);
+    assert.ok(!res.summary.includes('Organic Tee went in as'));
   });
 });
 
