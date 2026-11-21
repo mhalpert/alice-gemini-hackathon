@@ -9,6 +9,8 @@ import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { hasOpenSsl, makeCert } from '../scripts/make-cert.mjs';
 import { getCallLogPath } from '../src/calllog.ts';
+import type { Gender, Item, Outfit } from '../src/types.ts';
+import type { ProductDetail } from '../src/store/catalog.ts';
 import {
   createAliceHandler,
   createAliceHttpsServer,
@@ -756,5 +758,377 @@ describe('Alice server', () => {
       ]);
       fs.rmSync(certDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('Storefront, product, search, and looks API', () => {
+  function sampleItem(id: string, department: Gender = 'women'): Item {
+    return {
+      id,
+      variant_id: `gid://shopify/ProductVariant/${id.replace(/\W+/g, '')}`,
+      title: `Piece ${id}`,
+      price: 58,
+      url: `https://www.everlane.com/products/${id}?variant=101&_gsid=origToken&utm_source=shopify&utm_medium=catalog`,
+      image: `https://cdn.shopify.com/s/files/1/0623/files/${id}.jpg`,
+      store: 'Everlane',
+      store_domain: 'm34kzg-ke.myshopify.com',
+      rating: 4.5,
+      rating_count: 19,
+      sizes: ['S', 'M', 'L'],
+      variants_by_size: { S: 'gid://shopify/ProductVariant/101' },
+      description: 'Organic cotton blend tailored piece for day or evening wear. '.repeat(5).trim(),
+      department,
+    };
+  }
+
+  function sampleProductDetail(): ProductDetail {
+    return {
+      id: 'gid://shopify/p/S43gSuq5Wp4NZUwVSrOqC',
+      title: 'NAXOS BLACK LEATHER',
+      description: 'Leather slip-on loafer with lug sole. Cushioned insole for comfort.',
+      description_html: '<ul><li>1.5 inch heel height</li><li>Leather upper</li></ul>',
+      images: [
+        'https://cdn.shopify.com/s/files/1/2170/8465/files/naxos-1.jpg',
+        'https://cdn.shopify.com/s/files/1/2170/8465/files/naxos-2.jpg',
+      ],
+      options: [
+        {
+          name: 'Numeric shoe size',
+          values: [
+            { label: '9', available: true, exists: true },
+            { label: '10', available: false, exists: true },
+          ],
+        },
+      ],
+      selected: [{ name: 'Numeric shoe size', label: '9' }],
+      variant: {
+        id: 'gid://shopify/ProductVariant/41356358090885',
+        price: 149.95,
+        available: true,
+        options: [{ name: 'Numeric shoe size', label: '9' }],
+        url: 'https://www.stevemadden.com/products/naxos-black-leather?variant=41356358090885&_gsid=keep_me&utm_source=shopify&utm_medium=catalog',
+      },
+    };
+  }
+
+  function sampleOutfit(department: Gender): Outfit {
+    const it = sampleItem(`look-${department}`, department);
+    return {
+      number: 1,
+      name: `${department} Library Look`,
+      difference: 'Clean silhouette',
+      story: 'Curated from library',
+      pieces: [{ slot: 'top', why: 'Great drape', item: it }],
+      total: it.price,
+    };
+  }
+
+  async function withServer(
+    opts: Parameters<typeof createAliceServer>[0],
+    fn: (baseUrl: string) => Promise<void>,
+  ): Promise<void> {
+    const srv = createAliceServer(opts);
+    await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => resolve()));
+    const srvPort = (srv.address() as AddressInfo).port;
+    try {
+      await fn(`http://127.0.0.1:${srvPort}`);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        srv.close((err) => (err ? reject(err) : resolve())),
+      );
+    }
+  }
+
+  it('serves /api/storefront, /api/product, /api/search with exact shapes, headers, and validation', async () => {
+    const detail = sampleProductDetail();
+    const dup = sampleItem('dup-item', 'women');
+
+    await withServer(
+      {
+        store: {
+          searchMixed: async (query, gender) => {
+            if (query === "women's trousers" || query === "women's jeans") {
+              return {
+                items: [dup, sampleItem(`only-${query.replace(/\W+/g, '-')}`, gender)],
+                source: 'live',
+                ms: 4,
+              };
+            }
+            if (query === "women's dress") {
+              return { items: [sampleItem('dress-1', gender)], source: 'live', ms: 4 };
+            }
+            if (query === 'black loafer') {
+              return {
+                items: Array.from({ length: 10 }, (_, i) => sampleItem(`search-${i}`, gender)),
+                source: 'live',
+                ms: 4,
+              };
+            }
+            return { items: [], source: 'empty', ms: 4 };
+          },
+          search: async (_q, gender, opts) => {
+            if (opts?.shops?.[0] === 'everlane.com') {
+              return { items: [sampleItem('ev-1', gender)], source: 'live', ms: 4 };
+            }
+            return { items: [], source: 'empty', ms: 4 };
+          },
+          getProduct: async (id) => {
+            if (id === detail.variant.id || id === detail.id) return detail;
+            return null;
+          },
+        },
+      },
+      async (url) => {
+        // 1. GET /api/storefront (defaults to women)
+        const sfRes = await fetch(`${url}/api/storefront`);
+        assert.equal(sfRes.status, 200);
+        assert.equal(sfRes.headers.get('cache-control'), 'no-store');
+        assert.equal(sfRes.headers.get('x-content-type-options'), 'nosniff');
+        const sf = (await sfRes.json()) as {
+          department: string;
+          sections: Array<{ id: string; title: string; items: Item[] }>;
+          ms: number;
+          partial?: boolean;
+        };
+        assert.equal(sf.department, 'women');
+        assert.equal(typeof sf.ms, 'number');
+        assert.equal(sf.partial, undefined);
+        // Empty sections dropped -> only dresses, trousers-denim, from-everlane remain
+        assert.deepEqual(
+          sf.sections.map((s) => s.id),
+          ['dresses', 'trousers-denim', 'from-everlane'],
+        );
+        const td = sf.sections.find((s) => s.id === 'trousers-denim')!;
+        assert.equal(td.items.filter((i) => i.id === 'dup-item').length, 1);
+        assert.equal(td.items[0].url, dup.url);
+        assert.ok(td.items[0].description.length <= 160);
+        assert.deepEqual(td.items[0].variants_by_size, {});
+
+        // 2. GET /api/product (by variant_id and by id)
+        const prodRes = await fetch(
+          `${url}/api/product?variant_id=${encodeURIComponent(detail.variant.id)}&department=men`,
+        );
+        assert.equal(prodRes.status, 200);
+        assert.equal(prodRes.headers.get('cache-control'), 'no-store');
+        assert.equal(prodRes.headers.get('x-content-type-options'), 'nosniff');
+        const prod = (await prodRes.json()) as Record<string, unknown>;
+        assert.deepEqual(Object.keys(prod).sort(), [
+          'description',
+          'details',
+          'images',
+          'item',
+          'sizes',
+          'sizes_detail',
+          'slot',
+          'why',
+        ]);
+        const prodItem = prod.item as Item;
+        assert.equal(prodItem.url, detail.variant.url);
+        assert.equal(prodItem.department, 'men');
+        assert.equal(prodItem.store, 'Steve Madden');
+        assert.deepEqual(prod.sizes, ['9']);
+        assert.deepEqual(prod.sizes_detail, [
+          { label: '9', available: true },
+          { label: '10', available: false },
+        ]);
+
+        const prodById = await fetch(`${url}/api/product?id=${encodeURIComponent(detail.id)}`);
+        assert.equal(prodById.status, 200);
+
+        // /api/product 400 and 404
+        const badId = await fetch(`${url}/api/product?variant_id=not-a-gid`);
+        assert.equal(badId.status, 400);
+        assert.deepEqual(await badId.json(), { error: 'bad_id' });
+
+        const missingId = await fetch(`${url}/api/product`);
+        assert.equal(missingId.status, 400);
+        assert.deepEqual(await missingId.json(), { error: 'bad_id' });
+
+        const notFound = await fetch(
+          `${url}/api/product?variant_id=${encodeURIComponent('gid://shopify/ProductVariant/999999')}`,
+        );
+        assert.equal(notFound.status, 404);
+        assert.deepEqual(await notFound.json(), { error: 'not_found' });
+
+        // 3. GET /api/search
+        const searchRes = await fetch(`${url}/api/search?q=black+loafer&department=men`);
+        assert.equal(searchRes.status, 200);
+        assert.equal(searchRes.headers.get('cache-control'), 'no-store');
+        const searchBody = (await searchRes.json()) as { query: string; items: Item[] };
+        assert.deepEqual(Object.keys(searchBody).sort(), ['items', 'query']);
+        assert.equal(searchBody.query, 'black loafer');
+        assert.equal(searchBody.items.length, 8);
+        assert.ok(searchBody.items[0].url.includes('_gsid=origToken'));
+
+        const emptyQ = await fetch(`${url}/api/search?q=`);
+        assert.equal(emptyQ.status, 400);
+        assert.deepEqual(await emptyQ.json(), { error: 'bad_query' });
+
+        const longQ = await fetch(`${url}/api/search?q=${'a'.repeat(81)}`);
+        assert.equal(longQ.status, 400);
+        assert.deepEqual(await longQ.json(), { error: 'bad_query' });
+
+        // 4. GET only -> 405 on POST for all four routes
+        for (const p of ['/api/storefront', '/api/product', '/api/search', '/api/looks']) {
+          const postRes = await fetch(`${url}${p}`, { method: 'POST' });
+          assert.equal(postRes.status, 405, `expected 405 for POST ${p}`);
+          assert.equal(postRes.headers.get('allow'), 'GET');
+        }
+      },
+    );
+  });
+
+  it('serves /api/looks across library present, missing, throwing, and slow fallback', async () => {
+    // 1. Export present
+    await withServer(
+      {
+        loadLibrary: async () => ({
+          libraryLooks: async (gender: Gender, opts?: { limit?: number }) => [
+            sampleOutfit(gender),
+            { ...sampleOutfit(gender), number: 2, name: `Second ${opts?.limit ?? 6}` },
+          ],
+        }),
+      },
+      async (url) => {
+        const res = await fetch(`${url}/api/looks?department=women&limit=1`);
+        assert.equal(res.status, 200);
+        assert.equal(res.headers.get('cache-control'), 'no-store');
+        const body = (await res.json()) as { department: string; looks: Outfit[]; source: string };
+        assert.equal(body.department, 'women');
+        assert.equal(body.source, 'library');
+        assert.equal(body.looks.length, 1);
+      },
+    );
+
+    // 2. Export missing -> fixture fallback (filters to men; falls back to all when none match women)
+    await withServer(
+      {
+        loadLibrary: async () => null,
+      },
+      async (url) => {
+        const menRes = await fetch(`${url}/api/looks?department=men&limit=2`);
+        assert.equal(menRes.status, 200);
+        const menBody = (await menRes.json()) as { department: string; looks: Outfit[]; source: string };
+        assert.equal(menBody.department, 'men');
+        assert.equal(menBody.source, 'fixture');
+        assert.equal(menBody.looks.length, 2);
+
+        const womenRes = await fetch(`${url}/api/looks?department=women&limit=6`);
+        assert.equal(womenRes.status, 200);
+        const womenBody = (await womenRes.json()) as {
+          department: string;
+          looks: Outfit[];
+          source: string;
+        };
+        assert.equal(womenBody.department, 'women');
+        assert.equal(womenBody.source, 'fixture');
+        assert.ok(womenBody.looks.length > 0);
+      },
+    );
+
+    // 3. Export throws -> fixture fallback
+    await withServer(
+      {
+        loadLibrary: async () => ({
+          libraryLooks: async () => {
+            throw new Error('library crashed');
+          },
+        }),
+      },
+      async (url) => {
+        const res = await fetch(`${url}/api/looks?department=men`);
+        assert.equal(res.status, 200);
+        const body = (await res.json()) as { source: string; looks: Outfit[] };
+        assert.equal(body.source, 'fixture');
+        assert.ok(body.looks.length > 0);
+      },
+    );
+  });
+
+  it('enforces the 1.3s/1.4s timing budgets on all four routes with slow fakes (answers under 1.5s)', async () => {
+    const never = <T>(): Promise<T> => new Promise<T>(() => {});
+
+    await withServer(
+      {
+        store: {
+          searchMixed: async (query, gender) => {
+            if (query === "women's dress") {
+              return { items: [sampleItem('fast-dress', gender)], source: 'live', ms: 5 };
+            }
+            return never();
+          },
+          search: () => never(),
+          getProduct: () => never(),
+        },
+        loadLibrary: async () => ({
+          libraryLooks: () => never(),
+        }),
+      },
+      async (url) => {
+        const timedFetch = async (p: string) => {
+          const t0 = Date.now();
+          const res = await fetch(`${url}${p}`);
+          const ms = Date.now() - t0;
+          const body = (await res.json()) as Record<string, unknown>;
+          return { status: res.status, ms, body };
+        };
+
+        // Run all four slow-fake budget checks in parallel (~1.4s total)
+        const [sf, prod, srch, lks] = await Promise.all([
+          timedFetch('/api/storefront?department=women'),
+          timedFetch('/api/product?variant_id=gid%3A%2F%2Fshopify%2FProductVariant%2F41356358090885'),
+          timedFetch('/api/search?q=linen+blazer&department=women'),
+          timedFetch('/api/looks?department=men'),
+        ]);
+
+        assert.equal(sf.status, 200);
+        assert.equal(sf.body.partial, true);
+        assert.equal((sf.body.sections as unknown[]).length, 1);
+        assert.ok(sf.ms < 1550, `/api/storefront exceeded budget: ${sf.ms}ms`);
+
+        assert.equal(prod.status, 504);
+        assert.deepEqual(prod.body, { error: 'slow_store' });
+        assert.ok(prod.ms < 1500, `/api/product exceeded budget: ${prod.ms}ms`);
+
+        assert.equal(srch.status, 200);
+        assert.deepEqual(srch.body, { query: 'linen blazer', items: [] });
+        assert.ok(srch.ms < 1500, `/api/search exceeded budget: ${srch.ms}ms`);
+
+        assert.equal(lks.status, 200);
+        assert.equal(lks.body.source, 'fixture');
+        assert.ok((lks.body.looks as unknown[]).length > 0);
+        assert.ok(lks.ms < 1550, `/api/looks exceeded budget: ${lks.ms}ms`);
+      },
+    );
+  });
+
+  it('enforces a shared 90 requests/minute rate limit across all four browse routes', async () => {
+    await withServer(
+      {
+        store: {
+          storefront: async (department) => ({ department, sections: [], ms: 1 }),
+          searchMixed: async () => ({ items: [], source: 'empty', ms: 1 }),
+          getProduct: async () => null,
+        },
+        loadLibrary: async () => null,
+      },
+      async (url) => {
+        const routes = [
+          '/api/storefront',
+          '/api/search?q=hat',
+          '/api/looks',
+          '/api/product?variant_id=gid%3A%2F%2Fshopify%2FProductVariant%2F1',
+        ];
+        for (let i = 0; i < 90; i += 1) {
+          const res = await fetch(`${url}${routes[i % routes.length]}`);
+          assert.notEqual(res.status, 429, `unexpected 429 on request #${i + 1}`);
+        }
+        const blocked = await fetch(`${url}/api/storefront`);
+        assert.equal(blocked.status, 429);
+        assert.equal(blocked.headers.get('cache-control'), 'no-store');
+        assert.ok(Number(blocked.headers.get('retry-after')) >= 1);
+        assert.deepEqual(await blocked.json(), { error: 'slow_down' });
+      },
+    );
   });
 });

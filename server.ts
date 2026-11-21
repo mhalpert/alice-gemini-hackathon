@@ -6,14 +6,46 @@ import https from 'node:https';
 import path from 'node:path';
 import { AccessToken, RoomAgentDispatch, RoomConfiguration } from 'livekit-server-sdk';
 import { calllog as defaultCalllog } from './src/calllog.ts';
+import type { Gender, Item, Outfit, SearchResult } from './src/types.ts';
+import type { ProductDetail, SearchOpts } from './src/store/catalog.ts';
+import {
+  getProduct as defaultGetProduct,
+  search as defaultSearch,
+  searchMixed as defaultSearchMixed,
+} from './src/store/index.ts';
+import type { StorefrontResult } from './src/store/storefront.ts';
+import {
+  buildProductPayload,
+  isValidShopifyGid,
+  storefront as defaultStorefront,
+} from './src/store/storefront.ts';
 
 export type CallLogFn = (room: string, ev: string, data?: Record<string, unknown>) => void;
+
+export interface AliceStoreDeps {
+  storefront?: (gender: Gender) => Promise<StorefrontResult>;
+  searchMixed?: (query: string, gender: Gender, opts?: SearchOpts) => Promise<SearchResult>;
+  search?: (query: string, gender: Gender, opts?: SearchOpts) => Promise<SearchResult>;
+  getProduct?: (id: string) => Promise<ProductDetail | null>;
+}
+
+export type LibraryLoaderFn = () => Promise<{ libraryLooks?: unknown } | null>;
+
+export interface AliceBudgetOptions {
+  storefrontMs?: number;
+  productMs?: number;
+  searchMs?: number;
+  looksMs?: number;
+}
 
 export interface AliceServerOptions {
   publicDir?: string;
   tryonDir?: string;
   env?: Record<string, string | undefined>;
   calllog?: CallLogFn;
+  store?: AliceStoreDeps;
+  loadLibrary?: LibraryLoaderFn;
+  budgets?: AliceBudgetOptions;
 }
 
 export interface AliceHttpsServerOptions extends AliceServerOptions {
@@ -25,6 +57,13 @@ const TOKEN_TTL_SECONDS = 1800;
 const MAX_TOKEN_BODY_BYTES = 4096;
 const RATE_LIMIT_MAX = 20;
 const RATE_LIMIT_WINDOW_MS = 60_000;
+const BROWSE_RATE_LIMIT_MAX = 90;
+const BROWSE_RATE_LIMIT_WINDOW_MS = 60_000;
+const STOREFRONT_BUDGET_MS = 1400;
+const PRODUCT_BUDGET_MS = 1300;
+const SEARCH_BUDGET_MS = 1300;
+const LOOKS_BUDGET_MS = 1400;
+const SEARCH_QUERY_MAX_LEN = 80;
 const TRYON_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.(jpg|jpeg|png|webp|mp4)$/;
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -206,10 +245,115 @@ function isLoopbackHost(host: string): boolean {
   );
 }
 
+const TIMEOUT_SENTINEL = Symbol('timeout');
+
+async function raceWithBudget<T>(
+  promise: Promise<T>,
+  budgetMs: number,
+): Promise<{ timedOut: true } | { timedOut: false; value: T }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {
+    timer = setTimeout(() => resolve(TIMEOUT_SENTINEL), budgetMs);
+    if (typeof timer.unref === 'function') {
+      timer.unref();
+    }
+  });
+
+  promise.catch(() => {});
+
+  try {
+    const winner = await Promise.race([promise, timeoutPromise]);
+    if (winner === TIMEOUT_SENTINEL) {
+      return { timedOut: true };
+    }
+    return { timedOut: false, value: winner };
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function parseDepartment(raw: string | null): Gender {
+  return raw?.trim().toLowerCase() === 'men' ? 'men' : 'women';
+}
+
+function parseLooksLimit(raw: string | null): number {
+  if (!raw || !raw.trim()) return 6;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 6;
+  return Math.min(12, Math.max(1, Math.floor(n)));
+}
+
+function loadFixtureOutfits(
+  publicRoot: string,
+  department: Gender,
+  limit: number,
+): Outfit[] {
+  const candidates = [
+    path.join(publicRoot, 'fixture.json'),
+    path.join(import.meta.dirname, 'public', 'fixture.json'),
+  ];
+
+  for (const filePath of candidates) {
+    try {
+      const raw = fs.readFileSync(filePath, 'utf8');
+      const parsed = JSON.parse(raw) as {
+        brief?: { gender?: unknown };
+        outfits?: unknown;
+      };
+      if (!Array.isArray(parsed?.outfits)) continue;
+      const allOutfits = parsed.outfits.filter(
+        (o): o is Outfit => Boolean(o) && typeof o === 'object' && Array.isArray((o as Outfit).pieces),
+      );
+      if (allOutfits.length === 0) return [];
+
+      const matching = allOutfits.filter((outfit) => {
+        if (outfit.pieces.length > 0 && outfit.pieces.every((p) => p?.item?.department === department)) {
+          return true;
+        }
+        if (outfit.pieces.length === 0 && parsed.brief?.gender === department) {
+          return true;
+        }
+        return false;
+      });
+
+      const chosen = matching.length > 0 ? matching : allOutfits;
+      return chosen.slice(0, limit);
+    } catch {
+      // try next candidate
+    }
+  }
+
+  return [];
+}
+
+function defaultLoadLibrary(): Promise<{ libraryLooks?: unknown } | null> {
+  return import('./src/library/index.ts').catch(() => null);
+}
+
 export function createAliceHandler(opts: AliceServerOptions = {}): RequestListener {
   const startedAt = Date.now();
   const rateBuckets = new Map<string, number[]>();
+  const browseRateBuckets = new Map<string, number[]>();
   const logSink = opts.calllog ?? defaultCalllog;
+  const loadLibraryFn = opts.loadLibrary ?? defaultLoadLibrary;
+  const storefrontBudgetMs = opts.budgets?.storefrontMs ?? STOREFRONT_BUDGET_MS;
+  const productBudgetMs = opts.budgets?.productMs ?? PRODUCT_BUDGET_MS;
+  const searchBudgetMs = opts.budgets?.searchMs ?? SEARCH_BUDGET_MS;
+  const looksBudgetMs = opts.budgets?.looksMs ?? LOOKS_BUDGET_MS;
+
+  const searchMixedFn = opts.store?.searchMixed ?? defaultSearchMixed;
+  const searchFn = opts.store?.search ?? defaultSearch;
+  const getProductFn = opts.store?.getProduct ?? defaultGetProduct;
+  const storefrontFn =
+    opts.store?.storefront ??
+    ((gender: Gender) =>
+      defaultStorefront(gender, {
+        searchMixed: searchMixedFn,
+        search: searchFn,
+        budgetMs: storefrontBudgetMs,
+      }));
 
   function logServerEvent(ev: string, data?: Record<string, unknown>): void {
     try {
@@ -219,33 +363,51 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
     }
   }
 
-  function checkRateLimit(remoteAddr: string): { allowed: boolean; retryAfterS: number } {
+  function checkBucketRateLimit(
+    buckets: Map<string, number[]>,
+    remoteAddr: string,
+    maxRequests: number,
+    windowMs: number,
+  ): { allowed: boolean; retryAfterS: number } {
     const now = Date.now();
-    const cutoff = now - RATE_LIMIT_WINDOW_MS;
+    const cutoff = now - windowMs;
 
-    if (rateBuckets.size > 1000) {
-      for (const [key, timestamps] of rateBuckets) {
+    if (buckets.size > 1000) {
+      for (const [key, timestamps] of buckets) {
         const recent = timestamps.filter((t) => t > cutoff);
         if (recent.length === 0) {
-          rateBuckets.delete(key);
+          buckets.delete(key);
         } else {
-          rateBuckets.set(key, recent);
+          buckets.set(key, recent);
         }
       }
     }
 
-    const existing = rateBuckets.get(remoteAddr) ?? [];
+    const existing = buckets.get(remoteAddr) ?? [];
     const recent = existing.filter((t) => t > cutoff);
 
-    if (recent.length >= RATE_LIMIT_MAX) {
-      rateBuckets.set(remoteAddr, recent);
-      const retryAfterS = Math.max(1, Math.ceil((recent[0] + RATE_LIMIT_WINDOW_MS - now) / 1000));
+    if (recent.length >= maxRequests) {
+      buckets.set(remoteAddr, recent);
+      const retryAfterS = Math.max(1, Math.ceil((recent[0] + windowMs - now) / 1000));
       return { allowed: false, retryAfterS };
     }
 
     recent.push(now);
-    rateBuckets.set(remoteAddr, recent);
+    buckets.set(remoteAddr, recent);
     return { allowed: true, retryAfterS: 0 };
+  }
+
+  function checkRateLimit(remoteAddr: string): { allowed: boolean; retryAfterS: number } {
+    return checkBucketRateLimit(rateBuckets, remoteAddr, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  }
+
+  function checkBrowseRateLimit(remoteAddr: string): { allowed: boolean; retryAfterS: number } {
+    return checkBucketRateLimit(
+      browseRateBuckets,
+      remoteAddr,
+      BROWSE_RATE_LIMIT_MAX,
+      BROWSE_RATE_LIMIT_WINDOW_MS,
+    );
   }
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -430,6 +592,178 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
           { 'Cache-Control': 'no-store' },
         );
         return;
+      }
+
+      // 3b. Storefront, product, search, and looks browse routes (GET only, shared 90/min limit)
+      if (
+        rawPathname === '/api/storefront' ||
+        rawPathname === '/api/product' ||
+        rawPathname === '/api/search' ||
+        rawPathname === '/api/looks'
+      ) {
+        if (method !== 'GET') {
+          sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'GET' });
+          return;
+        }
+
+        const remoteAddr = req.socket.remoteAddress ?? 'unknown';
+        const browseLimit = checkBrowseRateLimit(remoteAddr);
+        if (!browseLimit.allowed) {
+          sendJson(
+            res,
+            429,
+            { error: 'slow_down' },
+            { 'Retry-After': String(browseLimit.retryAfterS), 'Cache-Control': 'no-store' },
+          );
+          return;
+        }
+
+        const parsedUrl = new URL(rawUrl, 'http://localhost');
+
+        // GET /api/storefront?department=men|women
+        if (rawPathname === '/api/storefront') {
+          const department = parseDepartment(parsedUrl.searchParams.get('department'));
+          const t0 = Date.now();
+          let result: StorefrontResult;
+          try {
+            const raced = await raceWithBudget(storefrontFn(department), storefrontBudgetMs + 50);
+            if (raced.timedOut) {
+              result = {
+                department,
+                sections: [],
+                ms: Math.max(0, Date.now() - t0),
+                partial: true,
+              };
+            } else {
+              result = raced.value;
+            }
+          } catch {
+            result = {
+              department,
+              sections: [],
+              ms: Math.max(0, Date.now() - t0),
+            };
+          }
+          logExtra = `dept=${department} sections=${result.sections.length}${result.partial ? ' partial=true' : ''}`;
+          sendJson(res, 200, result, { 'Cache-Control': 'no-store' });
+          return;
+        }
+
+        // GET /api/product?variant_id=<gid> (also accept id)
+        if (rawPathname === '/api/product') {
+          const rawId = (
+            parsedUrl.searchParams.get('variant_id') ??
+            parsedUrl.searchParams.get('id') ??
+            ''
+          ).trim();
+          if (!isValidShopifyGid(rawId)) {
+            sendJson(res, 400, { error: 'bad_id' }, { 'Cache-Control': 'no-store' });
+            return;
+          }
+
+          const department = parseDepartment(parsedUrl.searchParams.get('department'));
+          let detail: ProductDetail | null = null;
+          try {
+            const raced = await raceWithBudget(getProductFn(rawId), productBudgetMs);
+            if (raced.timedOut) {
+              logExtra = 'timeout=true';
+              sendJson(res, 504, { error: 'slow_store' }, { 'Cache-Control': 'no-store' });
+              return;
+            }
+            detail = raced.value;
+          } catch {
+            detail = null;
+          }
+
+          if (!detail) {
+            sendJson(res, 404, { error: 'not_found' }, { 'Cache-Control': 'no-store' });
+            return;
+          }
+
+          const payload = buildProductPayload(detail, department);
+          sendJson(res, 200, payload, { 'Cache-Control': 'no-store' });
+          return;
+        }
+
+        // GET /api/search?q=<text>&department=men|women
+        if (rawPathname === '/api/search') {
+          const query = (parsedUrl.searchParams.get('q') ?? '').trim();
+          if (query.length === 0 || query.length > SEARCH_QUERY_MAX_LEN) {
+            sendJson(res, 400, { error: 'bad_query' }, { 'Cache-Control': 'no-store' });
+            return;
+          }
+
+          const department = parseDepartment(parsedUrl.searchParams.get('department'));
+          let items: Item[] = [];
+          try {
+            const raced = await raceWithBudget(
+              searchMixedFn(query, department, { limit: 8 }),
+              searchBudgetMs,
+            );
+            if (!raced.timedOut && raced.value && Array.isArray(raced.value.items)) {
+              items = raced.value.items.slice(0, 8);
+            }
+          } catch {
+            items = [];
+          }
+
+          logExtra = `dept=${department} n=${items.length}`;
+          sendJson(res, 200, { query, items }, { 'Cache-Control': 'no-store' });
+          return;
+        }
+
+        // GET /api/looks?department=men|women&limit=<1-12, default 6>
+        if (rawPathname === '/api/looks') {
+          const department = parseDepartment(parsedUrl.searchParams.get('department'));
+          const limit = parseLooksLimit(parsedUrl.searchParams.get('limit'));
+
+          let libraryOutfits: Outfit[] | null = null;
+          try {
+            const runLibrary = async (): Promise<Outfit[] | null> => {
+              const mod = await loadLibraryFn();
+              if (mod && typeof mod.libraryLooks === 'function') {
+                const fn = mod.libraryLooks as (
+                  g: Gender,
+                  o?: { limit?: number },
+                ) => Promise<Outfit[]>;
+                const resOutfits = await fn(department, { limit });
+                if (Array.isArray(resOutfits) && resOutfits.length > 0) {
+                  return resOutfits.slice(0, limit);
+                }
+              }
+              return null;
+            };
+
+            const raced = await raceWithBudget(runLibrary(), looksBudgetMs);
+            if (!raced.timedOut && raced.value && raced.value.length > 0) {
+              libraryOutfits = raced.value;
+            }
+          } catch {
+            libraryOutfits = null;
+          }
+
+          if (libraryOutfits) {
+            logExtra = `dept=${department} source=library n=${libraryOutfits.length}`;
+            sendJson(
+              res,
+              200,
+              { department, looks: libraryOutfits, source: 'library' },
+              { 'Cache-Control': 'no-store' },
+            );
+            return;
+          }
+
+          const publicRoot = path.resolve(opts.publicDir ?? path.join(import.meta.dirname, 'public'));
+          const fixtureLooks = loadFixtureOutfits(publicRoot, department, limit);
+          logExtra = `dept=${department} source=fixture n=${fixtureLooks.length}`;
+          sendJson(
+            res,
+            200,
+            { department, looks: fixtureLooks, source: 'fixture' },
+            { 'Cache-Control': 'no-store' },
+          );
+          return;
+        }
       }
 
       // Unknown /api/* routes
