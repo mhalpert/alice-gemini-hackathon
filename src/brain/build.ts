@@ -7,13 +7,14 @@ import { searchMixed, setCallRoom } from '../store/index.ts';
 import { planOutfits, pieceCeiling, type PlanIdea, type PlanSlot, type Slot } from './plan.ts';
 import { stylistPick, CANDIDATES_SHOWN, type SlotCandidates } from './pick.ts';
 import { gateOutfit, prefetchThumbs, type GateResult } from './gate.ts';
+import { critiqueOutfit, type Critique } from './critic.ts';
 import { calllog } from '../calllog.ts';
 import { breaksDressCode, fixNameColours } from './words.ts';
 
 const SHOWN = 3;
 const CANDIDATES_PER_SLOT = 12;
 
-export interface LiveBuildOptions { onOutfit?(outfit: Outfit, index: number): void; room?: string }
+export interface LiveBuildOptions { onOutfit?(outfit: Outfit, index: number): void; onCritique?(number: number, critique: Critique): void; room?: string }
 
 function log(room: string | undefined, ev: string, data: Record<string, unknown>) {
   if (!room) return;
@@ -223,6 +224,9 @@ export async function buildLive(brief: Brief, opts: LiveBuildOptions = {}): Prom
       slots: outfit.pieces.map((p) => `${p.slot}: ${p.item.title} $${p.item.price}`), build_ms: ms(),
     });
     try { opts.onOutfit?.(structuredClone(outfit), outfit.number - 1); } catch (err) { problems.push(`onOutfit threw: ${(err as Error).message}`); }
+    if (process.env.ALICE_CRITIC !== 'off') {
+      void critiqueOutfit(structuredClone(outfit), brief, { room }).then((c) => { try { opts.onCritique?.(outfit.number!, c); } catch {} });
+    }
     return true;
   };
 

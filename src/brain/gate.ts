@@ -18,7 +18,7 @@ export function sized(url: string, width: number): string {
 
 const thumbCache = new Map<string, Promise<string | null>>();
 
-function thumb(url: string): Promise<string | null> {
+export function thumb(url: string): Promise<string | null> {
   if (!thumbCache.has(url)) {
     thumbCache.set(url, fetch(sized(url, 256), { signal: AbortSignal.timeout(3000) })
       .then(async (r) => (r.ok ? Buffer.from(await r.arrayBuffer()).toString('base64') : null))
