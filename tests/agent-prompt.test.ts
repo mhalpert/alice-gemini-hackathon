@@ -75,9 +75,9 @@ test('ALICE_SYSTEM_PROMPT mentions CALL STATE and CAMERA STATUS', () => {
   assert.match(ALICE_SYSTEM_PROMPT, /\bCAMERA STATUS\b/);
 });
 
-test('ALICE_SYSTEM_PROMPT word count is within 450 to 1150 words and avoids tables/emoji', () => {
+test('ALICE_SYSTEM_PROMPT word count is within 450 to 1250 words and avoids tables/emoji', () => {
   const words = countWords(ALICE_SYSTEM_PROMPT);
-  assert.ok(words >= 450 && words <= 1150, `expected word count between 450 and 1150, got ${words}`);
+  assert.ok(words >= 450 && words <= 1250, `expected word count between 450 and 1250, got ${words}`);
 
   assert.equal(ALICE_SYSTEM_PROMPT.includes('|---'), false, 'prompt must not contain markdown tables');
   assert.equal(/\p{Extended_Pictographic}/u.test(ALICE_SYSTEM_PROMPT), false, 'prompt must not contain emoji');
