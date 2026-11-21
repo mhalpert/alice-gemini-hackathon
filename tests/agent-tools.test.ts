@@ -556,6 +556,10 @@ test('pick_outfit validates look, highlights pieces every 2.2s, and cancels walk
   assert.equal(state.get().pickedLook, 1);
   assert.match(picked, /Knit texture elevates the neckline/);
   assert.match(picked, /Try-on is ready/i);
+  assert.match(picked, /two or three short sentences/i);
+  assert.match(picked, /about 12 seconds/i);
+  assert.match(picked, /walk order/i);
+  assert.doesNotMatch(picked, /four or five sentences/i);
 
   // Initial highlight with piece: null.
   assert.deepEqual(calls, [{ action: 'highlight', payload: { outfit: 1, piece: null } }]);
@@ -869,13 +873,15 @@ test('add_to_bag enforces heard-sizes NOT DONE check, remembers sizes across cal
   assert.equal(state.get().sizes.top, 'M');
   assert.equal(storeAddCalls, 0);
 
-  // Next call supplies ONLY shoes -> merges with remembered top=M and succeeds!
+  // Next call supplies ONLY shoes -> merges with remembered top=M and succeeds (partially)!
   const added = await tools.add_to_bag.execute({ sizes: { shoes: '10' } }, fakeToolOpts('bag2'));
   assert.equal(storeAddCalls, 1);
-  assert.match(added, /^Added 2 pieces, total \$105/);
+  assert.match(added, /^PARTLY DONE: NOT ADDED \(1\):.*Minimal Leather Sneaker - White.*Size 10 is sold out/);
+  assert.match(added, /Added 2 pieces, total \$105/);
   assert.match(added, /Everlane:.*Merino Knit Polo - Espresso \(size M\)/);
-  assert.match(added, /Not added \(1\):.*Minimal Leather Sneaker - White.*Size 10 is sold out/);
   assert.match(added, /Checkout link is on the page \(Everlane\)/);
+  assert.match(added, /never say a not-added piece is in the bag/i);
+  assert.match(state.summarize(), /NOT_ADDED=\[Minimal Leather Sneaker - White \(Size 10 is sold out\)\]/);
 
   const bagCall = calls.find((c) => c.action === 'bagReady');
   assert.ok(bagCall);
@@ -889,14 +895,16 @@ test('add_to_bag enforces heard-sizes NOT DONE check, remembers sizes across cal
   assert.ok(bagLog);
   assert.equal(bagLog!.data?.total, 105);
 
-  // Advance past 15s wrapper duplicate window -> bag dedupe STILL catches exact same look+sizes!
+  // Advance past 15s wrapper duplicate window -> bag dedupe STILL catches exact same look+sizes
+  // and keeps PARTLY DONE prefix rather than claiming everything is already in the bag!
   clockNow += DUPLICATE_WINDOW_MS + 1_000;
   const deduped = await tools.add_to_bag.execute(
     { outfit: 1, sizes: { top: 'M', shoes: '10' } },
     fakeToolOpts('bag3'),
   );
   assert.equal(storeAddCalls, 1, 'bag dedupe must not call addToBag a second time');
-  assert.match(deduped, /^Already in the bag\./);
+  assert.match(deduped, /^PARTLY DONE:/);
+  assert.doesNotMatch(deduped, /^Already in the bag\./);
 });
 
 test('add_to_bag falls back to local mock when store module is missing', async () => {
@@ -1141,14 +1149,16 @@ test('add_to_bag honors store NOT DONE missing-size response without sending bag
   );
   assert.equal(state.get().bag, null, 'flow state must NOT record bag as done');
 
-  // Second call supplies missing bottom size -> real cart created -> done!
+  // Second call supplies missing bottom size -> real cart created (shoes still not added -> PARTLY DONE)!
   const secondRes = await tools.add_to_bag.execute(
     { sizes: { bottom: '32' } },
     fakeToolOpts('bag-nd-2'),
   );
   assert.equal(storeAddCalls, 2);
   assert.equal(secondRes.startsWith('NOT DONE:'), false);
-  assert.match(secondRes, /^Added 2 pieces, total \$105/);
+  assert.equal(secondRes.startsWith('PARTLY DONE:'), true);
+  assert.match(secondRes, /NOT ADDED \(1\):.*Minimal Leather Sneaker - White/);
+  assert.match(secondRes, /Added 2 pieces, total \$105/);
   assert.match(secondRes, /Checkout link is on the page \(Everlane\)/);
   assert.ok(state.get().bag, 'flow state must record bag once a real cart exists');
 
@@ -1405,7 +1415,7 @@ test('real media layer shapes: /tryon URLs only (never file paths), slow 25s try
   assert.equal(sharedProductImagesCalls, 1);
 });
 
-test('add_to_bag result leads with added count and total, then not-added pieces with reasons, then checkout links on the page', async () => {
+test('add_to_bag partial result starts with PARTLY DONE, lists NOT ADDED first with reasons, then added pieces and total, then links and one instruction', async () => {
   const { page } = createFakePage();
   const state = createCallStateStore({ roomName: 'r-bag-order', log: () => {} });
 
@@ -1471,19 +1481,24 @@ test('add_to_bag result leads with added count and total, then not-added pieces 
     fakeToolOpts('bag-ord-1'),
   );
 
-  const addedIdx = res.indexOf('Added 3 pieces, total $155');
-  const notAddedIdx = res.indexOf('Not added (2):');
+  const partlyIdx = res.indexOf('PARTLY DONE: NOT ADDED (2):');
   const sandalIdx = res.indexOf('Strappy Sandal at Fashion Nova (Size 8 is out of stock)');
   const clutchIdx = res.indexOf('Mini Clutch at Fashion Nova (Size could not be selected)');
+  const addedIdx = res.indexOf('Added 3 pieces, total $155');
   const linkIdx = res.indexOf('Checkout link is on the page (Fashion Nova)');
 
-  assert.equal(addedIdx, 0, `expected result to lead with added count and total, got: ${res}`);
-  assert.ok(notAddedIdx > addedIdx, 'not-added section must come after added count and total');
-  assert.ok(sandalIdx > notAddedIdx && clutchIdx > notAddedIdx, 'each not-added piece and reason must be listed');
-  assert.ok(linkIdx > clutchIdx, 'checkout link location must follow the not-added pieces');
+  assert.equal(partlyIdx, 0, `expected result to start with PARTLY DONE and NOT ADDED, got: ${res}`);
+  assert.ok(sandalIdx > partlyIdx && clutchIdx > partlyIdx, 'each not-added piece and reason must be listed first');
+  assert.ok(addedIdx > clutchIdx, 'added pieces and total must follow NOT ADDED section');
+  assert.ok(linkIdx > addedIdx, 'checkout link location must follow added pieces');
+  assert.match(res, /say exactly which pieces are not in the bag/i);
+  assert.match(res, /offer a swap or another size/i);
+  assert.match(res, /never say a not-added piece is in the bag/i);
   assert.match(res, /never say the bag is processing/i);
   assert.match(res, /never pitch a different look/i);
-  assert.match(res, /offer to swap those pieces or try another size/i);
+
+  const summary = state.summarize();
+  assert.match(summary, /NOT_ADDED=\[Strappy Sandal \(Size 8 is out of stock\); Mini Clutch \(Size could not be selected\)\]/);
 });
 
 test('show_on_me distinguishes camera-off stand-in model render from camera-on render', async () => {
@@ -1709,4 +1724,157 @@ test('build_outfits caps weather lookup at 2.5s and never fails when weather imp
   assert.equal(errLog!.data?.when, 'Sunday');
   assert.equal(typeof errLog!.data?.ms, 'number');
   assert.match(String(errLog!.data?.error), /weather module failed to load/);
+});
+
+test('show_on_me size prompt adapts to flow state: none known, partial known, and all known', async () => {
+  const { page } = createFakePage();
+  const snap: CameraSnapshot = {
+    jpeg: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+    width: 640,
+    height: 480,
+    at: 1_000,
+  };
+
+  // 1) No sizes known yet for Look 1 (top, bottom, shoes) -> asks for top, bottom, and shoe sizes.
+  const clock = createFakeClock();
+  const stateNone = createCallStateStore({ roomName: 'r-sz-none', log: () => {} });
+  const toolsNone = createAgentTools({
+    room: 'r-sz-none',
+    log: () => {},
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+    getSnapshot: () => snap,
+    page,
+    state: stateNone,
+    deps: makeFakeDeps(),
+  });
+  await toolsNone.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  await toolsNone.build_outfits.execute({ occasion: 'date', budget_usd: 200 }, fakeToolOpts('b1'));
+  await flushMicrotasks();
+  await toolsNone.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+
+  const resNone = await toolsNone.show_on_me.execute({}, fakeToolOpts('s-none'));
+  assert.match(resNone, /ask for their top, bottom, and shoe sizes in one question/i);
+
+  // 2) Partial sizes known (top only) -> asks only for missing bottom and shoe sizes.
+  await clock.advance(DUPLICATE_WINDOW_MS + 1_000);
+  stateNone.dispatch({ type: 'merge_sizes', sizes: { top: 'medium' } });
+  const resPartial = await toolsNone.show_on_me.execute({ outfit: 1 }, fakeToolOpts('s-partial'));
+  assert.match(resPartial, /already have top medium/i);
+  assert.match(resPartial, /ask only for their bottom and shoe sizes in one question/i);
+  assert.doesNotMatch(resPartial, /ask.*top.*bottom.*shoe/i);
+
+  // 3) All sizes known for Look 1 -> offers to bag in known sizes without asking again.
+  await clock.advance(DUPLICATE_WINDOW_MS + 1_000);
+  stateNone.dispatch({ type: 'merge_sizes', sizes: { bottom: '30x34', shoes: '8.5 wide' } });
+  const resAll = await toolsNone.show_on_me.execute({ outfit: 1 }, fakeToolOpts('s-all'));
+  assert.match(resAll, /already have all sizes needed/i);
+  assert.match(resAll, /top medium, bottom 30x34, shoes 8\.5 wide/);
+  assert.match(resAll, /do not ask for sizes again/i);
+  assert.match(resAll, /offer to add it to their bag/i);
+
+  // 4) Look 2 only has top and shoes -> all needed sizes known even without bottom, and works with camera off.
+  const stateLook2 = createCallStateStore({ roomName: 'r-sz-l2', log: () => {} });
+  stateLook2.dispatch({ type: 'merge_sizes', sizes: { top: 'M', shoes: '10' } });
+  const toolsLook2 = createAgentTools({
+    room: 'r-sz-l2',
+    log: () => {},
+    getSnapshot: () => null,
+    page,
+    state: stateLook2,
+    deps: makeFakeDeps(),
+  });
+  await toolsLook2.set_department.execute({ department: 'men' }, fakeToolOpts('d2'));
+  await toolsLook2.build_outfits.execute({ occasion: 'date', budget_usd: 200 }, fakeToolOpts('b2'));
+  await flushMicrotasks();
+  await toolsLook2.pick_outfit.execute({ outfit: 2 }, fakeToolOpts('p2'));
+
+  const resLook2 = await toolsLook2.show_on_me.execute({}, fakeToolOpts('s-l2'));
+  assert.match(resLook2, /on screen on a model/i);
+  assert.match(resLook2, /already have all sizes needed.*top M, shoes 10/i);
+  assert.match(resLook2, /do not ask for sizes again/i);
+});
+
+test('add_to_bag schema allows exact sizes and explicit corrections replace earlier noisy sizes', async () => {
+  const { page } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-sz-corr', log: () => {} });
+  let clockNow = 1_000;
+  const receivedSizes: Array<Record<string, string>> = [];
+
+  const tools = createAgentTools({
+    room: 'r-sz-corr',
+    log: () => {},
+    now: () => clockNow,
+    page,
+    state,
+    deps: makeFakeDeps({
+      async addToBag(_outfit, sizes): Promise<BagOut> {
+        receivedSizes.push({ ...sizes });
+        return {
+          carts: [
+            {
+              store: 'Everlane',
+              store_domain: 'everlane.myshopify.com',
+              cart_id: `cart-${receivedSizes.length}`,
+              continue_url: `https://everlane.com/cart/${receivedSizes.length}`,
+              total_usd: 160,
+              added: [
+                { variant_id: 'var-top-m', title: 'Merino Knit Polo - Espresso', size: sizes.top ?? null },
+                { variant_id: 'var-bottom-1', title: 'Pleated Wool Trouser - Charcoal', size: sizes.bottom ?? null },
+                { variant_id: 'var-shoes-1', title: 'Minimal Leather Sneaker - White', size: sizes.shoes ?? null },
+              ],
+              not_added: [],
+              ms: 25,
+            },
+          ],
+          summary: 'Added 3 items.',
+          total_usd: 160,
+        };
+      },
+    }),
+  });
+
+  // Schema description explicitly permits half sizes, widths, and waist x inseam.
+  const sizesField = (tools.add_to_bag.parameters as unknown as { shape: Record<string, { description?: string }> }).shape.sizes;
+  assert.ok(sizesField?.description);
+  assert.match(sizesField!.description!, /half sizes/i);
+  assert.match(sizesField!.description!, /8\.5 wide/i);
+  assert.match(sizesField!.description!, /30x34/i);
+
+  await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute({ occasion: 'date', budget_usd: 200 }, fakeToolOpts('b1'));
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+
+  // First call with noisy room sizes.
+  const first = await tools.add_to_bag.execute(
+    { sizes: { top: 'L', bottom: '36', shoes: '12' } },
+    fakeToolOpts('bag-c1'),
+  );
+  assert.match(first, /^Added 3 pieces, total \$160/);
+  assert.doesNotMatch(first, /^PARTLY DONE:/);
+  assert.deepEqual(state.get().sizes, { top: 'L', bottom: '36', shoes: '12' });
+
+  // Shopper explicitly corrects all three slots with exact values -> replaces remembered sizes and re-bags.
+  const second = await tools.add_to_bag.execute(
+    { sizes: { top: 'medium', bottom: '30x34', shoes: '8.5 wide' } },
+    fakeToolOpts('bag-c2'),
+  );
+  assert.equal(receivedSizes.length, 2);
+  assert.equal(receivedSizes[1]!.top, 'medium');
+  assert.equal(receivedSizes[1]!.bottom, '30x34');
+  assert.equal(receivedSizes[1]!.shoes, '8.5 wide');
+  assert.deepEqual(state.get().sizes, { top: 'medium', bottom: '30x34', shoes: '8.5 wide' });
+  assert.match(second, /size medium/);
+  assert.match(second, /size 30x34/);
+  assert.match(second, /size 8\.5 wide/);
+
+  // Clean full-bag dedupe after duplicate window still returns "Already in the bag.".
+  clockNow += DUPLICATE_WINDOW_MS + 1_000;
+  const dedupedClean = await tools.add_to_bag.execute(
+    { sizes: { top: 'medium', bottom: '30x34', shoes: '8.5 wide' } },
+    fakeToolOpts('bag-c3'),
+  );
+  assert.equal(receivedSizes.length, 2);
+  assert.match(dedupedClean, /^Already in the bag\./);
 });

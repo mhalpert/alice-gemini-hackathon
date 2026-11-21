@@ -554,6 +554,77 @@ const NOOP_PAGE_SENDER: PageSender = {
   },
 };
 
+const DEFAULT_SIZED_SLOTS = new Set(['top', 'bottom', 'dress', 'layer', 'shoes']);
+
+function pieceNeedsSizeForPrompt(piece: Piece): boolean {
+  if (Array.isArray(piece.item.sizes)) {
+    if (piece.item.sizes.length === 1) return false;
+    if (piece.item.sizes.length > 1) return true;
+  }
+  return DEFAULT_SIZED_SLOTS.has(normalizeSlotKey(piece.slot));
+}
+
+function formatSlotForSizeQuestion(slot: string): string {
+  return slot === 'shoes' ? 'shoe' : slot;
+}
+
+function formatMissingSizesPhrase(slots: string[]): string {
+  const labels = slots.map(formatSlotForSizeQuestion);
+  if (labels.length === 1) return `${labels[0]} size`;
+  if (labels.length === 2) return `${labels[0]} and ${labels[1]} sizes`;
+  return `${labels.slice(0, -1).join(', ')}, and ${labels[labels.length - 1]} sizes`;
+}
+
+function buildShowOnMeSizeNextStep(outfit: Outfit, rememberedSizes: Record<string, string>): string {
+  const outfitNormSlots = new Set(outfit.pieces.map((p) => normalizeSlotKey(p.slot)));
+  const knownByKey = new Map<string, string>();
+  const missing: string[] = [];
+
+  for (const piece of outfit.pieces) {
+    if (!pieceNeedsSizeForPrompt(piece)) continue;
+    const slotLower = piece.slot.toLowerCase();
+    const slotNorm = normalizeSlotKey(piece.slot);
+    const direct = rememberedSizes[slotLower] ?? rememberedSizes[slotNorm];
+    const fallback =
+      direct === undefined && (slotNorm === 'dress' || slotNorm === 'layer')
+        ? rememberedSizes.top
+        : undefined;
+    const heard = direct ?? fallback;
+
+    if (heard) {
+      const displayKey = direct !== undefined ? slotNorm : 'top';
+      if (!knownByKey.has(displayKey)) {
+        knownByKey.set(displayKey, heard);
+      }
+      continue;
+    }
+
+    if (slotNorm === 'layer' && outfitNormSlots.has('top')) {
+      continue;
+    }
+    if (!missing.includes(slotNorm)) {
+      missing.push(slotNorm);
+    }
+  }
+
+  const knownSummary = Array.from(knownByKey.entries())
+    .map(([slot, size]) => `${slot} ${size}`)
+    .join(', ');
+
+  if (missing.length === 0) {
+    if (knownSummary) {
+      return `React like a friend in a line or two. You already have all sizes needed for this look (${knownSummary}); do not ask for sizes again—offer to add it to their bag in those sizes.`;
+    }
+    return 'React like a friend in a line or two, then offer to add this look to their bag.';
+  }
+
+  const missingPhrase = formatMissingSizesPhrase(missing);
+  if (knownSummary) {
+    return `React like a friend in a line or two. You already have ${knownSummary}; ask only for their ${missingPhrase} in one question.`;
+  }
+  return `React like a friend in a line or two, then ask for their ${missingPhrase} in one question.`;
+}
+
 function findPieceInOutfit(outfit: Outfit, rawSlot: string): Piece | undefined {
   const clean = rawSlot.trim().toLowerCase();
   const exact = outfit.pieces.find((p) => p.slot.trim().toLowerCase() === clean);
@@ -1119,7 +1190,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         return [
           `${statusLine} ${tryOnText}`,
           ...pieceLines,
-          'Walk through the pieces in four or five sentences using words from their titles, then ask if they want to see it on themselves.',
+          'Keep it to two or three short sentences total (about 12 seconds), naming the pieces in walk order (the order listed above) using words from their titles, then ask one question about whether they want to see it on themselves.',
         ].join('\n');
       }),
     }),
@@ -1163,10 +1234,11 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           const reply = await page.send('reveal', { outfit: lookNum, url: tryOnInfo.url });
           if (reply.ok) {
             stateStore.dispatch({ type: 'mark_revealed', look: lookNum });
+            const sizeNextStep = buildShowOnMeSizeNextStep(outfit, stateStore.get().sizes);
             if (renderedOnModel) {
-              return `Look ${lookNum} (${outfit.name}) is now revealed on screen on a model because the camera is off. Say the look is on screen on a model and that turning the camera on lets you show it on them; never say you cannot overlay it. React like a friend in a line or two, then ask for top, bottom, and shoe sizes together in one question.`;
+              return `Look ${lookNum} (${outfit.name}) is now revealed on screen on a model because the camera is off. Say the look is on screen on a model and that turning the camera on lets you show it on them; never say you cannot overlay it. ${sizeNextStep}`;
             }
-            return `Try-on for Look ${lookNum} (${outfit.name}) is now revealed on screen. React like a friend in a line or two, then ask for top, bottom, and shoe sizes together in one question.`;
+            return `Try-on for Look ${lookNum} (${outfit.name}) is now revealed on screen. ${sizeNextStep}`;
           }
           return renderedOnModel
             ? `Try-on for Look ${lookNum} (on a model because the camera is off) is ready, but the page did not confirm revealing it.`
@@ -1395,12 +1467,15 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     }),
 
     add_to_bag: llm.tool({
-      description: 'Add a look (defaults to the picked look) to the shopping bag using a map of piece slot to size label. Carts only, never checkout or payment.',
+      description:
+        'Add a look (defaults to the picked look) to the shopping bag using a map of piece slot to the exact size the shopper gave. Carts only, never checkout or payment.',
       parameters: z.object({
         outfit: outfitNumberSchema.optional(),
         sizes: z
           .record(z.string(), z.string())
-          .describe('Map of piece slot to size label, e.g. {"top": "M", "shoes": "10"}'),
+          .describe(
+            'Map of piece slot to the exact size the shopper said—preserve half sizes, widths, and waist with inseam, e.g. {"top": "medium", "bottom": "30x34", "shoes": "8.5 wide"}. A new size for a slot replaces the remembered size for that slot.',
+          ),
       }),
       execute: wrapper.wrap('add_to_bag', async ({ outfit: requestedOutfit, sizes }) => {
         const resolved = resolveLook(requestedOutfit);
@@ -1410,7 +1485,10 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
         const { lookNum, outfit } = resolved;
         if (sizes && Object.keys(sizes).length > 0) {
-          stateStore.dispatch({ type: 'merge_sizes', sizes });
+          const changed = stateStore.dispatch({ type: 'merge_sizes', sizes });
+          if (changed.length > 0) {
+            wrapper.invalidate('add_to_bag');
+          }
         }
 
         const rememberedSizes = stateStore.get().sizes;
@@ -1452,6 +1530,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
         const earlier = baggedResults.get(dedupeKey);
         if (earlier) {
+          if (earlier.startsWith('PARTLY DONE:')) {
+            return `PARTLY DONE: Already tried these exact sizes. ${earlier.replace(/^PARTLY DONE:\s*/, '')}`;
+          }
           return `Already in the bag. ${earlier}`;
         }
 
@@ -1530,10 +1611,10 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             (na) => `${na.title} at ${na.store} (${na.reason.replace(/\.$/, '')})`,
           );
           if (skippedSummaries.length > 0) {
-            return `NOT DONE: Added 0 pieces, total $0. Not added (${notAdded.length}): ${skippedSummaries.join('; ')}. No checkout links are on the page. Name each piece that was not added with its reason in plain words, and offer to swap those pieces or try another size. Never say the bag is processing and never pitch a different look.`;
+            return `NOT DONE: NOT ADDED (${notAdded.length}): ${skippedSummaries.join('; ')}. Added 0 pieces, total $0. No checkout links are on the page. Say exactly which pieces are not in the bag with their reasons and offer a swap or another size; never say a not-added piece is in the bag, never say the bag is processing, and never pitch a different look.`;
           }
           const reason = rawSummary ? ` ${rawSummary}` : '';
-          return `NOT DONE: Added 0 pieces, total $0. No store cart could be created.${reason} No checkout links are on the page. Offer to try another size or swap a piece. Never say the bag is processing and never pitch a different look.`;
+          return `NOT DONE: Added 0 pieces, total $0. No store cart could be created.${reason} No checkout links are on the page. Offer a swap or another size; never say any piece is in the bag, never say the bag is processing, and never pitch a different look.`;
         }
 
         const reply = await page.send('bagReady', bagPayload);
@@ -1578,12 +1659,13 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         const lines: string[] = [];
         const pieceWord = addedCount === 1 ? 'piece' : 'pieces';
         const addedDetails = storeSummaries.length > 0 ? ` — ${storeSummaries.join(' | ')}` : '';
-        lines.push(
-          `Added ${addedCount} ${pieceWord}, total ${formatPrice(bagPayload.total)} for Look ${lookNum} (${outfit.name})${addedDetails}.`,
-        );
+        const addedSentence = `Added ${addedCount} ${pieceWord}, total ${formatPrice(bagPayload.total)} for Look ${lookNum} (${outfit.name})${addedDetails}.`;
 
         if (skippedSummaries.length > 0) {
-          lines.push(`Not added (${notAdded.length}): ${skippedSummaries.join('; ')}.`);
+          lines.push(`PARTLY DONE: NOT ADDED (${notAdded.length}): ${skippedSummaries.join('; ')}.`);
+          lines.push(addedSentence);
+        } else {
+          lines.push(addedSentence);
         }
 
         if (reply.ok) {
@@ -1607,7 +1689,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
         if (skippedSummaries.length > 0) {
           lines.push(
-            'State plainly what is in the bag and the total, name each piece that was not added with its reason in plain words, and offer to swap those pieces or try another size. Never say the bag is processing and never pitch a different look.',
+            'Say exactly which pieces are not in the bag with their reasons and offer a swap or another size; never say a not-added piece is in the bag, never say the bag is processing, and never pitch a different look.',
           );
         } else {
           lines.push(
