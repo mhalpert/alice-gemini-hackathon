@@ -9,8 +9,9 @@ import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { hasOpenSsl, makeCert } from '../scripts/make-cert.mjs';
 import { getCallLogPath } from '../src/calllog.ts';
-import type { Gender, Item, Outfit } from '../src/types.ts';
+import type { Gender, Item, Outfit, PageActions } from '../src/types.ts';
 import type { ProductDetail } from '../src/store/catalog.ts';
+import { bagToPagePayload, sanitizeCheckoutLink } from '../src/store/bag-page.ts';
 import {
   createAliceHandler,
   createAliceHttpsServer,
@@ -3152,5 +3153,856 @@ describe('Public URL / reverse proxy hardening', () => {
         assert.equal(sfAfter.status, 200);
       },
     );
+  });
+});
+
+describe('POST /api/bag and bagToPagePayload', () => {
+  function everlaneDetail(overrides: Partial<ProductDetail> = {}): ProductDetail {
+    return {
+      id: 'gid://shopify/p/EverlaneShirt1',
+      title: 'The Real Everlane Oxford',
+      description: 'Organic cotton oxford shirt.',
+      description_html: '<p>Organic cotton oxford shirt.</p>',
+      images: ['https://cdn.shopify.com/s/files/1/0623/files/real-oxford.jpg'],
+      options: [
+        {
+          name: 'Size',
+          values: [
+            { label: 'S', available: true, exists: true },
+            { label: 'M', available: true, exists: true },
+            { label: 'L', available: false, exists: true },
+          ],
+        },
+      ],
+      selected: [{ name: 'Size', label: 'M' }],
+      variant: {
+        id: 'gid://shopify/ProductVariant/11111111111111',
+        price: 78,
+        available: true,
+        options: [{ name: 'Size', label: 'M' }],
+        url: 'https://www.everlane.com/products/mens-oxford-shirt?variant=11111111111111',
+      },
+      ...overrides,
+    };
+  }
+
+  function steveMaddenDetail(overrides: Partial<ProductDetail> = {}): ProductDetail {
+    return {
+      id: 'gid://shopify/p/SteveMaddenLoafer1',
+      title: 'NAXOS BLACK LEATHER',
+      description: 'Leather slip-on loafer.',
+      description_html: '<p>Leather slip-on loafer.</p>',
+      images: ['https://cdn.shopify.com/s/files/1/2170/files/real-loafer.jpg'],
+      options: [
+        {
+          name: 'Size',
+          values: [
+            { label: '9', available: true, exists: true },
+            { label: '10', available: true, exists: true },
+          ],
+        },
+      ],
+      selected: [{ name: 'Size', label: '10' }],
+      variant: {
+        id: 'gid://shopify/ProductVariant/22222222222222',
+        price: 149.95,
+        available: true,
+        options: [{ name: 'Size', label: '10' }],
+        url: 'https://www.stevemadden.com/products/naxos-black-leather?variant=22222222222222',
+      },
+      ...overrides,
+    };
+  }
+
+  async function withBagServer(
+    opts: Parameters<typeof createAliceServer>[0],
+    fn: (port: number) => Promise<void>,
+  ): Promise<void> {
+    const srv = createAliceServer(opts);
+    await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => resolve()));
+    const srvPort = (srv.address() as AddressInfo).port;
+    try {
+      await fn(srvPort);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        srv.close((err) => (err ? reject(err) : resolve())),
+      );
+    }
+  }
+
+  it('bagToPagePayload maps BagOut field-for-field to PageActions["bagReady"] and filters checkout link hosts', () => {
+    const dropped: Array<{ store: string; store_domain: string }> = [];
+    const payload = bagToPagePayload(
+      {
+        carts: [
+          {
+            store: 'Everlane',
+            store_domain: 'm34kzg-ke.myshopify.com',
+            cart_id: 'gid://shopify/Cart/1',
+            continue_url: 'https://checkout.everlane.com/checkouts/cn/abc',
+            total_usd: 78,
+            added: [
+              {
+                variant_id: 'gid://shopify/ProductVariant/11111111111111',
+                title: 'The Real Everlane Oxford',
+                size: 'M',
+                slot: 'top',
+                image: 'https://cdn.shopify.com/s/files/1/0623/files/real-oxford.jpg',
+                price: 78,
+                item_id: 'gid://shopify/p/EverlaneShirt1',
+              } as never,
+            ],
+            not_added: [],
+            ms: 120,
+          },
+          {
+            store: 'Steve Madden',
+            store_domain: 'stevemadden.myshopify.com',
+            cart_id: 'gid://shopify/Cart/2',
+            continue_url: 'https://evil-phish.example/checkout/steal',
+            total_usd: 149.95,
+            added: [
+              {
+                variant_id: 'gid://shopify/ProductVariant/22222222222222',
+                title: 'NAXOS BLACK LEATHER',
+                size: '10',
+                slot: 'shoes',
+                image: 'https://cdn.shopify.com/s/files/1/2170/files/real-loafer.jpg',
+                price: 149.95,
+                item_id: 'gid://shopify/p/SteveMaddenLoafer1',
+              } as never,
+            ],
+            not_added: [
+              {
+                variant_id: 'gid://shopify/ProductVariant/33333333333333',
+                title: 'Sold Out Belt',
+                reason: 'sold out',
+                slot: 'accessory',
+                image: '',
+                price: 45,
+                item_id: 'gid://shopify/p/Belt1',
+              } as never,
+            ],
+            ms: 140,
+          },
+        ],
+        summary: 'done',
+        total_usd: 227.95,
+      },
+      undefined,
+      { top: 'M', shoes: '10' },
+      { onLinkDropped: (info) => dropped.push(info) },
+    );
+
+    assert.deepEqual(Object.keys(payload).sort(), ['links', 'stores', 'total']);
+    assert.equal(payload.total, 227.95);
+    assert.equal(payload.stores.length, 2);
+    assert.deepEqual(payload.stores[0], {
+      store: 'Everlane',
+      added: [
+        {
+          title: 'The Real Everlane Oxford',
+          slot: 'top',
+          image: 'https://cdn.shopify.com/s/files/1/0623/files/real-oxford.jpg',
+          price: 78,
+          size: 'M',
+        },
+      ],
+      not_added: [],
+      subtotal: 78,
+    });
+    assert.equal(payload.stores[1].added.length, 1);
+    assert.equal(payload.stores[1].not_added[0].reason, 'sold out');
+    // Evil link dropped while valid Everlane subdomain link kept
+    assert.deepEqual(payload.links, [
+      { store: 'Everlane', url: 'https://checkout.everlane.com/checkouts/cn/abc' },
+    ]);
+    assert.deepEqual(dropped, [{ store: 'Steve Madden', store_domain: 'stevemadden.myshopify.com' }]);
+
+    // Link host check matrix (https only; store domain / subdomain / myshopify / shop.app)
+    assert.ok(
+      sanitizeCheckoutLink('https://shop.app/checkout/123', 'Everlane', 'm34kzg-ke.myshopify.com').url,
+    );
+    assert.ok(
+      sanitizeCheckoutLink('https://m34kzg-ke.myshopify.com/cart/c/1', 'Everlane', 'm34kzg-ke.myshopify.com').url,
+    );
+    assert.equal(
+      sanitizeCheckoutLink('http://www.everlane.com/checkouts/1', 'Everlane', 'm34kzg-ke.myshopify.com').dropped,
+      true,
+    );
+    assert.equal(
+      sanitizeCheckoutLink('https://everlane.com.evil.example/c/1', 'Everlane', 'm34kzg-ke.myshopify.com').dropped,
+      true,
+    );
+    assert.equal(
+      sanitizeCheckoutLink('https://kith.com/checkouts/1', 'Everlane', 'm34kzg-ke.myshopify.com').dropped,
+      true,
+    );
+  });
+
+  it('happy path returns bagReady shape, ignores hostile client fields and quantity, drops bad checkout links, and never calls checkout completion', async () => {
+    const calledTools: string[] = [];
+    const cartCalls: Array<{ domain: string; lines: Array<{ variant_id: string; quantity: number }> }> = [];
+    const serverEvents: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+    const consoleLines: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => consoleLines.push(args.map(String).join(' '));
+
+    try {
+      await withBagServer(
+        {
+          calllog: (room, ev, data) => serverEvents.push({ room, ev, data }),
+          store: {
+            getProduct: async (id) => {
+              calledTools.push('get_product');
+              if (id === 'gid://shopify/ProductVariant/11111111111111') return everlaneDetail();
+              if (id === 'gid://shopify/ProductVariant/22222222222222') return steveMaddenDetail();
+              return null;
+            },
+            sizeVariant: async (variantId, size) => {
+              calledTools.push('size_variant');
+              return {
+                ok: true,
+                variant_id: variantId,
+                size,
+                available: true,
+                sizes_available: [size],
+                nearest: null,
+              };
+            },
+            createCart: async (storeDomain, lines) => {
+              calledTools.push('create_cart');
+              cartCalls.push({ domain: storeDomain, lines });
+              if (storeDomain === 'm34kzg-ke.myshopify.com') {
+                return {
+                  cart_id: 'gid://shopify/Cart/ev1',
+                  continue_url: 'https://www.everlane.com/checkouts/cn/ev1',
+                  total_usd: 78,
+                  messages: [],
+                };
+              }
+              return {
+                cart_id: 'gid://shopify/Cart/sm1',
+                // Hostile/unexpected checkout link host -> must be dropped & logged as bag_link_dropped
+                continue_url: 'https://attacker.example/phish',
+                total_usd: 149.95,
+                messages: [],
+              };
+            },
+          },
+        },
+        async (srvPort) => {
+          const secretSentinel = 'HOSTILE_CLIENT_SECRET_BODY_VALUE';
+          const hostileBody = {
+            department: 'men',
+            quantity: 99,
+            outfit: {
+              name: secretSentinel,
+              total: 0.02,
+              pieces: [
+                {
+                  slot: 'top',
+                  quantity: 50,
+                  item: {
+                    id: 'gid://shopify/p/EverlaneShirt1',
+                    variant_id: 'gid://shopify/ProductVariant/11111111111111',
+                    title: 'FAKE TITLE $0.01',
+                    price: 0.01,
+                    url: 'https://evil.example/fake-shirt',
+                    image: 'https://evil.example/fake.jpg',
+                    store: 'Evil Store',
+                    store_domain: 'evil.myshopify.com',
+                  },
+                },
+                {
+                  slot: 'shoes',
+                  quantity: 25,
+                  item: {
+                    variant_id: 'gid://shopify/ProductVariant/22222222222222',
+                    title: 'FAKE SHOES',
+                    price: 0.01,
+                    url: 'https://evil.example/fake-shoes',
+                    image: 'https://evil.example/fake-shoes.jpg',
+                    store: 'Fake Shoes',
+                    store_domain: 'evil2.myshopify.com',
+                  },
+                },
+              ],
+            },
+            sizes: { top: 'M', shoes: '10' },
+          };
+
+          const res = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/bag',
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+            body: JSON.stringify(hostileBody),
+          });
+
+          assert.equal(res.status, 200);
+          assert.equal(res.headers['cache-control'], 'no-store');
+          const payload = JSON.parse(res.body.toString('utf8')) as PageActions['bagReady'];
+          assert.deepEqual(Object.keys(payload).sort(), ['links', 'stores', 'total']);
+          assert.equal(payload.total, 227.95);
+
+          // Store values win completely over hostile client fields
+          const evStore = payload.stores.find((s) => s.store === 'Everlane')!;
+          assert.ok(evStore);
+          assert.equal(evStore.added[0].title, 'The Real Everlane Oxford');
+          assert.equal(evStore.added[0].price, 78);
+          assert.equal(
+            evStore.added[0].image,
+            'https://cdn.shopify.com/s/files/1/0623/files/real-oxford.jpg',
+          );
+          assert.equal(evStore.added[0].size, 'M');
+
+          // Valid Everlane checkout link kept; untrusted attacker.example link dropped while Steve Madden piece stays
+          assert.deepEqual(payload.links, [
+            { store: 'Everlane', url: 'https://www.everlane.com/checkouts/cn/ev1' },
+          ]);
+          const smStore = payload.stores.find((s) => s.store === 'Steve Madden')!;
+          assert.ok(smStore);
+          assert.equal(smStore.added[0].title, 'NAXOS BLACK LEATHER');
+          assert.ok(serverEvents.some((e) => e.ev === 'bag_link_dropped' && e.data?.store === 'Steve Madden'));
+
+          // Cart calls used ONLY allowlisted domains and forced quantity: 1
+          assert.deepEqual(
+            cartCalls.map((c) => c.domain).sort(),
+            ['m34kzg-ke.myshopify.com', 'stevemadden.myshopify.com'],
+          );
+          for (const call of cartCalls) {
+            for (const line of call.lines) {
+              assert.equal(line.quantity, 1, 'quantity must always be forced to 1');
+            }
+          }
+
+          // No checkout / payment / purchase / auth tool was ever invoked
+          const checkoutToolName = ['complete', 'checkout'].join('_');
+          assert.ok(calledTools.length > 0);
+          assert.ok(
+            calledTools.every((t) => t === 'get_product' || t === 'size_variant' || t === 'create_cart'),
+          );
+          assert.ok(!calledTools.includes(checkoutToolName));
+
+          // One-line log and server event never leak body contents
+          const logJoined = consoleLines.join('\n');
+          assert.match(
+            logJoined,
+            /\[server\] POST \/api\/bag 200 \d+ms pieces=2 added=2 not_added=0 carts=1/,
+          );
+          assert.ok(!logJoined.includes(secretSentinel), 'server log must never log request body');
+          const bagEv = serverEvents.find((e) => e.ev === 'bag');
+          assert.ok(bagEv);
+          assert.equal(bagEv.room, '_server');
+          assert.equal(bagEv.data?.status, 200);
+          assert.equal(bagEv.data?.pieces, 2);
+          assert.equal(bagEv.data?.added, 2);
+          assert.equal(bagEv.data?.not_added, 0);
+          assert.equal(bagEv.data?.carts, 1);
+          assert.ok(!JSON.stringify(serverEvents).includes(secretSentinel));
+        },
+      );
+    } finally {
+      console.log = origLog;
+    }
+  });
+
+  it('refuses non-allowlisted stores, invalid bodies, 9 pieces, over-long ids, >16KB bodies, wrong Content-Type (415), GET/OPTIONS (405), and cross-origin outside tunnel mode', async () => {
+    let storeCalls = 0;
+    let cartCalls = 0;
+    const env: Record<string, string | undefined> = {};
+
+    await withBagServer(
+      {
+        env,
+        store: {
+          getProduct: async (id) => {
+            storeCalls += 1;
+            if (id === 'gid://shopify/ProductVariant/999000111222') {
+              return everlaneDetail({
+                variant: {
+                  id,
+                  price: 55,
+                  available: true,
+                  options: [{ name: 'Size', label: 'M' }],
+                  url: 'https://untrusted-boutique.example/products/sneaky',
+                },
+              });
+            }
+            if (id === 'gid://shopify/ProductVariant/11111111111111') {
+              return everlaneDetail();
+            }
+            return null;
+          },
+          sizeVariant: async (variantId, size) => ({
+            ok: true,
+            variant_id: variantId,
+            size,
+            available: true,
+            sizes_available: [size],
+            nearest: null,
+          }),
+          createCart: async () => {
+            cartCalls += 1;
+            return {
+              cart_id: 'gid://shopify/Cart/1',
+              continue_url: 'https://www.everlane.com/checkouts/1',
+              total_usd: 78,
+            };
+          },
+        },
+      },
+      async (srvPort) => {
+        const validPayload = {
+          department: 'men',
+          outfit: {
+            pieces: [{ slot: 'top', item: { variant_id: 'gid://shopify/ProductVariant/11111111111111' } }],
+          },
+          sizes: { top: 'M' },
+        };
+
+        // GET and OPTIONS -> 405 (no CORS preflight success)
+        for (const m of ['GET', 'OPTIONS']) {
+          const res = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/bag',
+            method: m,
+          });
+          assert.equal(res.status, 405, `expected 405 for ${m} /api/bag`);
+          assert.equal(res.headers.allow, 'POST');
+          assert.equal(res.headers['access-control-allow-origin'], undefined);
+        }
+
+        // text/plain and form-encoded POST -> 415 json_only (0 store calls)
+        for (const ct of ['text/plain', 'application/x-www-form-urlencoded']) {
+          const res = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/bag',
+            method: 'POST',
+            headers: { 'Content-Type': ct },
+            body: JSON.stringify(validPayload),
+          });
+          assert.equal(res.status, 415, `expected 415 for Content-Type ${ct}`);
+          assert.deepEqual(JSON.parse(res.body.toString('utf8')), { error: 'json_only' });
+        }
+
+        // Bad JSON -> 400
+        const badJson = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/bag',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{not-json',
+        });
+        assert.equal(badJson.status, 400);
+        assert.equal(JSON.parse(badJson.body.toString('utf8')).error, 'bad_request');
+
+        // 9 pieces -> 400
+        const ninePieces = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/bag',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            department: 'men',
+            outfit: {
+              pieces: Array.from({ length: 9 }, (_, i) => ({
+                slot: `slot${i}`,
+                item: { variant_id: `gid://shopify/ProductVariant/${1000 + i}` },
+              })),
+            },
+            sizes: {},
+          }),
+        });
+        assert.equal(ninePieces.status, 400);
+        assert.equal(JSON.parse(ninePieces.body.toString('utf8')).error, 'bad_request');
+
+        // Over-long id (121+ chars) -> 400
+        const overLongId = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/bag',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            department: 'men',
+            outfit: {
+              pieces: [
+                {
+                  slot: 'top',
+                  item: { variant_id: `gid://shopify/ProductVariant/${'1'.repeat(100)}` },
+                },
+              ],
+            },
+            sizes: { top: 'M' },
+          }),
+        });
+        assert.equal(overLongId.status, 400);
+        assert.equal(JSON.parse(overLongId.body.toString('utf8')).error, 'bad_request');
+
+        // Oversize body (> 16 KB) -> 413
+        const bigBody = JSON.stringify({
+          ...validPayload,
+          pad: 'a'.repeat(17 * 1024),
+        });
+        const oversize = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/bag',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: bigBody,
+        });
+        assert.equal(oversize.status, 413);
+        assert.deepEqual(JSON.parse(oversize.body.toString('utf8')), { error: 'body_too_large' });
+
+        // Cross-origin refused outside tunnel mode -> 403 (0 store calls)
+        const badOrigin = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/bag',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Host: `127.0.0.1:${srvPort}`,
+            Origin: 'https://evil.example',
+          },
+          body: JSON.stringify(validPayload),
+        });
+        assert.equal(badOrigin.status, 403);
+        assert.deepEqual(JSON.parse(badOrigin.body.toString('utf8')), { error: 'bad_origin' });
+
+        assert.equal(storeCalls, 0, 'validation/origin/415/413 rejections must make zero store calls');
+
+        // Product from a non-allowlisted store -> 400 bad_request and zero carts created
+        const disallowed = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/bag',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            department: 'men',
+            outfit: {
+              pieces: [{ slot: 'top', item: { variant_id: 'gid://shopify/ProductVariant/999000111222' } }],
+            },
+            sizes: { top: 'M' },
+          }),
+        });
+        assert.equal(disallowed.status, 400);
+        assert.equal(JSON.parse(disallowed.body.toString('utf8')).error, 'bad_request');
+        assert.equal(cartCalls, 0, 'non-allowlisted product must never call createCart');
+
+        // Missing size -> reported per piece in not_added (never guessed), zero carts created
+        const missingSize = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/bag',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            department: 'men',
+            outfit: {
+              pieces: [{ slot: 'top', item: { variant_id: 'gid://shopify/ProductVariant/11111111111111' } }],
+            },
+            sizes: {},
+          }),
+        });
+        assert.equal(missingSize.status, 200);
+        const missBody = JSON.parse(missingSize.body.toString('utf8')) as PageActions['bagReady'];
+        assert.equal(missBody.links.length, 0);
+        assert.equal(missBody.stores[0].not_added.length, 1);
+        assert.match(missBody.stores[0].not_added[0].reason ?? '', /no top size given/i);
+        assert.equal(cartCalls, 0);
+
+        // Made-up Shopify GID -> reported as not_added, zero carts created, no crash
+        const madeUp = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/bag',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            department: 'men',
+            outfit: {
+              pieces: [{ slot: 'top', item: { variant_id: 'gid://shopify/ProductVariant/98765432109876' } }],
+            },
+            sizes: { top: 'M' },
+          }),
+        });
+        assert.equal(madeUp.status, 200);
+        const madeUpBody = JSON.parse(madeUp.body.toString('utf8')) as PageActions['bagReady'];
+        assert.equal(madeUpBody.links.length, 0);
+        assert.equal(madeUpBody.stores[0].not_added[0].reason, 'could not check product availability');
+        assert.equal(cartCalls, 0);
+      },
+    );
+  });
+
+  it('enforces per-visitor (6/min), global (20/min), double-click sharing, concurrent different-post 429, timeout (504), and store error (502)', async () => {
+    let nowMs = 6_000_000;
+    let createCartCalls = 0;
+    let delayCartMs = 0;
+    let throwInStore = false;
+
+    await withBagServer(
+      {
+        env: { ALICE_TRUST_PROXY: '1' },
+        now: () => nowMs,
+        budgets: { bagMs: 120 },
+        store: {
+          searchMixed: async () => ({ items: [], source: 'empty', ms: 1 }),
+          getProduct: async (id) => {
+            if (throwInStore) throw new Error('upstream_secret_stack_trace_never_leak');
+            if (id === 'gid://shopify/ProductVariant/11111111111111') return everlaneDetail();
+            if (id === 'gid://shopify/ProductVariant/22222222222222') return steveMaddenDetail();
+            return null;
+          },
+          sizeVariant: async (variantId, size) => ({
+            ok: true,
+            variant_id: variantId,
+            size,
+            available: true,
+            sizes_available: [size],
+            nearest: null,
+          }),
+          createCart: async (domain) => {
+            createCartCalls += 1;
+            if (delayCartMs > 0) {
+              await new Promise((r) => setTimeout(r, delayCartMs));
+            }
+            return {
+              cart_id: `gid://shopify/Cart/${createCartCalls}`,
+              continue_url:
+                domain === 'm34kzg-ke.myshopify.com'
+                  ? 'https://www.everlane.com/checkouts/cn/ok'
+                  : 'https://www.stevemadden.com/checkouts/cn/ok',
+              total_usd: 78,
+            };
+          },
+        },
+      },
+      async (srvPort) => {
+        const bodyA = JSON.stringify({
+          department: 'men',
+          outfit: {
+            pieces: [{ slot: 'top', item: { variant_id: 'gid://shopify/ProductVariant/11111111111111' } }],
+          },
+          sizes: { top: 'M' },
+        });
+        const bodyB = JSON.stringify({
+          department: 'men',
+          outfit: {
+            pieces: [{ slot: 'shoes', item: { variant_id: 'gid://shopify/ProductVariant/22222222222222' } }],
+          },
+          sizes: { shoes: '10' },
+        });
+
+        // 1. Double-click: two identical concurrent POSTs share ONE build (createCart called ONCE)
+        delayCartMs = 45;
+        const beforeDouble = createCartCalls;
+        const [dc1, dc2] = await Promise.all([
+          requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/bag',
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'CF-Connecting-IP': '203.0.113.1',
+              Origin: 'https://alice-demo.trycloudflare.com', // allowed in tunnel mode
+            },
+            body: bodyA,
+          }),
+          requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/bag',
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'CF-Connecting-IP': '203.0.113.1',
+              Origin: 'https://alice-demo.trycloudflare.com',
+            },
+            body: bodyA,
+          }),
+        ]);
+        assert.equal(dc1.status, 200);
+        assert.equal(dc2.status, 200);
+        assert.equal(createCartCalls, beforeDouble + 1, 'double-click must share one cart build');
+
+        // 2. Concurrent DIFFERENT POST from same visitor while one is in flight -> 429
+        const pFirst = requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/bag',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.2' },
+          body: bodyA,
+        });
+        await new Promise((r) => setTimeout(r, 15));
+        const pSecondDiff = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/bag',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.2' },
+          body: bodyB,
+        });
+        const firstDone = await pFirst;
+        assert.equal(firstDone.status, 200);
+        assert.equal(pSecondDiff.status, 429);
+        assert.deepEqual(JSON.parse(pSecondDiff.body.toString('utf8')), { error: 'slow_down' });
+
+        // 3. Per-visitor 6/min limit (separate from browse limit)
+        delayCartMs = 0;
+        nowMs += 60_001;
+        for (let i = 0; i < 6; i += 1) {
+          const r = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/bag',
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.10' },
+            body: bodyA,
+          });
+          assert.equal(r.status, 200);
+        }
+        const seventh = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/bag',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.10' },
+          body: bodyA,
+        });
+        assert.equal(seventh.status, 429);
+        assert.ok(Number(seventh.headers['retry-after']) >= 1);
+        assert.deepEqual(JSON.parse(seventh.body.toString('utf8')), { error: 'slow_down' });
+
+        // Browse limit is separate: visitor 203.0.113.10 can still call /api/search
+        const browseOk = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/search?q=shirt',
+          headers: { 'CF-Connecting-IP': '203.0.113.10' },
+        });
+        assert.equal(browseOk.status, 200);
+
+        // 4. Global 20/min limit across all visitors (visitor 10 used 6; add 14 more from other visitors -> 20)
+        for (let i = 0; i < 14; i += 1) {
+          const r = await requestServer({
+            scheme: 'http',
+            port: srvPort,
+            path: '/api/bag',
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': `203.0.113.${20 + i}` },
+            body: bodyA,
+          });
+          assert.equal(r.status, 200, `expected 200 on global bag request #${7 + i}`);
+        }
+        const twentyFirst = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/bag',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.99' },
+          body: bodyA,
+        });
+        assert.equal(twentyFirst.status, 429);
+        assert.ok(Number(twentyFirst.headers['retry-after']) >= 1);
+
+        // 5. Timeout (504) and store error (502, no upstream error text leaked)
+        nowMs += 60_001;
+        delayCartMs = 300;
+        const timedOut = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/bag',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.50' },
+          body: bodyA,
+        });
+        assert.equal(timedOut.status, 504);
+        assert.deepEqual(JSON.parse(timedOut.body.toString('utf8')), { error: 'timeout' });
+
+        delayCartMs = 0;
+        throwInStore = true;
+        const storeErr = await requestServer({
+          scheme: 'http',
+          port: srvPort,
+          path: '/api/bag',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.51' },
+          body: bodyA,
+        });
+        assert.equal(storeErr.status, 502);
+        const errText = storeErr.body.toString('utf8');
+        assert.deepEqual(JSON.parse(errText), { error: 'store_unavailable' });
+        assert.ok(!errText.includes('upstream_secret_stack_trace_never_leak'));
+      },
+    );
+  });
+
+  it('bag route code path never imports src/store/purchase.ts or src/store/auth.ts', () => {
+    const repoRoot = path.resolve(import.meta.dirname, '..');
+    const checkoutToolName = ['complete', 'checkout'].join('_');
+    const bagRouteFiles = [
+      path.join(repoRoot, 'server.ts'),
+      path.join(repoRoot, 'src/store/bag-page.ts'),
+      path.join(repoRoot, 'src/store/bag.ts'),
+      path.join(repoRoot, 'src/store/cart.ts'),
+      path.join(repoRoot, 'src/store/catalog.ts'),
+    ];
+    const importRe = /(?:import|export)\s+[^'"]*?from\s+['"]([^'"]+)['"]/g;
+
+    // 1. Direct bag route modules must never import purchase.ts or auth.ts
+    for (const file of bagRouteFiles) {
+      const src = fs.readFileSync(file, 'utf8');
+      for (const m of src.matchAll(importRe)) {
+        const spec = m[1];
+        if (!spec.startsWith('.')) continue;
+        const resolved = path.resolve(path.dirname(file), spec);
+        assert.ok(
+          !resolved.endsWith('/src/store/purchase.ts') && !resolved.endsWith('/src/store/auth.ts'),
+          `bag route file must never import purchase.ts or auth.ts (found ${spec} in ${file})`,
+        );
+      }
+    }
+
+    // 2. Full transitive graph from bag-page/bag/cart/catalog must never reach purchase.ts
+    const visited = new Set<string>();
+    const queue = bagRouteFiles.slice(1);
+    while (queue.length > 0) {
+      const file = queue.pop()!;
+      if (visited.has(file)) continue;
+      visited.add(file);
+      const src = fs.readFileSync(file, 'utf8');
+      for (const m of src.matchAll(importRe)) {
+        const spec = m[1];
+        if (!spec.startsWith('.')) continue;
+        const resolved = path.resolve(path.dirname(file), spec);
+        assert.ok(
+          !resolved.endsWith('/src/store/purchase.ts'),
+          `bag route transitive graph must never import purchase.ts (found ${spec} in ${file})`,
+        );
+        if (fs.existsSync(resolved) && !visited.has(resolved)) {
+          queue.push(resolved);
+        }
+      }
+    }
+
+    const serverSrc = fs.readFileSync(path.join(repoRoot, 'server.ts'), 'utf8');
+    assert.ok(!serverSrc.includes('purchase.ts'));
+    assert.ok(!serverSrc.includes('auth.ts'));
+    assert.ok(!serverSrc.includes('prepareOrder'));
+    assert.ok(!serverSrc.includes('placeOrder'));
+    assert.ok(!serverSrc.includes(checkoutToolName));
   });
 });

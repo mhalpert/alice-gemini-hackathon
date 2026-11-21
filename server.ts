@@ -7,13 +7,23 @@ import net from 'node:net';
 import path from 'node:path';
 import { AccessToken, RoomAgentDispatch, RoomConfiguration } from 'livekit-server-sdk';
 import { calllog as defaultCalllog } from './src/calllog.ts';
-import type { Gender, Item, Outfit, SearchResult } from './src/types.ts';
-import type { ProductDetail, SearchOpts } from './src/store/catalog.ts';
+import type { Gender, Item, Outfit, Piece, SearchResult } from './src/types.ts';
+import type { ProductDetail, SearchOpts, SizeVariantOpts, SizeVariantResult } from './src/store/catalog.ts';
+import { sizeVariant as defaultSizeVariant } from './src/store/catalog.ts';
+import type { CartLineInput, CreateCartOpts, StoreCartResponse } from './src/store/cart.ts';
+import { createCart as defaultCreateCart } from './src/store/cart.ts';
+import { createBag } from './src/store/bag.ts';
 import {
-  getProduct as defaultGetProduct,
-  search as defaultSearch,
-  searchMixed as defaultSearchMixed,
-} from './src/store/index.ts';
+  bagToPagePayload,
+  computeBagBuildHash,
+  findAllowlistedStoreForDetail,
+  isAllowlistedStoreDomain,
+  pieceFromStoreDetail,
+  placeholderPieceForUnknownId,
+  validateBagRequest,
+} from './src/store/bag-page.ts';
+import { getProduct as defaultGetProduct, search as defaultSearch } from './src/store/catalog.ts';
+import { searchMixed as defaultSearchMixed } from './src/store/index.ts';
 import type { StorefrontResult } from './src/store/storefront.ts';
 import {
   buildProductPayload,
@@ -28,6 +38,12 @@ export interface AliceStoreDeps {
   searchMixed?: (query: string, gender: Gender, opts?: SearchOpts) => Promise<SearchResult>;
   search?: (query: string, gender: Gender, opts?: SearchOpts) => Promise<SearchResult>;
   getProduct?: (id: string) => Promise<ProductDetail | null>;
+  sizeVariant?: (variantId: string, size: string, opts?: SizeVariantOpts) => Promise<SizeVariantResult>;
+  createCart?: (
+    storeDomain: string,
+    lines: CartLineInput[],
+    opts?: CreateCartOpts,
+  ) => Promise<StoreCartResponse>;
 }
 
 export type LibraryLoaderFn = () => Promise<{
@@ -43,6 +59,7 @@ export interface AliceBudgetOptions {
   searchMs?: number;
   looksMs?: number;
   looksDefaultMs?: number;
+  bagMs?: number;
 }
 
 export interface AliceServerOptions {
@@ -64,6 +81,11 @@ export interface AliceHttpsServerOptions extends AliceServerOptions {
 
 const TOKEN_TTL_SECONDS = 1800;
 const MAX_TOKEN_BODY_BYTES = 4096;
+const MAX_BAG_BODY_BYTES = 16 * 1024;
+const BAG_RATE_LIMIT_MAX = 6;
+const BAG_GLOBAL_RATE_LIMIT_MAX = 20;
+const BAG_RATE_LIMIT_WINDOW_MS = 60_000;
+const BAG_BUDGET_MS = 8000;
 const RATE_LIMIT_MAX = 20;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const BAD_PASSCODE_LIMIT_MAX = 5;
@@ -206,6 +228,75 @@ async function readOptionalJsonBody(
 
     const onError = (): void => {
       finish({ ok: true, body: {} });
+    };
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+  });
+}
+
+type ReadStrictJsonBodyResult =
+  | { ok: true; body: Record<string, unknown> }
+  | { ok: false; reason: 'body_too_large' | 'invalid_json' };
+
+async function readStrictJsonBody(
+  req: IncomingMessage,
+  maxBytes: number,
+): Promise<ReadStrictJsonBodyResult> {
+  const rawContentLength = req.headers['content-length'];
+  if (rawContentLength !== undefined) {
+    const contentLength = Number(rawContentLength);
+    if (contentLength > maxBytes) {
+      return { ok: false, reason: 'body_too_large' };
+    }
+  }
+
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let settled = false;
+
+    const finish = (result: ReadStrictJsonBodyResult): void => {
+      if (settled) return;
+      settled = true;
+      req.removeListener('data', onData);
+      req.removeListener('end', onEnd);
+      req.removeListener('error', onError);
+      resolve(result);
+    };
+
+    const onData = (chunk: Buffer | string): void => {
+      const buf = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+      total += buf.length;
+      if (total > maxBytes) {
+        chunks.length = 0;
+        req.pause();
+        finish({ ok: false, reason: 'body_too_large' });
+        return;
+      }
+      chunks.push(buf);
+    };
+
+    const onEnd = (): void => {
+      if (chunks.length === 0) {
+        finish({ ok: false, reason: 'invalid_json' });
+        return;
+      }
+      try {
+        const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          finish({ ok: true, body: parsed as Record<string, unknown> });
+        } else {
+          finish({ ok: false, reason: 'invalid_json' });
+        }
+      } catch {
+        finish({ ok: false, reason: 'invalid_json' });
+      }
+    };
+
+    const onError = (): void => {
+      finish({ ok: false, reason: 'invalid_json' });
     };
 
     req.on('data', onData);
@@ -805,8 +896,16 @@ function defaultLoadLibrary(): Promise<{
 export function createAliceHandler(opts: AliceServerOptions = {}): RequestListener {
   const nowFn = opts.now ?? (() => Date.now());
   const startedAt = nowFn();
+  type BagBuildOutcome =
+    | { kind: 'ok'; payload: ReturnType<typeof bagToPagePayload> }
+    | { kind: 'bad_request'; problems: string[] }
+    | { kind: 'store_error' };
+
   const rateBuckets = new Map<string, number[]>();
   const browseRateBuckets = new Map<string, number[]>();
+  const bagRateBuckets = new Map<string, number[]>();
+  const bagInFlight = new Map<string, { hash: string; promise: Promise<BagBuildOutcome> }>();
+  let bagGlobalTimestamps: number[] = [];
   const badPasscodeBuckets = new Map<string, number[]>();
   let globalBadPasscodeTimestamps: number[] = [];
   let hourlyTokenTimestamps: number[] = [];
@@ -820,10 +919,13 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
   const searchBudgetMs = opts.budgets?.searchMs ?? SEARCH_BUDGET_MS;
   const looksBudgetMs = opts.budgets?.looksMs ?? LOOKS_BUDGET_MS;
   const looksDefaultBudgetMs = opts.budgets?.looksDefaultMs ?? LOOKS_DEFAULT_BUDGET_MS;
+  const bagBudgetMs = opts.budgets?.bagMs ?? BAG_BUDGET_MS;
 
   const searchMixedFn = opts.store?.searchMixed ?? defaultSearchMixed;
   const searchFn = opts.store?.search ?? defaultSearch;
   const getProductFn = opts.store?.getProduct ?? defaultGetProduct;
+  const sizeVariantFn = opts.store?.sizeVariant ?? defaultSizeVariant;
+  const createCartFn = opts.store?.createCart ?? defaultCreateCart;
   const storefrontFn =
     opts.store?.storefront ??
     createStorefront({
@@ -902,6 +1004,41 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
       return { allowed: false, retryAfterS };
     }
     proxyGlobalBrowseTimestamps.push(now);
+    return { allowed: true, retryAfterS: 0 };
+  }
+
+  function checkBagRateLimit(remoteAddr: string): { allowed: boolean; retryAfterS: number } {
+    const now = nowFn();
+    const cutoff = now - BAG_RATE_LIMIT_WINDOW_MS;
+    sweepBucketMap(bagRateBuckets, cutoff);
+
+    const clientRecent = (bagRateBuckets.get(remoteAddr) ?? []).filter((t) => t > cutoff);
+    if (clientRecent.length >= BAG_RATE_LIMIT_MAX) {
+      bagRateBuckets.set(remoteAddr, clientRecent);
+      const retryAfterS = Math.max(
+        1,
+        Math.ceil((clientRecent[0] + BAG_RATE_LIMIT_WINDOW_MS - now) / 1000),
+      );
+      return { allowed: false, retryAfterS };
+    }
+
+    bagGlobalTimestamps = bagGlobalTimestamps.filter((t) => t > cutoff);
+    if (bagGlobalTimestamps.length >= BAG_GLOBAL_RATE_LIMIT_MAX) {
+      if (clientRecent.length > 0) {
+        bagRateBuckets.set(remoteAddr, clientRecent);
+      } else {
+        bagRateBuckets.delete(remoteAddr);
+      }
+      const retryAfterS = Math.max(
+        1,
+        Math.ceil((bagGlobalTimestamps[0] + BAG_RATE_LIMIT_WINDOW_MS - now) / 1000),
+      );
+      return { allowed: false, retryAfterS };
+    }
+
+    clientRecent.push(now);
+    bagRateBuckets.set(remoteAddr, clientRecent);
+    bagGlobalTimestamps.push(now);
     return { allowed: true, retryAfterS: 0 };
   }
 
@@ -1290,6 +1427,375 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
           },
           { 'Cache-Control': 'no-store' },
         );
+        return;
+      }
+
+      // 3a. POST /api/bag — direct storefront bag creation (no model, no purchase, no sign-in)
+      if (rawPathname === '/api/bag') {
+        if (method !== 'POST') {
+          logExtra = 'pieces=0 added=0 not_added=0 carts=0';
+          sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'POST' });
+          return;
+        }
+
+        const socketAddr =
+          (opts.remoteAddress ? opts.remoteAddress(req) : req.socket.remoteAddress) ?? 'unknown';
+        const trustProxy = isTrustProxyEnabled(env);
+        const proxied = isProxied(req);
+        if (proxied && !trustProxy && !warnedProxiedTrustOff) {
+          warnedProxiedTrustOff = true;
+          console.warn(
+            '[server] WARNING: proxied request received with ALICE_TRUST_PROXY off — visitors share one rate-limit bucket; set ALICE_TRUST_PROXY=1 if behind a local proxy/tunnel.',
+          );
+        }
+
+        const remoteAddr = clientAddress(req, { env, remoteAddress: opts.remoteAddress });
+        const addrLog: Record<string, unknown> = trustProxy
+          ? { remote_addr: remoteAddr, socket_addr: socketAddr }
+          : { remote_addr: remoteAddr };
+
+        if (!originMatchesHost(req.headers.origin, req.headers.host)) {
+          if (!trustProxy) {
+            logExtra = 'pieces=0 added=0 not_added=0 carts=0';
+            logServerEvent('bag', {
+              status: 403,
+              reason: 'bad_origin',
+              pieces: 0,
+              added: 0,
+              not_added: 0,
+              carts: 0,
+              ...addrLog,
+            });
+            sendJson(res, 403, { error: 'bad_origin' }, { 'Cache-Control': 'no-store' });
+            return;
+          }
+          const now = nowFn();
+          if (now - lastOriginMismatchLogMs >= ORIGIN_MISMATCH_LOG_WINDOW_MS) {
+            lastOriginMismatchLogMs = now;
+            logServerEvent('origin_mismatch', { ...addrLog });
+          }
+        }
+
+        const rawCt = req.headers['content-type'];
+        const ct = typeof rawCt === 'string' ? rawCt : Array.isArray(rawCt) ? (rawCt[0] ?? '') : '';
+        const mediaType = ct.split(';')[0]?.trim().toLowerCase() ?? '';
+        if (mediaType !== 'application/json') {
+          logExtra = 'pieces=0 added=0 not_added=0 carts=0';
+          logServerEvent('bag', {
+            status: 415,
+            reason: 'json_only',
+            pieces: 0,
+            added: 0,
+            not_added: 0,
+            carts: 0,
+            ...addrLog,
+          });
+          sendJson(res, 415, { error: 'json_only' }, { 'Cache-Control': 'no-store' });
+          return;
+        }
+
+        const bodyResult = await readStrictJsonBody(req, MAX_BAG_BODY_BYTES);
+        if (!bodyResult.ok) {
+          logExtra = 'pieces=0 added=0 not_added=0 carts=0';
+          if (bodyResult.reason === 'body_too_large') {
+            logServerEvent('bag', {
+              status: 413,
+              reason: 'body_too_large',
+              pieces: 0,
+              added: 0,
+              not_added: 0,
+              carts: 0,
+              ...addrLog,
+            });
+            res.once('finish', () => req.destroy());
+            sendJson(
+              res,
+              413,
+              { error: 'body_too_large' },
+              { Connection: 'close', 'Cache-Control': 'no-store' },
+            );
+            return;
+          }
+          logServerEvent('bag', {
+            status: 400,
+            reason: 'invalid_json',
+            pieces: 0,
+            added: 0,
+            not_added: 0,
+            carts: 0,
+            ...addrLog,
+          });
+          sendJson(
+            res,
+            400,
+            { error: 'bad_request', problems: ['body must be a valid JSON object'] },
+            { 'Cache-Control': 'no-store' },
+          );
+          return;
+        }
+
+        const validated = validateBagRequest(bodyResult.body);
+        if (!validated.ok) {
+          logExtra = 'pieces=0 added=0 not_added=0 carts=0';
+          logServerEvent('bag', {
+            status: 400,
+            reason: 'validation_failed',
+            pieces: 0,
+            added: 0,
+            not_added: 0,
+            carts: 0,
+            ...addrLog,
+          });
+          sendJson(
+            res,
+            400,
+            { error: 'bad_request', problems: validated.problems },
+            { 'Cache-Control': 'no-store' },
+          );
+          return;
+        }
+
+        const { department, pieces: pieceInputs, sizes } = validated.value;
+        const pieceCount = pieceInputs.length;
+        const buildHash = computeBagBuildHash(validated.value);
+
+        const existingFlight = bagInFlight.get(remoteAddr);
+        if (existingFlight && existingFlight.hash !== buildHash) {
+          logExtra = `pieces=${pieceCount} added=0 not_added=0 carts=0`;
+          logServerEvent('bag', {
+            status: 429,
+            reason: 'in_flight',
+            pieces: pieceCount,
+            added: 0,
+            not_added: 0,
+            carts: 0,
+            ...addrLog,
+          });
+          sendJson(
+            res,
+            429,
+            { error: 'slow_down' },
+            { 'Retry-After': '2', 'Cache-Control': 'no-store' },
+          );
+          return;
+        }
+
+        const bagLimit = checkBagRateLimit(remoteAddr);
+        if (!bagLimit.allowed) {
+          logExtra = `pieces=${pieceCount} added=0 not_added=0 carts=0`;
+          logServerEvent('bag', {
+            status: 429,
+            reason: 'slow_down',
+            pieces: pieceCount,
+            added: 0,
+            not_added: 0,
+            carts: 0,
+            ...addrLog,
+          });
+          sendJson(
+            res,
+            429,
+            { error: 'slow_down' },
+            { 'Retry-After': String(bagLimit.retryAfterS), 'Cache-Control': 'no-store' },
+          );
+          return;
+        }
+
+        let buildPromise: Promise<BagBuildOutcome>;
+        if (existingFlight && existingFlight.hash === buildHash) {
+          buildPromise = existingFlight.promise;
+        } else {
+          const runBagBuild = async (): Promise<BagBuildOutcome> => {
+            try {
+              const detailCache = new Map<string, ProductDetail | null>();
+              const fetched = await Promise.all(
+                pieceInputs.map(async (p) => {
+                  const detail = await getProductFn(p.lookupId);
+                  detailCache.set(p.lookupId, detail);
+                  if (detail) {
+                    detailCache.set(detail.id, detail);
+                    detailCache.set(detail.variant.id, detail);
+                  }
+                  return { input: p, detail };
+                }),
+              );
+
+              const disallowProblems: string[] = [];
+              const sanitisedPieces: Piece[] = [];
+
+              for (const { input, detail } of fetched) {
+                if (!detail) {
+                  sanitisedPieces.push(
+                    placeholderPieceForUnknownId(input.slot, input.lookupId, department),
+                  );
+                  continue;
+                }
+                const allowlistedStore = findAllowlistedStoreForDetail(detail);
+                if (!allowlistedStore) {
+                  disallowProblems.push(
+                    `piece[${input.index}]: product store is not in the allowlisted stores`,
+                  );
+                  continue;
+                }
+                sanitisedPieces.push(
+                  pieceFromStoreDetail(input.slot, detail, allowlistedStore, department),
+                );
+              }
+
+              if (disallowProblems.length > 0) {
+                return { kind: 'bad_request', problems: disallowProblems };
+              }
+
+              const sanitisedOutfit: Outfit = {
+                name: 'Bag',
+                difference: '',
+                story: '',
+                pieces: sanitisedPieces,
+                total: 0,
+              };
+
+              let storeThrew = false;
+              let disallowedCartDomain = false;
+              const bagRunner = createBag({
+                getProduct: async (id: string) => {
+                  if (detailCache.has(id)) {
+                    return detailCache.get(id) ?? null;
+                  }
+                  try {
+                    return await getProductFn(id);
+                  } catch (err) {
+                    storeThrew = true;
+                    throw err;
+                  }
+                },
+                sizeVariant: async (variantId, size, svOpts) => {
+                  try {
+                    return await sizeVariantFn(variantId, size, svOpts);
+                  } catch (err) {
+                    storeThrew = true;
+                    throw err;
+                  }
+                },
+                createCart: async (storeDomain, lines, cartOpts) => {
+                  if (!isAllowlistedStoreDomain(storeDomain)) {
+                    disallowedCartDomain = true;
+                    throw new Error('store_not_allowlisted');
+                  }
+                  // Force quantity 1 per line regardless of any client input
+                  const fixedLines = lines.map((l) => ({ variant_id: l.variant_id, quantity: 1 }));
+                  try {
+                    return await createCartFn(storeDomain, fixedLines, cartOpts);
+                  } catch (err) {
+                    storeThrew = true;
+                    throw err;
+                  }
+                },
+                now: nowFn,
+              });
+
+              const bagOut = await bagRunner.addToBag(sanitisedOutfit, sizes, department);
+              if (disallowedCartDomain) {
+                return {
+                  kind: 'bad_request',
+                  problems: ['product store is not in the allowlisted stores'],
+                };
+              }
+              if (storeThrew && bagOut.carts.length === 0) {
+                return { kind: 'store_error' };
+              }
+
+              const payload = bagToPagePayload(bagOut, sanitisedOutfit, sizes, {
+                onLinkDropped: ({ store }) => {
+                  logServerEvent('bag_link_dropped', { store, ...addrLog });
+                },
+              });
+              return { kind: 'ok', payload };
+            } catch {
+              return { kind: 'store_error' };
+            }
+          };
+
+          const created = runBagBuild();
+          const flightEntry = { hash: buildHash, promise: created };
+          bagInFlight.set(remoteAddr, flightEntry);
+          const cleanupFlight = (): void => {
+            if (bagInFlight.get(remoteAddr) === flightEntry) {
+              bagInFlight.delete(remoteAddr);
+            }
+          };
+          created.then(cleanupFlight, cleanupFlight);
+          buildPromise = created;
+        }
+
+        const raced = await raceWithBudget(buildPromise, bagBudgetMs);
+        if (raced.timedOut) {
+          if (bagInFlight.get(remoteAddr)?.promise === buildPromise) {
+            bagInFlight.delete(remoteAddr);
+          }
+          logExtra = `pieces=${pieceCount} added=0 not_added=0 carts=0`;
+          logServerEvent('bag', {
+            status: 504,
+            reason: 'timeout',
+            pieces: pieceCount,
+            added: 0,
+            not_added: 0,
+            carts: 0,
+            ...addrLog,
+          });
+          sendJson(res, 504, { error: 'timeout' }, { 'Cache-Control': 'no-store' });
+          return;
+        }
+
+        const outcome = raced.value;
+        if (outcome.kind === 'bad_request') {
+          logExtra = `pieces=${pieceCount} added=0 not_added=0 carts=0`;
+          logServerEvent('bag', {
+            status: 400,
+            reason: 'store_not_allowlisted',
+            pieces: pieceCount,
+            added: 0,
+            not_added: 0,
+            carts: 0,
+            ...addrLog,
+          });
+          sendJson(
+            res,
+            400,
+            { error: 'bad_request', problems: outcome.problems },
+            { 'Cache-Control': 'no-store' },
+          );
+          return;
+        }
+
+        if (outcome.kind === 'store_error') {
+          logExtra = `pieces=${pieceCount} added=0 not_added=0 carts=0`;
+          logServerEvent('bag', {
+            status: 502,
+            reason: 'store_unavailable',
+            pieces: pieceCount,
+            added: 0,
+            not_added: 0,
+            carts: 0,
+            ...addrLog,
+          });
+          sendJson(res, 502, { error: 'store_unavailable' }, { 'Cache-Control': 'no-store' });
+          return;
+        }
+
+        const { payload } = outcome;
+        const addedCount = payload.stores.reduce((sum, s) => sum + s.added.length, 0);
+        const notAddedCount = payload.stores.reduce((sum, s) => sum + s.not_added.length, 0);
+        const cartsCount = payload.links.length;
+        logExtra = `pieces=${pieceCount} added=${addedCount} not_added=${notAddedCount} carts=${cartsCount}`;
+        logServerEvent('bag', {
+          status: 200,
+          pieces: pieceCount,
+          added: addedCount,
+          not_added: notAddedCount,
+          carts: cartsCount,
+          ...addrLog,
+        });
+        sendJson(res, 200, payload, { 'Cache-Control': 'no-store' });
         return;
       }
 
