@@ -221,6 +221,10 @@ test('ALICE_SYSTEM_PROMPT encodes polish6 voice: NY stylist attitude, slang limi
   assert.match(ALICE_SYSTEM_PROMPT, /budget compromises?/i);
   assert.match(ALICE_SYSTEM_PROMPT, /small budgets/i);
   assert.match(ALICE_SYSTEM_PROMPT, /eyebrow/i);
+
+  // 5. Bag what can be bagged immediately without holding back over one missing/unavailable piece.
+  assert.match(ALICE_SYSTEM_PROMPT, /call add_to_bag straight away with every known size/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never hold back the whole bag/i);
 });
 
 test('banned corporate phrases never appear in prompt, greeting, filler bits, silence check-ins, nudges, or tool result texts', () => {

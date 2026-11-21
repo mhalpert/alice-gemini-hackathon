@@ -24,6 +24,7 @@ import {
   createAgentTools,
   createToolWrapper,
   deriveProductDetails,
+  resolveOutfitBoard,
   sanitizePageMediaUrl,
   stableStringify,
   type CameraSnapshot,
@@ -865,18 +866,25 @@ test('add_to_bag enforces heard-sizes NOT DONE check, remembers sizes across cal
   await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
 
   // Look 1 has top (sizes: S,M,L), bottom (sizes: [] -> not required), shoes (sizes: 9,10,11).
-  // Provide only top -> NOT DONE naming shoes, and top size is remembered in state!
-  const notDone = await tools.add_to_bag.execute({ sizes: { top: 'M' } }, fakeToolOpts('bag1'));
-  assert.equal(notDone.startsWith('NOT DONE:'), true);
-  assert.match(notDone, /\bshoes\b/);
-  assert.doesNotMatch(notDone, /\btop\b/);
-  assert.doesNotMatch(notDone, /\bbottom\b/);
-  assert.equal(state.get().sizes.top, 'M');
+  // Provide NO sizes at all -> NOT DONE naming top and shoes without calling addToBag.
+  const notDoneEmpty = await tools.add_to_bag.execute({ sizes: {} }, fakeToolOpts('bag0'));
+  assert.equal(notDoneEmpty.startsWith('NOT DONE:'), true);
+  assert.match(notDoneEmpty, /\btop\b/);
+  assert.match(notDoneEmpty, /\bshoes\b/);
+  assert.doesNotMatch(notDoneEmpty, /\bbottom\b/);
   assert.equal(storeAddCalls, 0);
 
-  // Next call supplies ONLY shoes -> merges with remembered top=M and succeeds (partially)!
-  const added = await tools.add_to_bag.execute({ sizes: { shoes: '10' } }, fakeToolOpts('bag2'));
+  // Provide only top -> bags what can be bagged (top + bottom), remembers top=M, and reports shoes as NOT ADDED!
+  const partialFirst = await tools.add_to_bag.execute({ sizes: { top: 'M' } }, fakeToolOpts('bag1'));
+  assert.equal(state.get().sizes.top, 'M');
   assert.equal(storeAddCalls, 1);
+  assert.match(partialFirst, /^PARTLY DONE: NOT ADDED \(.*\):.*Minimal Leather Sneaker - White/);
+  assert.match(partialFirst, /no shoes size given/i);
+  assert.match(partialFirst, /Added 2 pieces, total \$105/);
+
+  // Next call supplies ONLY shoes -> merges with remembered top=M and sends full look!
+  const added = await tools.add_to_bag.execute({ sizes: { shoes: '10' } }, fakeToolOpts('bag2'));
+  assert.equal(storeAddCalls, 2);
   assert.match(added, /^PARTLY DONE: NOT ADDED \(1\):.*Minimal Leather Sneaker - White.*Size 10 is sold out/);
   assert.match(added, /Added 2 pieces, total \$105/);
   assert.match(added, /Everlane:.*Merino Knit Polo - Espresso \(size M\)/);
@@ -884,7 +892,7 @@ test('add_to_bag enforces heard-sizes NOT DONE check, remembers sizes across cal
   assert.match(added, /never say a not-added piece is in the bag/i);
   assert.match(state.summarize(), /NOT_ADDED=\[Minimal Leather Sneaker - White \(Size 10 is sold out\)\]/);
 
-  const bagCall = calls.find((c) => c.action === 'bagReady');
+  const bagCall = calls.filter((c) => c.action === 'bagReady').at(-1);
   assert.ok(bagCall);
   const bagPayload = bagCall!.payload as PageActions['bagReady'];
   assert.equal(bagPayload.total, 105);
@@ -892,7 +900,7 @@ test('add_to_bag enforces heard-sizes NOT DONE check, remembers sizes across cal
   assert.equal(bagPayload.stores.length, 2);
   assert.equal(bagPayload.stores[1]!.not_added[0]!.reason, 'Size 10 is sold out.');
 
-  const bagLog = logs.find((l) => l.ev === 'bag');
+  const bagLog = logs.filter((l) => l.ev === 'bag').at(-1);
   assert.ok(bagLog);
   assert.equal(bagLog!.data?.total, 105);
 
@@ -903,7 +911,7 @@ test('add_to_bag enforces heard-sizes NOT DONE check, remembers sizes across cal
     { outfit: 1, sizes: { top: 'M', shoes: '10' } },
     fakeToolOpts('bag3'),
   );
-  assert.equal(storeAddCalls, 1, 'bag dedupe must not call addToBag a second time');
+  assert.equal(storeAddCalls, 2, 'bag dedupe must not call addToBag a second time');
   assert.match(deduped, /^PARTLY DONE:/);
   assert.doesNotMatch(deduped, /^Already in the bag\./);
 });
@@ -1015,11 +1023,12 @@ test('search_products prefers searchMixed when exported and falls back to search
   assert.match(resFallback, /Plain Cotton Tee/);
 });
 
-test('add_to_bag honors store NOT DONE missing-size response without sending bagReady or marking state done', async () => {
+test('add_to_bag bags remaining pieces when store refuses whole cart over one missing size, then bags all once missing size is given', async () => {
   const logs: RecordedLog[] = [];
   const { page, calls } = createFakePage();
   const state = createCallStateStore({ roomName: 'r-bag-notdone', log: () => {} });
   let storeAddCalls = 0;
+  const storeReceivedSlots: string[][] = [];
 
   const tools = createAgentTools({
     room: 'r-bag-notdone',
@@ -1029,10 +1038,12 @@ test('add_to_bag honors store NOT DONE missing-size response without sending bag
     deps: makeFakeDeps({
       async loadStoreModule() {
         return {
-          async addToBag(_outfit, sizes): Promise<BagOut> {
+          async addToBag(bagOutfit, sizes): Promise<BagOut> {
             storeAddCalls++;
-            // Simulate store discovering bottom (whose Item.sizes was []) actually needs a size.
-            if (!sizes.bottom) {
+            storeReceivedSlots.push(bagOutfit.pieces.map((p) => p.slot));
+            const hasBottomPiece = bagOutfit.pieces.some((p) => p.slot === 'bottom');
+            // Simulate src/store/bag.ts refusing the whole cart whenever a piece lacks a size.
+            if (hasBottomPiece && !sizes.bottom) {
               const addedLine: BagLineAdded = {
                 variant_id: 'var-top-m-live',
                 title: 'Merino Knit Polo - Espresso',
@@ -1098,6 +1109,8 @@ test('add_to_bag honors store NOT DONE missing-size response without sending bag
               price: 55,
               item_id: 'item-shoes-1',
             };
+            const everlaneAdded = hasBottomPiece ? [topAdded, bottomAdded] : [topAdded];
+            const everlaneTotal = hasBottomPiece ? 105 : 45;
             return {
               carts: [
                 {
@@ -1105,8 +1118,8 @@ test('add_to_bag honors store NOT DONE missing-size response without sending bag
                   store_domain: 'everlane.myshopify.com',
                   cart_id: 'cart-ev-real',
                   continue_url: 'https://everlane.com/cart/c/real',
-                  total_usd: 105,
-                  added: [topAdded, bottomAdded],
+                  total_usd: everlaneTotal,
+                  added: everlaneAdded,
                   not_added: [],
                   ms: 42,
                 },
@@ -1121,8 +1134,8 @@ test('add_to_bag honors store NOT DONE missing-size response without sending bag
                   ms: 15,
                 },
               ],
-              summary: 'Everlane: 2 added, $105.00. Minimal Leather Sneaker - White: 10 is sold out; nearest 10.5. 1 checkout link ready.',
-              total_usd: 105,
+              summary: `Everlane: ${everlaneAdded.length} added, $${everlaneTotal}.00. Minimal Leather Sneaker - White: 10 is sold out; nearest 10.5. 1 checkout link ready.`,
+              total_usd: everlaneTotal,
             };
           },
         };
@@ -1135,27 +1148,29 @@ test('add_to_bag honors store NOT DONE missing-size response without sending bag
   await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
   calls.length = 0;
 
-  // First call supplies top + shoes; store discovers bottom still needs a size.
+  // First call supplies top + shoes; store refuses whole cart because bottom (whose Item.sizes was [])
+  // needs a size. Agent MUST retry with just [top, shoes], bag the top, send bagReady, and report
+  // both the unavailable shoes AND the missing-size bottom as NOT ADDED with their reasons!
   const firstRes = await tools.add_to_bag.execute(
     { sizes: { top: 'M', shoes: '10' } },
     fakeToolOpts('bag-nd-1'),
   );
-  assert.equal(storeAddCalls, 1);
-  assert.equal(firstRes.startsWith('NOT DONE:'), true);
-  assert.match(firstRes, /Pleated Wool Trouser - Charcoal \(bottom\)/);
-  assert.equal(
-    calls.some((c) => c.action === 'bagReady'),
-    false,
-    'bagReady must NOT be sent when store returns NOT DONE',
-  );
-  assert.equal(state.get().bag, null, 'flow state must NOT record bag as done');
+  assert.equal(storeAddCalls, 2);
+  assert.deepEqual(storeReceivedSlots[0], ['top', 'bottom', 'shoes']);
+  assert.deepEqual(storeReceivedSlots[1], ['top', 'shoes']);
+  assert.equal(firstRes.startsWith('PARTLY DONE:'), true);
+  assert.match(firstRes, /Pleated Wool Trouser - Charcoal at Everlane \(no bottom size given \(sizes: 30, 32, 34\)\)/);
+  assert.match(firstRes, /Minimal Leather Sneaker - White at Steve Madden \(10 is sold out; nearest 10\.5\)/);
+  assert.match(firstRes, /Added 1 piece, total \$45/);
+  assert.equal(calls.filter((c) => c.action === 'bagReady').length, 1);
+  assert.ok(state.get().bag, 'flow state must record bag once a real cart exists for baggable pieces');
 
-  // Second call supplies missing bottom size -> real cart created (shoes still not added -> PARTLY DONE)!
+  // Second call supplies missing bottom size -> real cart created for top + bottom (shoes still sold out)!
   const secondRes = await tools.add_to_bag.execute(
     { sizes: { bottom: '32' } },
     fakeToolOpts('bag-nd-2'),
   );
-  assert.equal(storeAddCalls, 2);
+  assert.equal(storeAddCalls, 3);
   assert.equal(secondRes.startsWith('NOT DONE:'), false);
   assert.equal(secondRes.startsWith('PARTLY DONE:'), true);
   assert.match(secondRes, /NOT ADDED \(1\):.*Minimal Leather Sneaker - White/);
@@ -1163,7 +1178,7 @@ test('add_to_bag honors store NOT DONE missing-size response without sending bag
   assert.match(secondRes, /Checkout link is on the page \(Everlane\)/);
   assert.ok(state.get().bag, 'flow state must record bag once a real cart exists');
 
-  const bagCall = calls.find((c) => c.action === 'bagReady');
+  const bagCall = calls.filter((c) => c.action === 'bagReady').at(-1);
   assert.ok(bagCall);
   const payload = bagCall!.payload as PageActions['bagReady'];
   assert.equal(payload.stores[0]!.added[0]!.image, 'https://cdn.shopify.com/polo-store.jpg');
@@ -1941,17 +1956,18 @@ test('show_on_me and add_to_bag never ask for jacket, belt, or accessory sizes a
           problems: [],
         };
       },
-      async addToBag(_outfit, sizes): Promise<BagOut> {
+      async addToBag(bagOutfit, sizes): Promise<BagOut> {
         receivedSizes.push({ ...sizes });
+        const total = bagOutfit.pieces.reduce((s, p) => s + p.item.price, 0);
         return {
           carts: [
             {
               store: 'Everlane',
               store_domain: 'everlane.myshopify.com',
-              cart_id: 'cart-infer-1',
-              continue_url: 'https://everlane.com/cart/infer-1',
-              total_usd: 290,
-              added: layeredOutfit.pieces.map((p) => ({
+              cart_id: `cart-infer-${receivedSizes.length}`,
+              continue_url: `https://everlane.com/cart/infer-${receivedSizes.length}`,
+              total_usd: total,
+              added: bagOutfit.pieces.map((p) => ({
                 variant_id: p.item.variant_id,
                 title: p.item.title,
                 size: sizes[p.slot.toLowerCase()] ?? null,
@@ -1960,8 +1976,8 @@ test('show_on_me and add_to_bag never ask for jacket, belt, or accessory sizes a
               ms: 30,
             },
           ],
-          summary: 'Added 6 items.',
-          total_usd: 290,
+          summary: `Added ${bagOutfit.pieces.length} items.`,
+          total_usd: total,
         };
       },
     }),
@@ -1977,28 +1993,36 @@ test('show_on_me and add_to_bag never ask for jacket, belt, or accessory sizes a
   assert.match(showRes, /top, bottom, and shoe sizes/i);
   assert.doesNotMatch(showRes, /jacket|layer|belt|accessory|bag size/i);
 
-  // 2) add_to_bag with only top -> reports ONLY bottom and shoes missing (never layer/accessory/belt/bag).
-  const notDone = await tools.add_to_bag.execute({ sizes: { top: 'M' } }, fakeToolOpts('bag-1'));
+  // 2) add_to_bag with zero sizes -> reports ONLY top, bottom, shoes missing (never layer/accessory/belt/bag).
+  const notDone = await tools.add_to_bag.execute({ sizes: {} }, fakeToolOpts('bag-0'));
   assert.equal(notDone.startsWith('NOT DONE:'), true);
-  assert.match(notDone, /Still need sizes for: bottom, shoes\./);
+  assert.match(notDone, /Still need sizes for: top, bottom, shoes\./);
   assert.doesNotMatch(notDone, /\b(?:layer|jacket|belt|accessory|bag)\b/i);
 
-  // 3) add_to_bag with bottom + shoes -> infers layer=M, accessory(belt)=32, bag=Medium, logs inferred, adds note!
+  // 3) add_to_bag with only top -> bags top + inferred layer + bag right away, reports bottom/shoes/belt as NOT ADDED.
+  const partialTop = await tools.add_to_bag.execute({ sizes: { top: 'M' } }, fakeToolOpts('bag-1'));
+  assert.equal(partialTop.startsWith('PARTLY DONE:'), true);
+  assert.match(partialTop, /Added 3 pieces, total \$150/);
+  assert.match(partialTop, /Relaxed Chino at Everlane \(no bottom size given/);
+  assert.match(partialTop, /Suede Derby at Everlane \(no shoes size given/);
+
+  // 4) add_to_bag with bottom + shoes -> infers layer=M, accessory(belt)=32, bag=Medium, logs inferred, adds note!
   const done = await tools.add_to_bag.execute(
     { sizes: { bottom: '32', shoes: '10' } },
     fakeToolOpts('bag-2'),
   );
-  assert.equal(receivedSizes.length, 1);
-  assert.equal(receivedSizes[0]!.top, 'M');
-  assert.equal(receivedSizes[0]!.bottom, '32');
-  assert.equal(receivedSizes[0]!.shoes, '10');
-  assert.equal(receivedSizes[0]!.layer, 'M');
-  assert.equal(receivedSizes[0]!.accessory, '32');
-  assert.equal(receivedSizes[0]!.bag, 'Medium');
+  assert.equal(receivedSizes.length, 2);
+  const fullSizes = receivedSizes[1]!;
+  assert.equal(fullSizes.top, 'M');
+  assert.equal(fullSizes.bottom, '32');
+  assert.equal(fullSizes.shoes, '10');
+  assert.equal(fullSizes.layer, 'M');
+  assert.equal(fullSizes.accessory, '32');
+  assert.equal(fullSizes.bag, 'Medium');
   assert.match(done, /matched the jacket to their top size and the belt to their waist/i);
 
   // Inferred sizes must be logged in the bag event, without polluting state.sizes.
-  const bagLog = logs.find((l) => l.ev === 'bag');
+  const bagLog = logs.filter((l) => l.ev === 'bag').at(-1);
   assert.ok(bagLog);
   assert.deepEqual(bagLog!.data?.inferred, { layer: 'M', belt: '32', bag: 'Medium' });
   assert.deepEqual(state.get().sizes, { top: 'M', bottom: '32', shoes: '10' });
@@ -2748,4 +2772,521 @@ test('slow tools send working notes with bits after 2s, skip fast results and re
   assert.equal(fillerLogs.length, 2);
   assert.equal(fillerLogs[0]!.data?.tool, 'build_outfits');
   assert.equal(fillerLogs[1]!.data?.tool, 'show_on_me');
+});
+
+test('outfitBoard sends collageReady with boxes when exported, and falls back to outfitCollage without boxes when absent or null', async () => {
+  assert.equal(resolveOutfitBoard({}), undefined);
+  assert.equal(resolveOutfitBoard(null), undefined);
+  const sampleBoardFn = async () => ({ url: '/tryon/b.jpg', boxes: {} });
+  assert.equal(resolveOutfitBoard({ outfitBoard: sampleBoardFn }), sampleBoardFn);
+
+  // 1) outfitBoard returns { url, boxes } -> sends collageReady { outfit, url, boxes } without calling outfitCollage.
+  const { page, calls } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-board', log: () => {} });
+  let boardCalls = 0;
+  let collageFallbackCalls = 0;
+
+  const toolsWithBoard = createAgentTools({
+    room: 'r-board',
+    log: () => {},
+    page,
+    state,
+    deps: makeFakeDeps({
+      async outfitBoard(outfit) {
+        boardCalls += 1;
+        if (outfit.number === 1) {
+          return {
+            url: '/tryon/board-look-1.jpg',
+            boxes: {
+              top: [0.05, 0.05, 0.4, 0.4],
+              bottom: [0.05, 0.5, 0.4, 0.45],
+              shoes: [0.55, 0.6, 0.35, 0.3],
+            },
+          };
+        }
+        // Look 2 returns null -> must fall back to outfitCollage with NO boxes.
+        return null;
+      },
+      async outfitCollage(outfit) {
+        collageFallbackCalls += 1;
+        return `/tryon/collage-fallback-${outfit.number ?? 1}.jpg`;
+      },
+    }),
+  });
+
+  await toolsWithBoard.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  await toolsWithBoard.build_outfits.execute({ occasion: 'dinner', budget_usd: 200 }, fakeToolOpts('b1'));
+  await flushMicrotasks();
+
+  assert.equal(boardCalls, 2);
+  assert.equal(collageFallbackCalls, 1, 'outfitCollage fallback runs only for look where outfitBoard returned null');
+
+  const collageCalls = calls.filter((c) => c.action === 'collageReady');
+  assert.equal(collageCalls.length, 2);
+
+  const look1Ready = collageCalls.find(
+    (c) => (c.payload as PageActions['collageReady']).outfit === 1,
+  )?.payload as PageActions['collageReady'];
+  assert.deepEqual(look1Ready, {
+    outfit: 1,
+    url: '/tryon/board-look-1.jpg',
+    boxes: {
+      top: [0.05, 0.05, 0.4, 0.4],
+      bottom: [0.05, 0.5, 0.4, 0.45],
+      shoes: [0.55, 0.6, 0.35, 0.3],
+    },
+  });
+
+  const look2Ready = collageCalls.find(
+    (c) => (c.payload as PageActions['collageReady']).outfit === 2,
+  )?.payload as PageActions['collageReady'];
+  assert.deepEqual(look2Ready, {
+    outfit: 2,
+    url: '/tryon/collage-fallback-2.jpg',
+  });
+  assert.equal('boxes' in look2Ready, false, 'fallback collageReady must not include boxes');
+
+  // 2) outfitBoard explicitly absent (null) -> falls back to outfitCollage with no boxes.
+  calls.length = 0;
+  let absentFallbackCalls = 0;
+  const toolsAbsentBoard = createAgentTools({
+    room: 'r-board-absent',
+    log: () => {},
+    page,
+    state: createCallStateStore({ roomName: 'r-board-absent', log: () => {} }),
+    deps: makeFakeDeps({
+      outfitBoard: null,
+      async outfitCollage(outfit) {
+        absentFallbackCalls += 1;
+        return `/tryon/legacy-collage-${outfit.number ?? 1}.jpg`;
+      },
+    }),
+  });
+
+  await toolsAbsentBoard.set_department.execute({ department: 'men' }, fakeToolOpts('d2'));
+  await toolsAbsentBoard.build_outfits.execute({ occasion: 'dinner', budget_usd: 200 }, fakeToolOpts('b2'));
+  await flushMicrotasks();
+
+  assert.equal(absentFallbackCalls, 2);
+  const legacyCalls = calls.filter((c) => c.action === 'collageReady');
+  assert.equal(legacyCalls.length, 2);
+  for (const c of legacyCalls) {
+    const p = c.payload as PageActions['collageReady'];
+    assert.equal('boxes' in p, false);
+  }
+});
+
+test('add_to_bag bags what can be bagged immediately when shopper gives large top + size 11 shoes (boots max 10, bottom unknown)', async () => {
+  const { page, calls } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-bag-partial-now', log: () => {} });
+  const baggedBatches: Array<{ slots: string[]; sizes: Record<string, string> }> = [];
+
+  const bootLook: Outfit = {
+    number: 1,
+    name: 'Downtown Boots',
+    difference: 'Oversized shirt, tailored trousers, leather boots.',
+    story: 'Sharp downtown night out.',
+    total: 230,
+    pieces: [
+      {
+        slot: 'top',
+        why: 'Relaxed drape.',
+        item: makeItem({
+          id: 'p-top',
+          variant_id: 'v-top',
+          title: 'Heavyweight Overshirt',
+          price: 75,
+          store: 'Everlane',
+          store_domain: 'everlane.myshopify.com',
+          sizes: ['S', 'M', 'L', 'XL'],
+        }),
+      },
+      {
+        slot: 'bottom',
+        why: 'Clean leg.',
+        item: makeItem({
+          id: 'p-bot',
+          variant_id: 'v-bot',
+          title: 'Relaxed Wool Trouser',
+          price: 85,
+          store: 'Everlane',
+          store_domain: 'everlane.myshopify.com',
+          sizes: ['30', '32', '34'],
+        }),
+      },
+      {
+        slot: 'shoes',
+        why: 'Sturdy ankle boot.',
+        item: makeItem({
+          id: 'p-boot',
+          variant_id: 'v-boot',
+          title: 'Chelsea Boot - Black',
+          price: 70,
+          store: 'Steve Madden',
+          store_domain: 'stevemadden.myshopify.com',
+          sizes: ['8', '9', '10'],
+        }),
+      },
+    ],
+  };
+
+  const tools = createAgentTools({
+    room: 'r-bag-partial-now',
+    log: () => {},
+    page,
+    state,
+    deps: makeFakeDeps({
+      async buildOutfits(_brief, opts) {
+        opts?.onOutfit?.(bootLook, 0);
+        return {
+          outfits: [bootLook],
+          source: 'live',
+          timing: { first_outfit_ms: 10, total_ms: 10 },
+          problems: [],
+        };
+      },
+      async addToBag(bagOutfit, sizes): Promise<BagOut> {
+        baggedBatches.push({ slots: bagOutfit.pieces.map((p) => p.slot), sizes: { ...sizes } });
+        // Top in L succeeds; boots in 11 unavailable (max 10).
+        return {
+          carts: [
+            {
+              store: 'Everlane',
+              store_domain: 'everlane.myshopify.com',
+              cart_id: 'cart-ev-boot',
+              continue_url: 'https://everlane.com/cart/boot',
+              total_usd: 75,
+              added: [{ variant_id: 'v-top', title: 'Heavyweight Overshirt', size: sizes.top }],
+              not_added: [],
+              ms: 20,
+            },
+            {
+              store: 'Steve Madden',
+              store_domain: 'stevemadden.myshopify.com',
+              cart_id: null,
+              continue_url: null,
+              total_usd: null,
+              added: [],
+              not_added: [
+                {
+                  variant_id: 'v-boot',
+                  title: 'Chelsea Boot - Black',
+                  reason: "11 isn't in stock (sizes left: 8, 9, 10)",
+                },
+              ],
+              ms: 20,
+            },
+          ],
+          summary: "Everlane: 1 added, $75.00. Chelsea Boot - Black: 11 isn't in stock (sizes left: 8, 9, 10). 1 checkout link ready.",
+          total_usd: 75,
+        };
+      },
+    }),
+  });
+
+  assert.match(tools.add_to_bag.description, /straight away/i);
+  assert.match(tools.add_to_bag.description, /never hold back the whole bag/i);
+
+  await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute({ occasion: 'concert', budget_usd: 300 }, fakeToolOpts('b1'));
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+  calls.length = 0;
+
+  // Regression: "large in tops, size 11 shoes, bag it" (no bottom size yet, boots max 10).
+  const res = await tools.add_to_bag.execute(
+    { sizes: { top: 'large', shoes: '11' } },
+    fakeToolOpts('bag-now'),
+  );
+
+  // Must NOT hold back the whole bag! Sent only pieces with sizes (top + shoes), excluding unknown bottom.
+  assert.equal(baggedBatches.length, 1);
+  assert.deepEqual(baggedBatches[0]!.slots, ['top', 'shoes']);
+  assert.equal(res.startsWith('PARTLY DONE: NOT ADDED (2):'), true);
+  assert.match(res, /Chelsea Boot - Black at Steve Madden \(11 isn't in stock \(sizes left: 8, 9, 10\)\)/);
+  assert.match(res, /Relaxed Wool Trouser at Everlane \(no bottom size given \(sizes: 30, 32, 34\)\)/);
+  assert.match(res, /Added 1 piece, total \$75/);
+  assert.match(res, /Heavyweight Overshirt \(size large\)/);
+  assert.match(res, /offer a swap or another size/i);
+
+  const bagReady = calls.find((c) => c.action === 'bagReady');
+  assert.ok(bagReady, 'bagReady must be sent for the piece that could be bagged');
+  const payload = bagReady!.payload as PageActions['bagReady'];
+  assert.equal(payload.total, 75);
+  assert.deepEqual(payload.links, [{ store: 'Everlane', url: 'https://everlane.com/cart/boot' }]);
+});
+
+test('add_to_bag closes budget ceiling holes: concurrent calls, partial re-bag with changed size, swap price rise, and null cart total', async () => {
+  const { page, calls } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-cap-holes', log: () => {} });
+  let storeAddCalls = 0;
+  let releaseSlowCart!: () => void;
+  let slowMode = false;
+  let returnNullTotal = false;
+
+  const capOutfits: Outfit[] = [
+    {
+      number: 1,
+      name: 'Atelier One',
+      difference: 'Cashmere coat + designer boots.',
+      story: 'Statement.',
+      pieces: [
+        {
+          slot: 'top',
+          why: 'Cashmere.',
+          item: makeItem({ id: 'c1', variant_id: 'vc1', title: 'Cashmere Coat', price: 6_000, sizes: ['M', 'L'] }),
+        },
+        {
+          slot: 'shoes',
+          why: 'Boots.',
+          item: makeItem({ id: 'c2', variant_id: 'vc2', title: 'Atelier Boots', price: 2_000, sizes: ['9', '10'] }),
+        },
+      ],
+      total: 8_000,
+    },
+    {
+      number: 2,
+      name: 'Atelier Two',
+      difference: 'Silk evening look.',
+      story: 'Evening.',
+      pieces: [
+        {
+          slot: 'top',
+          why: 'Silk.',
+          item: makeItem({ id: 'c3', variant_id: 'vc3', title: 'Silk Tuxedo', price: 4_500, sizes: ['M', 'L'] }),
+        },
+      ],
+      total: 4_500,
+    },
+  ];
+
+  const tools = createAgentTools({
+    room: 'r-cap-holes',
+    log: () => {},
+    page,
+    state,
+    deps: makeFakeDeps({
+      async buildOutfits(_brief, opts) {
+        capOutfits.forEach((o, i) => opts?.onOutfit?.(structuredClone(o), i));
+        return {
+          outfits: structuredClone(capOutfits),
+          source: 'live',
+          timing: { first_outfit_ms: 10, total_ms: 10 },
+          problems: [],
+        };
+      },
+      async addToBag(bagOutfit, sizes): Promise<BagOut> {
+        storeAddCalls += 1;
+        if (slowMode) {
+          await new Promise<void>((resolve) => {
+            releaseSlowCart = resolve;
+          });
+        }
+        const addedPieces = bagOutfit.pieces.filter((p) => {
+          if (p.slot === 'shoes' && sizes.shoes === '11') return false;
+          return true;
+        });
+        const skippedPieces = bagOutfit.pieces.filter((p) => !addedPieces.includes(p));
+        const total = addedPieces.reduce((s, p) => s + p.item.price, 0);
+        return {
+          carts: [
+            {
+              store: 'Everlane',
+              store_domain: 'everlane.myshopify.com',
+              cart_id: `cart-hole-${storeAddCalls}`,
+              continue_url: `https://everlane.com/cart/hole-${storeAddCalls}`,
+              total_usd: returnNullTotal ? null : total,
+              added: addedPieces.map((p) => ({
+                variant_id: p.item.variant_id,
+                title: p.item.title,
+                size: sizes[p.slot.toLowerCase()] ?? 'M',
+              })),
+              not_added: skippedPieces.map((p) => ({
+                variant_id: p.item.variant_id,
+                title: p.item.title,
+                reason: "11 isn't in stock (sizes left: 9, 10)",
+              })),
+              ms: 10,
+            },
+          ],
+          summary: `Added ${addedPieces.length} items.`,
+          total_usd: returnNullTotal ? 0 : total,
+        };
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'women' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute({ occasion: 'gala', budget_usd: 10_000 }, fakeToolOpts('b1'));
+  calls.length = 0;
+
+  // Hole 1: Concurrent overlapping add_to_bag calls (Look 1 $6,000 top + Look 2 $4,500 = $10,500).
+  // Without in-flight reservations, both see otherLooksTotal = 0 and both create carts!
+  slowMode = true;
+  const p1 = tools.add_to_bag.execute(
+    { outfit: 1, sizes: { top: 'M' } },
+    fakeToolOpts('conc-1'),
+  );
+  await flushMicrotasks();
+  const p2Res = await tools.add_to_bag.execute(
+    { outfit: 2, sizes: { top: 'M' } },
+    fakeToolOpts('conc-2'),
+  );
+  assert.equal(p2Res.startsWith('NOT DONE:'), true);
+  assert.match(p2Res, /\$10500/);
+  assert.equal(storeAddCalls, 1, 'concurrent over-cap look must be blocked BEFORE creating a cart');
+  releaseSlowCart();
+  slowMode = false;
+  const p1Res = await p1;
+  assert.match(p1Res, /Added 1 piece, total \$6000/);
+
+  // Hole 2: Look 1 was partially bagged ($6,000 Coat, boots size 11 unavailable).
+  // Re-bagging Look 1 with changed size (shoes: '11' -> Coat $6,000, boots skipped) replaces Look 1 ($6,000).
+  // Now bag Look 2 ($4,500) -> $6,000 + $4,500 = $10,500 > $10,000 -> blocked BEFORE cart creation!
+  const look2Blocked = await tools.add_to_bag.execute(
+    { outfit: 2, sizes: { top: 'M' } },
+    fakeToolOpts('hole-l2'),
+  );
+  assert.equal(look2Blocked.startsWith('NOT DONE:'), true);
+  assert.equal(storeAddCalls, 1);
+
+  // Hole 3: Re-bagging Look 1 with changed size (L + boots 10 = $8,000) when Look 2 ($3,500) is also bagged:
+  // Fresh tools instance with Look 1 ($6,000 + $2,000) and Look 2 ($3,500).
+  const state2 = createCallStateStore({ roomName: 'r-cap-rebag', log: () => {} });
+  let rebagStoreCalls = 0;
+  const rebagOutfits = structuredClone(capOutfits);
+  rebagOutfits[1]!.pieces[0]!.item.price = 3_500;
+  rebagOutfits[1]!.total = 3_500;
+
+  const tools2 = createAgentTools({
+    room: 'r-cap-rebag',
+    log: () => {},
+    page,
+    state: state2,
+    deps: makeFakeDeps({
+      async buildOutfits(_brief, opts) {
+        rebagOutfits.forEach((o, i) => opts?.onOutfit?.(structuredClone(o), i));
+        return {
+          outfits: structuredClone(rebagOutfits),
+          source: 'live',
+          timing: { first_outfit_ms: 10, total_ms: 10 },
+          problems: [],
+        };
+      },
+      async addToBag(bagOutfit, sizes): Promise<BagOut> {
+        rebagStoreCalls += 1;
+        const addedPieces = bagOutfit.pieces.filter((p) => !(p.slot === 'shoes' && sizes.shoes === '11'));
+        const skippedPieces = bagOutfit.pieces.filter((p) => !addedPieces.includes(p));
+        const total = addedPieces.reduce((s, p) => s + p.item.price, 0);
+        return {
+          carts: [
+            {
+              store: 'Everlane',
+              store_domain: 'everlane.myshopify.com',
+              cart_id: `cart-rb-${rebagStoreCalls}`,
+              continue_url: `https://everlane.com/cart/rb-${rebagStoreCalls}`,
+              total_usd: total,
+              added: addedPieces.map((p) => ({
+                variant_id: p.item.variant_id,
+                title: p.item.title,
+                size: sizes[p.slot.toLowerCase()] ?? 'M',
+              })),
+              not_added: skippedPieces.map((p) => ({
+                variant_id: p.item.variant_id,
+                title: p.item.title,
+                reason: "11 isn't in stock (sizes left: 9, 10)",
+              })),
+              ms: 10,
+            },
+          ],
+          summary: `Added ${addedPieces.length} items.`,
+          total_usd: total,
+        };
+      },
+    }),
+  });
+
+  await tools2.set_department.execute({ department: 'women' }, fakeToolOpts('d2'));
+  await tools2.build_outfits.execute({ occasion: 'gala', budget_usd: 10_000 }, fakeToolOpts('b2'));
+
+  // Bag Look 1 partially ($6,000 coat, boots 11 unavailable) + Look 2 ($3,500) -> $9,500 running total.
+  const l1Part = await tools2.add_to_bag.execute(
+    { outfit: 1, sizes: { top: 'M', shoes: '11' } },
+    fakeToolOpts('rb-1'),
+  );
+  assert.match(l1Part, /Added 1 piece, total \$6000/);
+  const l2Ok = await tools2.add_to_bag.execute(
+    { outfit: 2, sizes: { top: 'M' } },
+    fakeToolOpts('rb-2'),
+  );
+  assert.match(l2Ok, /Added 1 piece, total \$3500/);
+  assert.equal(rebagStoreCalls, 2);
+
+  // Re-bagging Look 1 with changed shoe size '10' ($8,000) would bring running total to $3,500 + $8,000 = $11,500 > $10,000.
+  // Must be blocked BEFORE creating a new cart, and report true current bag total ($9,500)!
+  const l1RebagOver = await tools2.add_to_bag.execute(
+    { outfit: 1, sizes: { shoes: '10' } },
+    fakeToolOpts('rb-3'),
+  );
+  assert.equal(l1RebagOver.startsWith('NOT DONE:'), true);
+  assert.match(l1RebagOver, /\$11500/);
+  assert.match(l1RebagOver, /current bag total is \$9500/);
+  assert.equal(rebagStoreCalls, 2, 'over-cap re-bag must be rejected BEFORE creating a cart');
+
+  // Hole 4: Store returns total_usd: null/0 while added items total $6,000 -> ceiling still counts $6,000!
+  returnNullTotal = true;
+  const state3 = createCallStateStore({ roomName: 'r-cap-null', log: () => {} });
+  let nullStoreCalls = 0;
+  const tools3 = createAgentTools({
+    room: 'r-cap-null',
+    log: () => {},
+    page,
+    state: state3,
+    deps: makeFakeDeps({
+      async buildOutfits(_brief, opts) {
+        capOutfits.forEach((o, i) => opts?.onOutfit?.(structuredClone(o), i));
+        return {
+          outfits: structuredClone(capOutfits),
+          source: 'live',
+          timing: { first_outfit_ms: 10, total_ms: 10 },
+          problems: [],
+        };
+      },
+      async addToBag(bagOutfit, sizes): Promise<BagOut> {
+        nullStoreCalls += 1;
+        return {
+          carts: [
+            {
+              store: 'Everlane',
+              store_domain: 'everlane.myshopify.com',
+              cart_id: `cart-null-${nullStoreCalls}`,
+              continue_url: `https://everlane.com/cart/null-${nullStoreCalls}`,
+              total_usd: null,
+              added: bagOutfit.pieces.map((p) => ({
+                variant_id: p.item.variant_id,
+                title: p.item.title,
+                size: sizes[p.slot.toLowerCase()] ?? 'M',
+              })),
+              not_added: [],
+              ms: 10,
+            },
+          ],
+          summary: 'Added items (total pending).',
+          total_usd: 0,
+        };
+      },
+    }),
+  });
+
+  await tools3.set_department.execute({ department: 'women' }, fakeToolOpts('d3'));
+  await tools3.build_outfits.execute({ occasion: 'gala', budget_usd: 10_000 }, fakeToolOpts('b3'));
+  await tools3.add_to_bag.execute({ outfit: 1, sizes: { top: 'M' } }, fakeToolOpts('null-1'));
+  assert.equal(nullStoreCalls, 1);
+
+  const nullLook2 = await tools3.add_to_bag.execute(
+    { outfit: 2, sizes: { top: 'M' } },
+    fakeToolOpts('null-2'),
+  );
+  assert.equal(nullLook2.startsWith('NOT DONE:'), true);
+  assert.match(nullLook2, /\$10500/);
+  assert.equal(nullStoreCalls, 1, 'null cart total must fall back to added item prices so Look 2 is blocked before cart creation');
 });

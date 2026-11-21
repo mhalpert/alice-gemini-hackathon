@@ -13,6 +13,7 @@ import type {
   BagLink,
   BagOut,
   BagStore,
+  BoardBoxes,
   Brief,
   BuildResult,
   CartResult,
@@ -177,6 +178,49 @@ export function resolveTryOnExtras(mod: unknown = defaultTryOnModule): TryOnExtr
   return typeof candidate === 'function' ? candidate : undefined;
 }
 
+export interface OutfitBoardResultLike {
+  url: string;
+  boxes?: BoardBoxes;
+}
+
+export type OutfitBoardFn = (
+  outfit: Outfit,
+  label?: string,
+) => Promise<OutfitBoardResultLike | null>;
+
+export interface MediaModuleLike {
+  outfitBoard?: OutfitBoardFn;
+  outfitCollage?: (outfit: Outfit, label?: string) => Promise<string | null>;
+  productImages?: (item: Item) => Promise<string[]>;
+}
+
+/**
+ * Guarded dynamic lookup of the optional `outfitBoard` export on `src/media/index.ts`.
+ * Returns undefined when the media layer does not export it.
+ */
+export function resolveOutfitBoard(mod: unknown = defaultMediaModule): OutfitBoardFn | undefined {
+  if (!mod || typeof mod !== 'object') return undefined;
+  const candidate = (mod as MediaModuleLike).outfitBoard;
+  return typeof candidate === 'function' ? candidate : undefined;
+}
+
+export function sanitizeBoardBoxes(raw: unknown): BoardBoxes | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out: BoardBoxes = {};
+  let count = 0;
+  for (const [slot, val] of Object.entries(raw as Record<string, unknown>)) {
+    if (
+      Array.isArray(val) &&
+      val.length === 4 &&
+      val.every((n) => typeof n === 'number' && Number.isFinite(n))
+    ) {
+      out[slot] = [val[0], val[1], val[2], val[3]];
+      count += 1;
+    }
+  }
+  return count > 0 ? out : undefined;
+}
+
 export interface ToolDeps {
   buildOutfits?: (brief: Brief, opts?: BuildOptions) => Promise<BuildResult>;
   swapPiece?: (
@@ -186,6 +230,7 @@ export interface ToolDeps {
     brief: Brief,
     opts?: SwapOptions,
   ) => Promise<SwapResult>;
+  outfitBoard?: OutfitBoardFn | null;
   outfitCollage?: (outfit: Outfit, label?: string) => Promise<string | null>;
   productImages?: (item: Item) => Promise<string[]>;
   tryOn?: (
@@ -801,6 +846,75 @@ function formatCritiqueSwapNote(critique: LookCritique | undefined): string | nu
   return 'Stylist note: something in this look is dragging it down; call it out honestly and offer once in your own words to swap the weakest piece.';
 }
 
+interface SkippedMissingLine {
+  store: string;
+  line: BagLine;
+}
+
+function pieceNeedsSizeAndMissing(piece: Piece, resolvedSizes: Record<string, string>): boolean {
+  const sizesList = Array.isArray(piece.item.sizes) ? piece.item.sizes : [];
+  if (sizesList.length <= 1) return false;
+  const slotLower = piece.slot.trim().toLowerCase();
+  const slotNorm = normalizeSlotKey(piece.slot);
+  if (resolvedSizes[slotLower]) return false;
+  if ((slotNorm === 'top' || slotNorm === 'bottom' || slotNorm === 'shoes') && resolvedSizes[slotNorm]) {
+    return false;
+  }
+  return true;
+}
+
+function missingSizeReasonForPiece(piece: Piece): string {
+  const sizesList = Array.isArray(piece.item.sizes)
+    ? piece.item.sizes.map((s) => s.trim()).filter(Boolean)
+    : [];
+  const preview = sizesList.length > 0 ? ` (sizes: ${sizesList.slice(0, 12).join(', ')})` : '';
+  const slotNorm = normalizeSlotKey(piece.slot);
+  if (isBeltPiece(piece)) {
+    return 'needs bottom size to match belt';
+  }
+  if (slotNorm === 'layer' || slotNorm === 'dress') {
+    return `no top size given${preview}`;
+  }
+  return `no ${slotNorm} size given${preview}`;
+}
+
+function appendMissingLinesToPayload(
+  bagPayload: PageActions['bagReady'],
+  extras: readonly SkippedMissingLine[],
+): PageActions['bagReady'] {
+  if (extras.length === 0) return bagPayload;
+  const stores = bagPayload.stores.map((s) => ({
+    ...s,
+    added: [...s.added],
+    not_added: [...s.not_added],
+  }));
+  for (const entry of extras) {
+    let storeBucket = stores.find((s) => s.store === entry.store);
+    if (!storeBucket) {
+      storeBucket = {
+        store: entry.store,
+        added: [],
+        not_added: [],
+        subtotal: null,
+      };
+      stores.push(storeBucket);
+    }
+    const alreadyPresent = storeBucket.not_added.some(
+      (existing) =>
+        existing.title === entry.line.title &&
+        existing.slot === entry.line.slot &&
+        existing.reason === entry.line.reason,
+    );
+    if (!alreadyPresent) {
+      storeBucket.not_added.push(entry.line);
+    }
+  }
+  return {
+    ...bagPayload,
+    stores,
+  };
+}
+
 interface ActiveBuild {
   gen: number;
   department: Gender;
@@ -849,6 +963,12 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
   const buildOutfitsFn = options.deps?.buildOutfits ?? defaultBuildOutfits;
   const swapPieceFn = options.deps?.swapPiece ?? defaultSwapPiece;
+  const outfitBoardFn: OutfitBoardFn | undefined =
+    options.deps && 'outfitBoard' in options.deps
+      ? (options.deps.outfitBoard ?? undefined)
+      : options.deps?.outfitCollage
+        ? undefined
+        : resolveOutfitBoard(defaultMediaModule);
   const outfitCollageFn =
     options.deps?.outfitCollage ??
     (typeof defaultMediaModule.outfitCollage === 'function'
@@ -899,6 +1019,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
   const extraRevealTimers = new Set<TimerLike>();
   const baggedResults = new Map<string, string>();
   const baggedLookTotals = new Map<string, number>();
+  const pendingBagReservations = new Map<symbol, { key: string; amount: number }>();
   let buildGen = 0;
   let activeBuild: ActiveBuild | null = null;
   let lastBriefNotes: string | undefined;
@@ -1235,18 +1356,52 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
   function startCollageForLook(outfit: Outfit, version: number): void {
     const lookNumber = outfit.number ?? 1;
+    const label = `look-${lookNumber}`;
     const started = nowFn();
 
     void (async () => {
       try {
-        const url = await outfitCollageFn(outfit, `look-${lookNumber}`);
+        let cleanUrl: string | null = null;
+        let boxes: BoardBoxes | undefined;
+
+        if (outfitBoardFn) {
+          try {
+            const board = await outfitBoardFn(outfit, label);
+            if (!isCurrentMediaVersion(lookNumber, version)) return;
+            if (board && typeof board === 'object') {
+              const candidateUrl = sanitizePageMediaUrl(board.url);
+              if (candidateUrl) {
+                cleanUrl = candidateUrl;
+                boxes = sanitizeBoardBoxes(board.boxes);
+              }
+            }
+          } catch {
+            if (!isCurrentMediaVersion(lookNumber, version)) return;
+          }
+        }
+
+        if (!cleanUrl) {
+          const url = await outfitCollageFn(outfit, label);
+          if (!isCurrentMediaVersion(lookNumber, version)) return;
+          cleanUrl = sanitizePageMediaUrl(url);
+          boxes = undefined;
+        }
+
         const ms = Math.max(0, Math.round(nowFn() - started));
         if (!isCurrentMediaVersion(lookNumber, version)) return;
 
-        const cleanUrl = sanitizePageMediaUrl(url);
         if (cleanUrl) {
-          await page.send('collageReady', { outfit: lookNumber, url: cleanUrl });
-          logFn(options.room, 'collage', { outfit: lookNumber, ms, ok: true });
+          await page.send('collageReady', {
+            outfit: lookNumber,
+            url: cleanUrl,
+            ...(boxes ? { boxes } : {}),
+          });
+          logFn(options.room, 'collage', {
+            outfit: lookNumber,
+            ms,
+            ok: true,
+            ...(boxes ? { boxes: Object.keys(boxes).length } : {}),
+          });
         } else {
           logFn(options.room, 'collage', { outfit: lookNumber, ms, ok: false });
         }
@@ -2114,8 +2269,8 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
     add_to_bag: llm.tool({
       description: orderController.purchaseReady
-        ? 'Add a look (defaults to the picked look) to the shopping bag using a map of piece slot to the exact size the shopper gave.'
-        : 'Add a look (defaults to the picked look) to the shopping bag using a map of piece slot to the exact size the shopper gave. Carts only, never checkout or payment.',
+        ? 'Add a look (defaults to the picked look) to the shopping bag straight away as soon as the shopper gives sizes and asks to bag, passing every known size. Never hold back the whole bag over one unavailable or missing size—baggable pieces go in and unavailable or unknown-size pieces are reported as not added.'
+        : 'Add a look (defaults to the picked look) to the shopping bag straight away as soon as the shopper gives sizes and asks to bag, passing every known size. Never hold back the whole bag over one unavailable or missing size—baggable pieces go in and unavailable or unknown-size pieces are reported as not added. Carts only, never checkout or payment.',
       parameters: z.object({
         outfit: outfitNumberSchema.optional(),
         sizes: z
@@ -2188,7 +2343,28 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         let inferredJacket = resolution.inferredJacket;
         let inferredBelt = resolution.inferredBelt;
 
-        if (missingSlots.length > 0) {
+        const baggablePieces: Piece[] = [];
+        const preSkippedMissing: SkippedMissingLine[] = [];
+        for (const piece of outfit.pieces) {
+          if (pieceNeedsSizeAndMissing(piece, resolvedSizes)) {
+            preSkippedMissing.push({
+              store: piece.item.store,
+              line: {
+                title: piece.item.title,
+                slot: piece.slot,
+                image: piece.item.image,
+                price: Number.isFinite(piece.item.price) ? piece.item.price : 0,
+                size: null,
+                reason: missingSizeReasonForPiece(piece),
+              },
+            });
+          } else {
+            baggablePieces.push(piece);
+          }
+        }
+
+        const hasAnyShopperSize = Object.keys(rememberedSizes).length > 0;
+        if (missingSlots.length > 0 && (baggablePieces.length === 0 || !hasAnyShopperSize)) {
           return `NOT DONE: Still need sizes for: ${missingSlots.join(', ')}. Ask for just those in one question, then call add_to_bag again.`;
         }
 
@@ -2211,33 +2387,81 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         }
 
         const bagLookKey = `${buildGen}:${lookNum}`;
-        let otherLooksTotal = 0;
-        for (const [key, amount] of baggedLookTotals.entries()) {
-          if (key !== bagLookKey) {
-            otherLooksTotal = roundMoney(otherLooksTotal + amount);
-          }
-        }
 
-        const formatBagCeilingNotDone = (lookAmount: number, projectedTotal: number): string => {
-          if (otherLooksTotal > 0) {
-            return `NOT DONE: Adding Look ${lookNum} (${formatPrice(lookAmount)}) would bring the bag total across this call to ${formatPrice(projectedTotal)}, which exceeds the ${formatPrice(MAX_BUDGET_USD)} cap (current bag total is ${formatPrice(otherLooksTotal)}). Tell the shopper plainly with a raised eyebrow that bags are capped at $10,000 and offer to swap pieces to stay under the cap.`;
+        const computeBagTotals = (excludeKey: string): {
+          otherLooksTotal: number;
+          currentTotal: number;
+        } => {
+          const maxByKey = new Map<string, number>();
+          for (const [key, amount] of baggedLookTotals.entries()) {
+            if (Number.isFinite(amount) && amount > 0) {
+              maxByKey.set(key, amount);
+            }
+          }
+          for (const entry of pendingBagReservations.values()) {
+            if (Number.isFinite(entry.amount) && entry.amount > 0) {
+              const prev = maxByKey.get(entry.key) ?? 0;
+              if (entry.amount > prev) {
+                maxByKey.set(entry.key, entry.amount);
+              }
+            }
+          }
+          let otherLooksTotal = 0;
+          let currentTotal = 0;
+          for (const [key, amount] of maxByKey.entries()) {
+            currentTotal = roundMoney(currentTotal + amount);
+            if (key !== excludeKey) {
+              otherLooksTotal = roundMoney(otherLooksTotal + amount);
+            }
+          }
+          return { otherLooksTotal, currentTotal };
+        };
+
+        const formatBagCeilingNotDone = (
+          lookAmount: number,
+          projectedTotal: number,
+          otherTotal: number,
+          currentTotal: number,
+        ): string => {
+          if (otherTotal > 0) {
+            const shownCurrent = currentTotal > 0 ? currentTotal : otherTotal;
+            return `NOT DONE: Adding Look ${lookNum} (${formatPrice(lookAmount)}) would bring the bag total across this call to ${formatPrice(projectedTotal)}, which exceeds the ${formatPrice(MAX_BUDGET_USD)} cap (current bag total is ${formatPrice(shownCurrent)}). Tell the shopper plainly with a raised eyebrow that bags are capped at $10,000 and offer to swap pieces to stay under the cap.`;
           }
           return `NOT DONE: Look ${lookNum} (${formatPrice(lookAmount)}) exceeds the ${formatPrice(MAX_BUDGET_USD)} bag cap. Tell the shopper plainly with a raised eyebrow that bags are capped at $10,000 and offer to swap pieces for a lower total.`;
         };
 
+        const isFullOutfit = baggablePieces.length === outfit.pieces.length;
         const estimatedPiecesTotal = roundMoney(
-          outfit.pieces.reduce(
-            (sum, p) => sum + (Number.isFinite(p.item.price) ? p.item.price : 0),
+          baggablePieces.reduce(
+            (sum, p) => sum + (Number.isFinite(p.item.price) && p.item.price > 0 ? p.item.price : 0),
             0,
           ),
         );
-        const estimatedLookTotal =
-          estimatedPiecesTotal > 0 ? estimatedPiecesTotal : roundMoney(outfit.total || 0);
-        const estimatedRunningTotal = roundMoney(otherLooksTotal + estimatedLookTotal);
+        const rawOutfitTotal =
+          Number.isFinite(outfit.total) && outfit.total > 0 ? roundMoney(outfit.total) : 0;
+        const estimatedLookTotal = isFullOutfit
+          ? Math.max(estimatedPiecesTotal, rawOutfitTotal)
+          : estimatedPiecesTotal;
+        const preTotals = computeBagTotals(bagLookKey);
+        const estimatedRunningTotal = roundMoney(preTotals.otherLooksTotal + estimatedLookTotal);
         if (estimatedRunningTotal > MAX_BUDGET_USD) {
-          return formatBagCeilingNotDone(estimatedLookTotal, estimatedRunningTotal);
+          return formatBagCeilingNotDone(
+            estimatedLookTotal,
+            estimatedRunningTotal,
+            preTotals.otherLooksTotal,
+            preTotals.currentTotal,
+          );
         }
 
+        let activeOutfit: Outfit = isFullOutfit
+          ? outfit
+          : { ...outfit, pieces: baggablePieces, total: estimatedPiecesTotal };
+
+        const reservationId = Symbol(`bag:${bagLookKey}`);
+        pendingBagReservations.set(reservationId, {
+          key: bagLookKey,
+          amount: estimatedLookTotal,
+        });
         const finishSlowWork = beginSlowWork('add_to_bag', toolCallId);
         try {
           let addToBagFn = options.deps?.addToBag;
@@ -2254,66 +2478,120 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
         let bagOut: BagOut;
         if (addToBagFn) {
-          bagOut = await addToBagFn(outfit, resolvedSizes, gender);
+          bagOut = await addToBagFn(activeOutfit, resolvedSizes, gender);
         } else if (storeImportFailed) {
           usedMock = true;
-          bagOut = mockAddToBag(outfit, resolvedSizes, gender);
+          bagOut = mockAddToBag(activeOutfit, resolvedSizes, gender);
         } else {
           return 'NOT DONE: Store shopping bag is not available right now. Do not claim the bag is ready.';
         }
 
-        let bagPayload = bagOutToPagePayload(bagOut, outfit, resolvedSizes);
+        let bagPayload = bagOutToPagePayload(bagOut, activeOutfit, resolvedSizes);
         let rawSummary = typeof bagOut.summary === 'string' ? bagOut.summary.trim() : '';
         let isNotDoneSummary = /^NOT DONE:/i.test(rawSummary);
+        const extraSkippedMissing: SkippedMissingLine[] = [...preSkippedMissing];
 
-        // If store returned NOT DONE solely for non-core items whose Item.sizes was empty
+        // If store returned NOT DONE for non-core items whose Item.sizes was empty
         // (e.g. multi-size belt/accessory discovered at Shopify lookup), infer from the store's
-        // size preview and retry once so we never ask the shopper for jacket/belt/accessory sizes.
+        // size preview so we never ask the shopper for jacket/belt/accessory sizes.
         if (!usedMock && addToBagFn && isNotDoneSummary) {
           const storeMissingLines = bagPayload.stores.flatMap((store) =>
-            store.not_added.filter((line) => /no .+ size given/i.test(line.reason ?? '')),
+            store.not_added
+              .filter((line) => /no .+ size given/i.test(line.reason ?? ''))
+              .map((line) => ({ store: store.store, line })),
           );
-          const hasCoreMissing = storeMissingLines.some((line) => isCoreSlot(line.slot));
-          if (storeMissingLines.length > 0 && !hasCoreMissing) {
-            let inferredAny = false;
-            for (const line of storeMissingLines) {
-              const slotLower = line.slot.trim().toLowerCase();
-              const slotNorm = normalizeSlotKey(line.slot);
-              const piece = outfit.pieces.find(
+          const nonCoreMissing = storeMissingLines.filter((entry) => !isCoreSlot(entry.line.slot));
+          const hasCoreMissing = storeMissingLines.some((entry) => isCoreSlot(entry.line.slot));
+          let inferredAny = false;
+          for (const { line } of nonCoreMissing) {
+            const slotLower = line.slot.trim().toLowerCase();
+            const slotNorm = normalizeSlotKey(line.slot);
+            const piece =
+              activeOutfit.pieces.find(
                 (p) => p.slot.trim().toLowerCase() === slotLower && p.item.title === line.title,
-              ) ?? outfit.pieces.find((p) => p.slot.trim().toLowerCase() === slotLower);
-              const previewSizes = parseSizesFromStoreReason(line.reason ?? '');
+              ) ?? activeOutfit.pieces.find((p) => p.slot.trim().toLowerCase() === slotLower);
+            const previewSizes = parseSizesFromStoreReason(line.reason ?? '');
 
-              let chosen: string | null = null;
-              if (slotNorm === 'layer' && rememberedSizes.top) {
-                chosen = rememberedSizes.top;
-                inferredJacket = true;
-              } else if (piece && isBeltPiece(piece)) {
-                const ref = rememberedSizes.bottom ?? rememberedSizes.dress ?? rememberedSizes.top;
-                chosen = ref
-                  ? inferBeltSize(ref, previewSizes, gender)
-                  : inferAccessoryDefaultSize(previewSizes);
-                if (chosen) inferredBelt = true;
-              } else {
-                chosen = inferAccessoryDefaultSize(previewSizes);
-              }
+            let chosen: string | null = null;
+            if (slotNorm === 'layer' && rememberedSizes.top) {
+              chosen = rememberedSizes.top;
+              inferredJacket = true;
+            } else if (piece && isBeltPiece(piece)) {
+              const ref = rememberedSizes.bottom ?? rememberedSizes.dress ?? rememberedSizes.top;
+              chosen = ref
+                ? inferBeltSize(ref, previewSizes, gender)
+                : inferAccessoryDefaultSize(previewSizes);
+              if (chosen) inferredBelt = true;
+            } else {
+              chosen = inferAccessoryDefaultSize(previewSizes);
+            }
 
-              if (chosen) {
-                resolvedSizes[slotLower] = chosen;
-                const key = piece && isBeltPiece(piece) && slotLower === 'accessory' ? 'belt' : slotLower;
-                inferred[key] = chosen;
-                inferredAny = true;
+            if (chosen) {
+              resolvedSizes[slotLower] = chosen;
+              const key = piece && isBeltPiece(piece) && slotLower === 'accessory' ? 'belt' : slotLower;
+              inferred[key] = chosen;
+              inferredAny = true;
+            }
+          }
+
+          if (inferredAny && !hasCoreMissing) {
+            bagOut = await addToBagFn(activeOutfit, resolvedSizes, gender);
+            bagPayload = bagOutToPagePayload(bagOut, activeOutfit, resolvedSizes);
+            rawSummary = typeof bagOut.summary === 'string' ? bagOut.summary.trim() : '';
+            isNotDoneSummary = /^NOT DONE:/i.test(rawSummary);
+          }
+        }
+
+        // If store still returned NOT DONE because one or more pieces lacked a size (store
+        // refuses the whole cart whenever any piece is missing a size), bag the pieces that
+        // DO have a size and report the missing-size pieces as not added with their reason.
+        if (!usedMock && addToBagFn && isNotDoneSummary) {
+          const storeMissingEntries = bagPayload.stores.flatMap((store) =>
+            store.not_added
+              .filter((line) => /no .+ size given/i.test(line.reason ?? ''))
+              .map((line) => ({ store: store.store, line })),
+          );
+          if (storeMissingEntries.length > 0) {
+            const missingPiecesSet = new Set<Piece>();
+            for (const { line } of storeMissingEntries) {
+              const slotLower = line.slot.trim().toLowerCase();
+              const matched =
+                activeOutfit.pieces.find(
+                  (p) =>
+                    !missingPiecesSet.has(p) &&
+                    p.slot.trim().toLowerCase() === slotLower &&
+                    p.item.title.trim().toLowerCase() === line.title.trim().toLowerCase(),
+                ) ??
+                activeOutfit.pieces.find(
+                  (p) => !missingPiecesSet.has(p) && p.slot.trim().toLowerCase() === slotLower,
+                );
+              if (matched) {
+                missingPiecesSet.add(matched);
               }
             }
 
-            if (inferredAny) {
-              bagOut = await addToBagFn(outfit, resolvedSizes, gender);
-              bagPayload = bagOutToPagePayload(bagOut, outfit, resolvedSizes);
+            const retryPieces = activeOutfit.pieces.filter((p) => !missingPiecesSet.has(p));
+            if (retryPieces.length > 0 && retryPieces.length < activeOutfit.pieces.length) {
+              for (const entry of storeMissingEntries) {
+                extraSkippedMissing.push(entry);
+              }
+              const retryTotal = roundMoney(
+                retryPieces.reduce(
+                  (sum, p) =>
+                    sum + (Number.isFinite(p.item.price) && p.item.price > 0 ? p.item.price : 0),
+                  0,
+                ),
+              );
+              activeOutfit = { ...activeOutfit, pieces: retryPieces, total: retryTotal };
+              bagOut = await addToBagFn(activeOutfit, resolvedSizes, gender);
+              bagPayload = bagOutToPagePayload(bagOut, activeOutfit, resolvedSizes);
               rawSummary = typeof bagOut.summary === 'string' ? bagOut.summary.trim() : '';
               isNotDoneSummary = /^NOT DONE:/i.test(rawSummary);
             }
           }
         }
+
+        bagPayload = appendMissingLinesToPayload(bagPayload, extraSkippedMissing);
 
         const notAdded: BagNotAdded[] = [];
         for (const store of bagPayload.stores) {
@@ -2376,12 +2654,33 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           return `NOT DONE: Added 0 pieces, total $0. No store cart could be created.${reason} No checkout links are on the page. Offer a swap or another size in your punchy New York voice; never say any piece is in the bag, never say the bag is processing, and never pitch a different look.`;
         }
 
-        const actualRunningTotal = roundMoney(otherLooksTotal + bagPayload.total);
+        const addedItemsTotal = roundMoney(
+          bagPayload.stores.reduce(
+            (sum, store) =>
+              sum +
+              store.added.reduce(
+                (s, line) => s + (Number.isFinite(line.price) && line.price > 0 ? line.price : 0),
+                0,
+              ),
+            0,
+          ),
+        );
+        const effectiveBagTotal =
+          Number.isFinite(bagPayload.total) && bagPayload.total > 0
+            ? roundMoney(bagPayload.total)
+            : addedItemsTotal;
+        const postTotals = computeBagTotals(bagLookKey);
+        const actualRunningTotal = roundMoney(postTotals.otherLooksTotal + effectiveBagTotal);
         if (actualRunningTotal > MAX_BUDGET_USD) {
-          return formatBagCeilingNotDone(bagPayload.total, actualRunningTotal);
+          return formatBagCeilingNotDone(
+            effectiveBagTotal,
+            actualRunningTotal,
+            postTotals.otherLooksTotal,
+            postTotals.currentTotal,
+          );
         }
 
-        baggedLookTotals.set(bagLookKey, bagPayload.total);
+        baggedLookTotals.set(bagLookKey, effectiveBagTotal);
 
         const reply = await page.send('bagReady', bagPayload);
 
@@ -2472,7 +2771,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
         if (skippedSummaries.length > 0) {
           lines.push(
-            'Say exactly which pieces are not in the bag with their reasons and offer a swap or another size; keep it real and fast—never say a not-added piece is in the bag, never say the bag is processing, and never pitch a different look.',
+            'Tell them plainly what is in the bag and the total, say exactly which pieces are not in the bag with their reasons, and offer a swap or another size for each missing piece; keep it real and fast—never say a not-added piece is in the bag, never say the bag is processing, and never pitch a different look.',
           );
         } else {
           lines.push(
@@ -2484,6 +2783,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         baggedResults.set(dedupeKey, resultText);
         return resultText;
         } finally {
+          pendingBagReservations.delete(reservationId);
           finishSlowWork();
         }
       }),
