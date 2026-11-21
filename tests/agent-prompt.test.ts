@@ -240,6 +240,18 @@ test('ALICE_SYSTEM_PROMPT encodes polish6 voice: NY stylist attitude, slang limi
   assert.match(ALICE_SYSTEM_PROMPT, /never hold back the whole bag/i);
 });
 
+test('ALICE_SYSTEM_PROMPT enforces add_to_bag stop-before-result and immediate re-bag on missing size', () => {
+  assert.match(ALICE_SYSTEM_PROMPT, /STOP and say nothing else until the tool result arrives/);
+  assert.match(ALICE_SYSTEM_PROMPT, /never state what is in the bag/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never state a total/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never read out anything that looks like a tool call or tool output before the result/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /what is in the bag and the total come only from the result text/i);
+  assert.match(
+    ALICE_SYSTEM_PROMPT,
+    /when the shopper gives a missing size after PARTLY DONE or NOT DONE, call add_to_bag again immediately with all known sizes, no question first/i,
+  );
+});
+
 test('ALICE_SYSTEM_PROMPT encodes opening rack flow: one-sentence read, show_rack, no new arrivals claim, and occasion vs item fork', () => {
   assert.match(ALICE_SYSTEM_PROMPT, /one sentence.*what they are wearing/i);
   assert.match(ALICE_SYSTEM_PROMPT, /in the same turn call show_rack/i);
