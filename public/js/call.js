@@ -4,12 +4,21 @@
 //
 // Body classes this file sets:  call-idle | call-connecting | call-live,
 //   no-face (no video of Alice yet, show the orb), face-hidden (shopper hid her face),
-//   controls-open (phone controls row expanded).
+//   camera-off (shopper's camera is off), controls-open (phone controls row expanded),
+//   alice-joining | alice-listening | alice-thinking | alice-speaking (agent state),
+//   call-reconnecting (connection interrupted), mic-muted (shopper's mic is muted),
+//   typing-open (text reply row open).
 // Body classes it reads (set by store.js):  has-products, panel-open.
 
 import { Room, RoomEvent, Track } from '../vendor/livekit-client.esm.mjs';
 
 const CAPTION_LINGER_MS = 6000;
+const ALICE_STATE_LABELS = {
+  joining: 'Alice is joining…',
+  listening: 'Listening',
+  thinking: 'Thinking…',
+  speaking: '',
+};
 
 export function mountCall(root, { handlers = {} } = {}) {
   root.innerHTML = `
@@ -29,14 +38,22 @@ export function mountCall(root, { handlers = {} } = {}) {
         <video class="alice__video" autoplay playsinline></video>
         <div class="alice__orb" aria-hidden="true"><span></span></div>
         <p class="alice__badge"><span class="alice__dot"></span>Alice <em>live stylist</em></p>
+        <span class="alice__state" role="status" aria-live="polite"></span>
         <video class="selfview" autoplay playsinline muted aria-label="Your camera"></video>
+        <span class="selfview__muted" aria-hidden="true">Muted<span class="selfview__muted-hint"> · press M</span></span>
       </div>
       <div class="captions" aria-live="polite"></div>
+      <form class="typebox" aria-label="Type to Alice">
+        <input class="typebox__input" type="text" placeholder="Type to Alice…" maxlength="300" autocomplete="off" aria-label="Type to Alice">
+        <button class="typebox__send" type="submit">Send</button>
+      </form>
+      <button type="button" class="mute-quick" aria-label="Mute" aria-pressed="false"><span class="mute-quick__mic" aria-hidden="true"></span></button>
       <button type="button" class="controls-toggle" aria-label="Call controls" aria-expanded="false"><span aria-hidden="true"></span></button>
       <div class="controls" role="toolbar" aria-label="Call controls">
         <button type="button" data-act="mute" aria-pressed="false">Mute</button>
         <button type="button" data-act="video" aria-pressed="false">Stop video</button>
         <button type="button" data-act="face" aria-pressed="false">Hide face</button>
+        <button type="button" data-act="type" aria-expanded="false">Type instead</button>
         <button type="button" data-act="end" class="controls__end">End</button>
       </div>
       <audio class="alice__audio" autoplay></audio>
@@ -47,12 +64,19 @@ export function mountCall(root, { handlers = {} } = {}) {
     start: $('.call-start'), stage: $('.call-stage'), talk: $('.call-start__talk'),
     passcode: $('.call-start__passcode'), status: $('.call-start__status'),
     aliceVideo: $('.alice__video'), aliceAudio: $('.alice__audio'), orb: $('.alice__orb'),
-    selfview: $('.selfview'), captions: $('.captions'), controls: $('.controls'),
-    controlsToggle: $('.controls-toggle'),
+    aliceState: $('.alice__state'), selfview: $('.selfview'), captions: $('.captions'),
+    controls: $('.controls'), controlsToggle: $('.controls-toggle'),
+    muteBtn: $('[data-act="mute"]'), muteQuick: $('.mute-quick'),
+    typeBtn: $('[data-act="type"]'), typebox: $('.typebox'),
+    typeInput: $('.typebox__input'), typeSend: $('.typebox__send'),
   };
 
   let room = null;
   let orbStop = null;
+  let aliceState = null;
+  let muteBusy = false;
+  let sendingText = false;
+  let unsentTimer = 0;
   const body = document.body;
 
   function setState(state) {
@@ -62,6 +86,29 @@ export function mountCall(root, { handlers = {} } = {}) {
     el.stage.hidden = state !== 'live';
     el.talk.disabled = state === 'connecting';
     el.talk.textContent = state === 'connecting' ? 'Connecting…' : 'Talk to Alice';
+  }
+
+  // Reflect what Alice is doing; reconnecting text overrides the agent state until restored.
+  function setAliceState(state) {
+    const next = state === 'listening' || state === 'thinking' || state === 'speaking' ? state : 'joining';
+    aliceState = next;
+    body.classList.remove('alice-joining', 'alice-listening', 'alice-thinking', 'alice-speaking');
+    body.classList.add(`alice-${next}`);
+    if (!body.classList.contains('call-reconnecting')) {
+      el.aliceState.textContent = ALICE_STATE_LABELS[next];
+    }
+  }
+
+  function setReconnecting(reconnecting) {
+    body.classList.toggle('call-reconnecting', reconnecting);
+    el.aliceState.textContent = reconnecting
+      ? 'Reconnecting…'
+      : (aliceState ? ALICE_STATE_LABELS[aliceState] : '');
+  }
+
+  function syncAgentState(participant) {
+    if (!participant?.isAgent) return;
+    setAliceState(participant.attributes?.['lk.agent.state']);
   }
 
   // ---- captions -----------------------------------------------------------
@@ -185,14 +232,86 @@ export function mountCall(root, { handlers = {} } = {}) {
     button.textContent = pressed ? labelOn : labelOff;
   }
 
+  function setMutedUi(muted) {
+    body.classList.toggle('mic-muted', muted);
+    press(el.muteBtn, muted, 'Unmute', 'Mute');
+    el.muteQuick.setAttribute('aria-pressed', String(muted));
+    el.muteQuick.setAttribute('aria-label', muted ? 'Unmute' : 'Mute');
+  }
+
+  async function toggleMute() {
+    if (!room || muteBusy) return;
+    const activeRoom = room;
+    const nextMuted = !body.classList.contains('mic-muted');
+    muteBusy = true;
+    try {
+      await activeRoom.localParticipant.setMicrophoneEnabled(!nextMuted);
+      if (room === activeRoom) setMutedUi(nextMuted);
+    } catch (err) {
+      console.warn('[call] mute failed', err);
+    } finally {
+      muteBusy = false;
+    }
+  }
+
+  function isEditableTarget(target) {
+    if (!(target instanceof Element)) return false;
+    return target.isContentEditable || Boolean(target.closest('input, textarea, select'));
+  }
+
   // Toggle the collapsed call controls on phones; tapping outside or pressing Escape closes them.
   function setControlsOpen(open) {
     body.classList.toggle('controls-open', open);
     el.controlsToggle.setAttribute('aria-expanded', String(open));
   }
 
+  function setTypingOpen(open, { returnFocus = false } = {}) {
+    body.classList.toggle('typing-open', open);
+    el.typeBtn.setAttribute('aria-expanded', String(open));
+    if (open) {
+      if (body.classList.contains('controls-open')) setControlsOpen(false);
+      el.typeInput.focus();
+    } else if (returnFocus) {
+      if (el.typeBtn.offsetParent) el.typeBtn.focus();
+      else if (el.controlsToggle.offsetParent) el.controlsToggle.focus();
+    }
+  }
+
+  async function sendTypedText() {
+    if (!room || sendingText) return;
+    const text = el.typeInput.value.trim();
+    if (!text) return;
+    const activeRoom = room;
+    sendingText = true;
+    el.typeSend.disabled = true;
+    try {
+      await activeRoom.localParticipant.sendText(text, { topic: 'lk.chat' });
+      if (room !== activeRoom) return;
+      showCaption('you', text);
+      el.typeInput.value = '';
+      el.typeInput.focus();
+    } catch (err) {
+      console.warn('[call] sendText failed', err);
+      el.typebox.classList.remove('is-unsent');
+      void el.typebox.offsetWidth;
+      el.typebox.classList.add('is-unsent');
+      clearTimeout(unsentTimer);
+      unsentTimer = setTimeout(() => el.typebox.classList.remove('is-unsent'), 600);
+    } finally {
+      sendingText = false;
+      el.typeSend.disabled = false;
+    }
+  }
+
   el.controlsToggle.addEventListener('click', () => {
     setControlsOpen(!body.classList.contains('controls-open'));
+  });
+
+  el.muteQuick.addEventListener('click', toggleMute);
+
+  el.typebox.addEventListener('submit', (event) => {
+    event.preventDefault();
+    sendTypedText();
   });
 
   document.addEventListener('pointerdown', (event) => {
@@ -202,17 +321,38 @@ export function mountCall(root, { handlers = {} } = {}) {
   }, true);
 
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && body.classList.contains('controls-open')) setControlsOpen(false);
+    if (event.key === 'Escape') {
+      if (body.classList.contains('typing-open')) {
+        setTypingOpen(false, { returnFocus: true });
+        return;
+      }
+      if (body.classList.contains('controls-open')) setControlsOpen(false);
+      return;
+    }
+    if (
+      (event.key === 'm' || event.key === 'M') &&
+      !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey &&
+      !event.repeat &&
+      room &&
+      body.classList.contains('call-live') &&
+      !isEditableTarget(event.target)
+    ) {
+      toggleMute();
+    }
   });
 
   el.controls.addEventListener('click', async (event) => {
     const button = event.target.closest('button[data-act]');
-    if (!button || !room) return;
+    if (!button) return;
+    if (button.dataset.act === 'type') {
+      setTypingOpen(!body.classList.contains('typing-open'), { returnFocus: true });
+      return;
+    }
+    if (!room) return;
     const pressed = button.getAttribute('aria-pressed') === 'true';
     try {
       if (button.dataset.act === 'mute') {
-        await room.localParticipant.setMicrophoneEnabled(pressed);
-        press(button, !pressed, 'Unmute', 'Mute');
+        await toggleMute();
       } else if (button.dataset.act === 'video') {
         const on = await setCamera(pressed);
         press(button, !on, 'Start video', 'Stop video');
@@ -281,15 +421,62 @@ export function mountCall(root, { handlers = {} } = {}) {
       }
       if (!grant.token || !grant.url) throw new Error('the token reply had no token or url');
 
-      room = new Room({ adaptiveStream: true, dynacast: true });
+      const currentRoom = new Room({
+        adaptiveStream: true,
+        dynacast: true,
+        audioCaptureDefaults: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          voiceIsolation: true,
+        },
+      });
+      room = currentRoom;
       registerPageActions({ ...handlers, say });
       room.registerTextStreamHandler('lk.transcription', onTranscription);
       room.on(RoomEvent.TrackSubscribed, onTrackSubscribed);
       room.on(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
+      room.on(RoomEvent.ParticipantConnected, (participant) => {
+        if (room !== currentRoom) return;
+        syncAgentState(participant);
+      });
+      room.on(RoomEvent.ParticipantAttributesChanged, (changed, participant) => {
+        if (room !== currentRoom || !participant?.isAgent) return;
+        if (changed && 'lk.agent.state' in changed) setAliceState(changed['lk.agent.state']);
+      });
+      room.on(RoomEvent.ParticipantDisconnected, (participant) => {
+        if (room !== currentRoom) return;
+        if (participant?.isAgent) setAliceState('joining');
+      });
+      room.on(RoomEvent.Reconnecting, () => {
+        if (room === currentRoom) setReconnecting(true);
+      });
+      if (RoomEvent.SignalReconnecting) {
+        room.on(RoomEvent.SignalReconnecting, () => {
+          if (room === currentRoom) setReconnecting(true);
+        });
+      }
+      room.on(RoomEvent.Reconnected, () => {
+        if (room !== currentRoom) return;
+        setReconnecting(false);
+        for (const participant of room.remoteParticipants.values()) {
+          if (participant.isAgent) {
+            syncAgentState(participant);
+            break;
+          }
+        }
+      });
       room.on(RoomEvent.Disconnected, () => reset('Call ended. Talk to Alice again whenever you like.'));
 
       body.classList.add('no-face');
+      setAliceState('joining');
       await room.connect(grant.url, grant.token);
+      for (const participant of room.remoteParticipants.values()) {
+        if (participant.isAgent) {
+          syncAgentState(participant);
+          break;
+        }
+      }
       await room.startAudio().catch(() => {});
       await room.localParticipant.setMicrophoneEnabled(true);
       await setCamera(true);
@@ -304,8 +491,23 @@ export function mountCall(root, { handlers = {} } = {}) {
   function reset(message = '') {
     stopOrb();
     room = null;
-    body.classList.remove('no-face', 'face-hidden', 'camera-off');
+    aliceState = null;
+    muteBusy = false;
+    sendingText = false;
+    clearTimeout(unsentTimer);
+    unsentTimer = 0;
+    body.classList.remove(
+      'no-face', 'face-hidden', 'camera-off',
+      'alice-joining', 'alice-listening', 'alice-thinking', 'alice-speaking',
+      'call-reconnecting',
+    );
+    el.aliceState.textContent = '';
     setControlsOpen(false);
+    setMutedUi(false);
+    setTypingOpen(false);
+    el.typeInput.value = '';
+    el.typeSend.disabled = false;
+    el.typebox.classList.remove('is-unsent');
     for (const button of el.controls.querySelectorAll('button[aria-pressed]')) button.setAttribute('aria-pressed', 'false');
     el.controls.querySelector('[data-act="mute"]').textContent = 'Mute';
     el.controls.querySelector('[data-act="video"]').textContent = 'Stop video';
@@ -325,6 +527,7 @@ export function mountCall(root, { handlers = {} } = {}) {
   // Shows the live layout with no connection, so the page can be checked without a call.
   function preview() {
     body.classList.add('no-face');
+    setAliceState('listening');
     setState('live');
     showCaption('alice', 'Preview mode: this is where Alice talks.');
   }

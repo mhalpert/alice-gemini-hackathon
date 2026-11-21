@@ -90,7 +90,9 @@
 .call-start__talk:disabled { opacity: 0.6; cursor: progress; }
 .call-start__talk:focus-visible,
 .call-start__passcode:focus-visible,
-.controls button:focus-visible { outline: 2px solid var(--c-accent); outline-offset: 3px; }
+.controls button:focus-visible,
+.mute-quick:focus-visible,
+.typebox__send:focus-visible { outline: 2px solid var(--c-accent); outline-offset: 3px; }
 
 .call-start__status { min-height: 1.4em; margin: 1rem 0 0; font-size: 0.86rem; color: var(--c-accent); }
 
@@ -133,6 +135,22 @@
   transition: transform 0.09s linear, box-shadow 0.09s linear;
 }
 
+.alice-joining .alice__orb span,
+.alice-thinking .alice__orb span {
+  animation: alice-breathe 1.6s ease-in-out infinite;
+}
+
+@keyframes alice-breathe {
+  0%, 100% {
+    transform: scale(0.9);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--c-accent) 30%, transparent);
+  }
+  50% {
+    transform: scale(1.03);
+    box-shadow: 0 0 0 18px color-mix(in srgb, var(--c-accent) 0%, transparent);
+  }
+}
+
 .alice__badge {
   position: absolute;
   left: 16px;
@@ -150,6 +168,25 @@
 }
 
 .alice__badge em { font-style: normal; opacity: 0.7; }
+
+.alice__state {
+  position: absolute;
+  left: 16px;
+  top: 50px;
+  padding: 0.28rem 0.6rem;
+  border-radius: 999px;
+  background: rgba(20, 17, 15, 0.58);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 0.66rem;
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+.alice__state:empty { display: none; }
+.call-reconnecting .alice__state { background: color-mix(in srgb, var(--c-accent) 85%, #14110f); }
 
 .alice__dot {
   width: 7px;
@@ -178,6 +215,26 @@
 
 .camera-off .selfview { visibility: hidden; }
 
+.selfview__muted {
+  position: absolute;
+  right: 28px;
+  bottom: 28px;
+  z-index: 2;
+  display: none;
+  padding: 0.25rem 0.55rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--c-accent) 92%, #14110f);
+  color: #fff;
+  font-size: 0.66rem;
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.mic-muted .selfview__muted { display: block; }
+
 /* Once the shop has something to show, Alice steps aside into a corner card. */
 .has-products .alice {
   inset: auto 20px 20px auto;
@@ -188,7 +245,9 @@
 }
 
 .has-products .selfview { right: 8px; bottom: 8px; width: 62px; }
+.has-products .selfview__muted { right: 8px; bottom: 8px; padding: 0.2rem 0.45rem; font-size: 0.62rem; }
 .has-products .alice__badge { left: 8px; top: 8px; font-size: 0.68rem; }
+.has-products .alice__state { left: 8px; top: 41px; padding: 0.22rem 0.5rem; font-size: 0.6rem; }
 
 /* A drawer or product page is open on the right: move the card to the left corner. */
 .has-products.panel-open .alice { inset: auto auto 20px 20px; }
@@ -227,7 +286,7 @@
 .has-products .captions {
   left: auto;
   right: 20px;
-  bottom: calc(20px + var(--card-w) * 0.75 + 56px);
+  bottom: calc(20px + var(--card-w) * 0.75 + 70px);
   align-items: flex-end;
   width: min(22rem, calc(100% - 40px));
   transform: none;
@@ -236,6 +295,88 @@
 .has-products .caption { border-radius: 14px; font-size: 0.86rem; }
 .has-products.panel-open .captions { right: auto; left: 20px; align-items: flex-start; }
 
+/* ---- type instead -------------------------------------------------------- */
+
+.typebox {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 94px;
+  margin-inline: auto;
+  display: none;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  width: min(320px, calc(100% - 32px));
+  padding: 5px 5px 5px 14px;
+  border: 1px solid color-mix(in srgb, var(--c-ink) 16%, transparent);
+  border-radius: 999px;
+  background: rgba(250, 247, 242, 0.96);
+  box-shadow: 0 8px 28px rgba(26, 23, 20, 0.22);
+  pointer-events: auto;
+  transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+
+.typing-open .typebox { display: flex; }
+.typing-open .captions { bottom: 152px; }
+
+.typebox:focus-within { border-color: color-mix(in srgb, var(--c-accent) 65%, transparent); }
+
+.typebox.is-unsent {
+  border-color: var(--c-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--c-accent) 30%, transparent), 0 8px 28px rgba(26, 23, 20, 0.22);
+  animation: typebox-shake 0.45s ease;
+}
+
+@keyframes typebox-shake {
+  20% { transform: translateX(-5px); }
+  45% { transform: translateX(5px); }
+  70% { transform: translateX(-3px); }
+  90% { transform: translateX(2px); }
+}
+
+.typebox__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.45rem 0;
+  border: 0;
+  background: transparent;
+  color: var(--c-ink);
+  font: 400 0.88rem/1.3 var(--c-sans);
+  outline: none;
+}
+
+.typebox__input::placeholder { color: color-mix(in srgb, var(--c-ink) 48%, transparent); }
+
+.typebox__send {
+  flex: 0 0 auto;
+  padding: 0.55rem 0.95rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--c-ink);
+  color: var(--c-ivory);
+  font: 500 0.76rem/1 var(--c-sans);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.2s var(--ease);
+}
+
+.typebox__send:hover { background: var(--c-accent); }
+.typebox__send:disabled { opacity: 0.55; cursor: progress; }
+
+.has-products .typebox {
+  left: auto;
+  right: 20px;
+  bottom: calc(20px + var(--card-w) * 0.75 + 68px);
+  margin-inline: 0;
+  width: 320px;
+  max-width: calc(100vw - 40px);
+}
+
+.has-products.typing-open .captions { bottom: calc(20px + var(--card-w) * 0.75 + 124px); }
+.has-products.panel-open .typebox { right: auto; left: 20px; }
+
 /* ---- controls ------------------------------------------------------------ */
 
 .controls {
@@ -243,6 +384,7 @@
   left: 50%;
   bottom: 28px;
   display: flex;
+  align-items: center;
   gap: 8px;
   padding: 6px;
   border-radius: 999px;
@@ -267,30 +409,68 @@
 
 .controls button:hover { background: color-mix(in srgb, var(--c-ink) 9%, transparent); }
 .controls button[aria-pressed='true'] { background: var(--c-ink); color: var(--c-ivory); }
+.controls button[aria-expanded='true'] { background: color-mix(in srgb, var(--c-ink) 12%, transparent); }
 .controls .controls__end { color: var(--c-accent); }
 .controls .controls__end:hover { background: var(--c-accent); color: #fff; }
+
+/* Primary mute control on desktop: taller, wider, and accent-filled while muted. */
+.controls button[data-act='mute'] {
+  min-height: 44px;
+  min-width: 112px;
+  padding: 0 1.4rem;
+  background: var(--c-ink);
+  color: var(--c-ivory);
+  font-weight: 600;
+}
+
+.controls button[data-act='mute']:hover { background: color-mix(in srgb, var(--c-ink) 84%, #fff); }
+.controls button[data-act='mute'][aria-pressed='true'] { background: var(--c-accent); color: #fff; }
+.controls button[data-act='mute'][aria-pressed='true']:hover { background: color-mix(in srgb, var(--c-accent) 88%, #000); }
 
 .has-products .controls {
   left: auto;
   right: 20px;
   bottom: calc(20px + var(--card-w) * 0.75 + 8px);
-  width: var(--card-w);
+  width: max-content;
+  min-width: var(--card-w);
+  max-width: calc(100vw - 40px);
   justify-content: space-between;
-  gap: 0;
+  gap: 2px;
   padding: 4px;
   transform: none;
 }
 
 .has-products .controls button { padding: 0.5rem 0.55rem; font-size: 0.7rem; }
+.has-products .controls button[data-act='mute'] {
+  min-height: 44px;
+  min-width: 92px;
+  padding: 0 1rem;
+  font-size: 0.76rem;
+}
 .has-products.panel-open .controls { right: auto; left: 20px; }
-.controls-toggle { display: none; }
+.controls-toggle,
+.mute-quick { display: none; }
 
 /* ---- phones ---------------------------------------------------------------- */
 
 @media (max-width: 640px) {
-  .controls { bottom: 16px; gap: 2px; }
-  .controls button { padding: 0.6rem 0.7rem; font-size: 0.72rem; }
+  .controls { bottom: 16px; gap: 2px; padding: 5px; max-width: calc(100vw - 16px); }
+  .controls button { padding: 0.5rem 0.5rem; font-size: 0.68rem; }
+  .controls button[data-act='mute'] { min-height: 36px; min-width: 0; padding: 0.5rem 0.7rem; }
   .captions { bottom: 84px; }
+  .selfview__muted { right: 26px; bottom: 68px; }
+  .selfview__muted-hint { display: none; }
+  .typing-open .selfview__muted { bottom: 124px; }
+
+  .typebox {
+    left: 12px;
+    right: 12px;
+    bottom: 68px;
+    margin-inline: 0;
+    width: auto;
+  }
+  .typebox__input { font-size: 16px; }
+  .typing-open .captions { bottom: 126px; }
 
   /* Once products are on screen, Alice docks into a 60px bottom-right bubble with a live rim dot. */
   .has-products .alice {
@@ -303,7 +483,9 @@
   }
   .has-products .alice__video,
   .has-products .alice__orb { border-radius: inherit; overflow: hidden; }
-  .has-products .selfview { display: none; }
+  .has-products .selfview,
+  .has-products .selfview__muted,
+  .has-products .alice__state { display: none; }
   .has-products .alice__badge {
     left: auto;
     top: 3px;
@@ -323,7 +505,92 @@
     border: 2px solid var(--c-ivory);
   }
 
-  /* Collapse the four controls behind a 36px three-dot toggle to the left of the bubble. */
+  /* Show joining/thinking pulse as a ring around the phone bubble. */
+  .has-products.alice-joining .alice::after,
+  .has-products.alice-thinking .alice::after {
+    content: '';
+    position: absolute;
+    inset: -4px;
+    border-radius: 50%;
+    border: 2px solid var(--c-accent);
+    pointer-events: none;
+    animation: bubble-pulse 1.6s ease-in-out infinite;
+  }
+
+  /* Always-visible quick mute button next to the controls toggle. */
+  .has-products .mute-quick {
+    position: absolute;
+    right: 124px;
+    bottom: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border: 1px solid var(--c-ink);
+    border-radius: 50%;
+    background: var(--c-ink);
+    color: var(--c-ivory);
+    box-shadow: 0 6px 20px rgba(26, 23, 20, 0.22);
+    cursor: pointer;
+    pointer-events: auto;
+    transition: background 0.2s var(--ease), color 0.2s var(--ease), border-color 0.2s var(--ease);
+  }
+  .has-products .mute-quick[aria-pressed='true'] {
+    background: var(--c-accent);
+    border-color: var(--c-accent);
+    color: #fff;
+  }
+  .has-products .mute-quick__mic {
+    position: relative;
+    display: block;
+    width: 7px;
+    height: 12px;
+    border-radius: 4px;
+    background: currentColor;
+    transform: translateY(-2.5px);
+  }
+  .has-products .mute-quick__mic::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 5px;
+    width: 13px;
+    height: 9px;
+    box-sizing: border-box;
+    border: 1.75px solid currentColor;
+    border-top: 0;
+    border-radius: 0 0 8px 8px;
+    transform: translateX(-50%);
+  }
+  .has-products .mute-quick__mic::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 13.5px;
+    width: 7px;
+    height: 4px;
+    box-sizing: border-box;
+    border-bottom: 1.75px solid currentColor;
+    background: linear-gradient(currentColor, currentColor) center / 1.75px 100% no-repeat;
+    transform: translateX(-50%);
+  }
+  .has-products .mute-quick[aria-pressed='true']::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 22px;
+    height: 2px;
+    border-radius: 1px;
+    background: currentColor;
+    box-shadow: 0 0 0 1.5px var(--c-accent);
+    transform: translate(-50%, -50%) rotate(-45deg);
+  }
+
+  /* Collapse the controls behind a 36px three-dot toggle to the left of the bubble. */
   .has-products .controls-toggle {
     position: absolute;
     right: 80px;
@@ -370,22 +637,35 @@
     right: 12px;
     bottom: 80px;
     width: auto;
+    min-width: 0;
     max-width: calc(100vw - 24px);
     gap: 2px;
   }
-  .has-products .controls button { padding: 0.45rem 0.55rem; font-size: 0.68rem; }
+  .has-products .controls button { padding: 0.45rem 0.5rem; font-size: 0.68rem; }
+  .has-products .controls button[data-act='mute'] { min-height: 32px; min-width: 0; padding: 0.45rem 0.65rem; font-size: 0.68rem; }
   .has-products.controls-open .controls { display: flex; }
+  .has-products.typing-open .controls { bottom: 138px; }
 
-  /* Single-speaker caption strip along the bottom, capped at 2 lines in the space left of the toggle. */
+  .has-products .typebox,
+  .has-products.panel-open .typebox {
+    left: 12px;
+    right: 12px;
+    bottom: 80px;
+    width: auto;
+    max-width: none;
+  }
+
+  /* Single-speaker caption strip along the bottom, capped at 2 lines in the space left of mute-quick. */
   .has-products .captions {
     left: 12px;
-    right: 124px;
+    right: 176px;
     bottom: 12px;
     width: auto;
     min-height: 60px;
     justify-content: center;
     align-items: flex-start;
   }
+  .has-products.typing-open .captions { bottom: 12px; }
   .has-products .caption {
     display: -webkit-box;
     -webkit-box-orient: vertical;
@@ -402,14 +682,25 @@
   .has-products .caption--you { box-shadow: 0 4px 14px rgba(26, 23, 20, 0.14); }
   .has-products .caption:not(.is-latest) { display: none; }
 
-  /* With a panel open on a phone, move the bubble to bottom-left and tuck away the controls. */
+  /* With a panel open on a phone, move the bubble and quick mute to bottom-left and tuck away the rest. */
   .has-products.panel-open .alice { inset: auto auto 12px 12px; }
+  .has-products.panel-open .mute-quick { left: 80px; right: auto; }
   .has-products.panel-open .controls-toggle,
   .has-products.panel-open .controls { display: none; }
-  .has-products.panel-open .captions { left: 84px; right: 12px; bottom: 12px; width: auto; }
+  .has-products.panel-open .captions { left: 132px; right: 12px; bottom: 12px; width: auto; }
+}
+
+@keyframes bubble-pulse {
+  0%, 100% { transform: scale(0.96); opacity: 0.75; }
+  50% { transform: scale(1.14); opacity: 0.12; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .alice, .selfview, .caption, .alice__orb span { transition: none; }
-  .alice__dot { animation: none; }
+  .alice, .selfview, .caption, .alice__orb span, .mute-quick, .typebox, .typebox__send { transition: none; }
+  .alice__dot,
+  .alice-joining .alice__orb span,
+  .alice-thinking .alice__orb span,
+  .has-products.alice-joining .alice::after,
+  .has-products.alice-thinking .alice::after,
+  .typebox.is-unsent { animation: none; }
 }
