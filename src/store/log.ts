@@ -4,10 +4,23 @@ export type CallLogSink = (
   data?: Record<string, unknown>,
 ) => void;
 
+export type CallRoomChangeListener = (
+  newRoom: string | null,
+  prevRoom: string | null,
+) => void;
+
 let currentRoom: string | null = null;
 let customSink: CallLogSink | null = null;
 let loadedSink: CallLogSink | null = null;
 let loaderPromise: Promise<CallLogSink | null> | null = null;
+const roomChangeListeners = new Set<CallRoomChangeListener>();
+
+export function onCallRoomChange(listener: CallRoomChangeListener): () => void {
+  roomChangeListeners.add(listener);
+  return () => {
+    roomChangeListeners.delete(listener);
+  };
+}
 
 function loadDefaultSink(): Promise<CallLogSink | null> {
   if (!loaderPromise) {
@@ -26,7 +39,18 @@ function loadDefaultSink(): Promise<CallLogSink | null> {
 }
 
 export function setCallRoom(room: string | null): void {
-  currentRoom = room && room.trim() ? room.trim() : null;
+  const prev = currentRoom;
+  const next = room && room.trim() ? room.trim() : null;
+  currentRoom = next;
+  if (prev !== next) {
+    for (const listener of roomChangeListeners) {
+      try {
+        listener(next, prev);
+      } catch {
+        // never throw
+      }
+    }
+  }
   if (currentRoom && !customSink && !loadedSink) {
     void loadDefaultSink();
   }

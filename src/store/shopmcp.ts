@@ -1,20 +1,32 @@
 import { logEvent } from './log.ts';
+import { defaultAuth, isAllowedAuthTargetUrl, redactSecrets } from './auth.ts';
+import { COMPLETE_CHECKOUT_GUARD } from './purchase-guard.ts';
 
 export class ShopMcpError extends Error {
   code: string;
   status?: number;
   retryAfterMs?: number;
+  upstreamCode?: string;
+  continueUrl?: string;
 
   constructor(
     code: string,
     message: string,
-    opts?: { status?: number; retryAfterMs?: number; cause?: unknown },
+    opts?: {
+      status?: number;
+      retryAfterMs?: number;
+      upstreamCode?: string;
+      continueUrl?: string;
+      cause?: unknown;
+    },
   ) {
     super(message, opts?.cause !== undefined ? { cause: opts.cause } : undefined);
     this.name = 'ShopMcpError';
     this.code = code;
     if (opts?.status !== undefined) this.status = opts.status;
     if (opts?.retryAfterMs !== undefined) this.retryAfterMs = opts.retryAfterMs;
+    if (opts?.upstreamCode !== undefined) this.upstreamCode = opts.upstreamCode;
+    if (opts?.continueUrl !== undefined) this.continueUrl = opts.continueUrl;
   }
 }
 
@@ -24,10 +36,16 @@ export interface ShopMcpOptions {
   maxInFlight?: number;
   timeoutMs?: number;
   now?: () => number;
+  isPurchaseEnabled?: () => boolean;
+  getAuthToken?: () => string | null;
+  onInvalidToken?: () => void;
+  getSecretsForRedaction?: () => string[];
 }
 
 export interface ShopMcpCallOptions {
   timeoutMs?: number;
+  authenticated?: boolean;
+  [COMPLETE_CHECKOUT_GUARD]?: boolean;
 }
 
 export interface ShopMcpClient {
@@ -35,7 +53,11 @@ export interface ShopMcpClient {
   blockedUntil(): number;
 }
 
-const ALLOWED_TOOLS = new Set([
+export function isPurchaseEnabled(): boolean {
+  return process.env.ALICE_PURCHASE === 'on';
+}
+
+const BASE_ALLOWED_TOOLS = new Set([
   'search_catalog',
   'lookup_catalog',
   'get_product',
@@ -44,10 +66,20 @@ const ALLOWED_TOOLS = new Set([
   'update_cart',
 ]);
 
-const EXPLICITLY_DENIED_TOOLS = new Set([
-  'complete_checkout',
+const PURCHASE_ALLOWED_TOOLS = new Set([
+  'get_account',
   'create_checkout',
+  'update_checkout',
+  'get_checkout',
+  'complete_checkout',
+]);
+
+const ALWAYS_DENIED_TOOLS = new Set([
   'complete_spend_request',
+  'create_spend_request',
+  'get_spend_request',
+  'update_spend_request',
+  'cancel_spend_request',
 ]);
 
 const DENIED_TOOL_RE = /checkout|spend|payment|pay|order/i;
@@ -100,16 +132,24 @@ function isTimeoutError(err: unknown): boolean {
 }
 
 export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
-  const url = opts?.url || process.env.SHOP_MCP_URL || DEFAULT_URL;
+  const getTargetUrl = () => opts?.url || process.env.SHOP_MCP_URL || DEFAULT_URL;
   const fetchFn = opts?.fetch ?? globalThis.fetch;
   const maxInFlight = Math.max(1, opts?.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT);
   const defaultTimeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const now = opts?.now ?? (() => Date.now());
+  const purchaseOn = opts?.isPurchaseEnabled ?? isPurchaseEnabled;
+  const getAuthToken = opts?.getAuthToken ?? (() => defaultAuth.getToken());
+  const onInvalidToken = opts?.onInvalidToken ?? (() => defaultAuth.invalidateToken('invalid'));
+  const getSecrets = opts?.getSecretsForRedaction ?? (() => defaultAuth.getSecretsForRedaction());
 
   let nextId = 1;
   let blockedUntilMs = 0;
   let inFlight = 0;
   const waiters: (() => void)[] = [];
+
+  function sanitize(msg: string): string {
+    return redactSecrets(msg, getSecrets());
+  }
 
   function acquire(): Promise<void> {
     if (inFlight < maxInFlight) {
@@ -141,18 +181,59 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
     }
   }
 
+  function assertToolAllowed(tool: string, o?: ShopMcpCallOptions): void {
+    if (typeof tool !== 'string' || ALWAYS_DENIED_TOOLS.has(tool)) {
+      throw new ShopMcpError('denied', `Tool "${String(tool)}" is denied`);
+    }
+
+    if (BASE_ALLOWED_TOOLS.has(tool)) {
+      return;
+    }
+
+    if (PURCHASE_ALLOWED_TOOLS.has(tool)) {
+      if (!purchaseOn()) {
+        throw new ShopMcpError('denied', `Tool "${tool}" is denied (ALICE_PURCHASE is not on)`);
+      }
+      if (tool === 'complete_checkout' && o?.[COMPLETE_CHECKOUT_GUARD] !== true) {
+        throw new ShopMcpError(
+          'denied',
+          'Tool "complete_checkout" may only be called from placeOrder',
+        );
+      }
+      return;
+    }
+
+    if (DENIED_TOOL_RE.test(tool)) {
+      throw new ShopMcpError('denied', `Tool "${tool}" is denied`);
+    }
+
+    throw new ShopMcpError('denied', `Tool "${tool}" is denied`);
+  }
+
   async function callInner(
     tool: string,
     args: Record<string, unknown>,
     o?: ShopMcpCallOptions,
   ): Promise<any> {
-    if (
-      typeof tool !== 'string' ||
-      EXPLICITLY_DENIED_TOOLS.has(tool) ||
-      DENIED_TOOL_RE.test(tool) ||
-      !ALLOWED_TOOLS.has(tool)
-    ) {
-      throw new ShopMcpError('denied', `Tool "${String(tool)}" is denied`);
+    assertToolAllowed(tool, o);
+
+    const url = getTargetUrl();
+    const wantsAuth = o?.authenticated === true || PURCHASE_ALLOWED_TOOLS.has(tool);
+    let authHeader: string | null = null;
+
+    if (wantsAuth) {
+      const token = getAuthToken();
+      if (token) {
+        if (!isAllowedAuthTargetUrl(url)) {
+          throw new ShopMcpError(
+            'denied',
+            'Refused to send Authorization header to a non-mcp.shop.com host',
+          );
+        }
+        authHeader = `Bearer ${token}`;
+      } else if (tool === 'get_account') {
+        throw new ShopMcpError('auth', 'Sign-in required for get_account', { status: 401 });
+      }
     }
 
     assertNotRateLimited();
@@ -178,21 +259,50 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
         },
       });
 
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        'MCP-Protocol-Version': PROTOCOL_VERSION,
+        'Mcp-Method': 'tools/call',
+        'Mcp-Name': tool,
+      };
+      // Final structural check: NEVER attach Authorization to any host other than https://mcp.shop.com
+      const hasAuthHeader = Boolean(authHeader && isAllowedAuthTargetUrl(url));
+      if (hasAuthHeader && authHeader) {
+        headers.Authorization = authHeader;
+      }
+
       let res: Response;
       let rawText: string;
       try {
         res = await fetchFn(url, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json, text/event-stream',
-            'MCP-Protocol-Version': PROTOCOL_VERSION,
-            'Mcp-Method': 'tools/call',
-            'Mcp-Name': tool,
-          },
+          headers,
           body,
+          ...(hasAuthHeader ? { redirect: 'error' as const } : {}),
           signal: AbortSignal.timeout(timeoutMs),
         });
+
+        if (res.status === 401) {
+          if (hasAuthHeader) {
+            onInvalidToken();
+            throw new ShopMcpError('auth', 'Shop MCP authentication required (HTTP 401)', {
+              status: 401,
+            });
+          }
+          throw new ShopMcpError('http', 'Shop MCP HTTP 401', { status: 401 });
+        }
+
+        if (res.status === 403) {
+          const wwwAuth = res.headers.get('www-authenticate') ?? '';
+          if (hasAuthHeader && /insufficient_scope/i.test(wwwAuth)) {
+            onInvalidToken();
+            throw new ShopMcpError('auth', 'Shop MCP insufficient scope (HTTP 403)', {
+              status: 403,
+            });
+          }
+          throw new ShopMcpError('http', 'Shop MCP HTTP 403', { status: 403 });
+        }
 
         if (res.status === 429) {
           const current = now();
@@ -213,14 +323,11 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
       } catch (err) {
         if (err instanceof ShopMcpError) throw err;
         if (isTimeoutError(err)) {
-          throw new ShopMcpError('timeout', `Shop MCP ${tool} timed out after ${timeoutMs}ms`, {
-            cause: err,
-          });
+          throw new ShopMcpError('timeout', `Shop MCP ${tool} timed out after ${timeoutMs}ms`);
         }
         throw new ShopMcpError(
           'network',
-          err instanceof Error ? err.message : String(err),
-          { cause: err },
+          sanitize(err instanceof Error ? err.message : String(err)),
         );
       }
 
@@ -235,8 +342,7 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
         if (err instanceof ShopMcpError) throw err;
         throw new ShopMcpError(
           'parse',
-          `Invalid JSON from Shop MCP: ${err instanceof Error ? err.message : String(err)}`,
-          { cause: err },
+          sanitize(`Invalid JSON from Shop MCP: ${err instanceof Error ? err.message : String(err)}`),
         );
       }
 
@@ -245,7 +351,7 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
           typeof payload.error.message === 'string'
             ? payload.error.message
             : JSON.stringify(payload.error);
-        throw new ShopMcpError('rpc', msg);
+        throw new ShopMcpError('rpc', sanitize(msg));
       }
 
       const result = payload?.result;
@@ -254,13 +360,27 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
       }
 
       if (result.isError) {
+        const shopErr = result._meta?.['com.shopify/error'];
+        const upstreamCode =
+          typeof shopErr?.code === 'string' ? shopErr.code : undefined;
+        const continueUrl =
+          typeof shopErr?.continue_url === 'string' ? shopErr.continue_url : undefined;
+
+        if (upstreamCode === 'sign_in_required') {
+          throw new ShopMcpError('auth', 'Sign-in required', {
+            status: 401,
+            upstreamCode,
+            continueUrl,
+          });
+        }
+
         const text = Array.isArray(result.content)
           ? result.content
               .map((c: any) => (typeof c?.text === 'string' ? c.text : ''))
               .filter(Boolean)
               .join('\n') || 'Shop MCP tool error'
           : 'Shop MCP tool error';
-        throw new ShopMcpError('tool', text);
+        throw new ShopMcpError('tool', sanitize(text), { upstreamCode, continueUrl });
       }
 
       if (result.structuredContent !== undefined && result.structuredContent !== null) {
@@ -274,8 +394,9 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
         } catch (err) {
           throw new ShopMcpError(
             'parse',
-            `Invalid tool content JSON: ${err instanceof Error ? err.message : String(err)}`,
-            { cause: err },
+            sanitize(
+              `Invalid tool content JSON: ${err instanceof Error ? err.message : String(err)}`,
+            ),
           );
         }
       }
@@ -286,28 +407,30 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
     }
   }
 
-function summarizeErrorForLog(message: string): string {
-  const trimmed = message.trim();
-  if (trimmed.startsWith('{')) {
-    try {
-      const parsed = JSON.parse(trimmed) as { messages?: Array<{ code?: string; content?: string; message?: string }> };
-      if (Array.isArray(parsed?.messages) && parsed.messages.length > 0) {
-        const parts = parsed.messages
-          .map((m) => {
-            const text = m?.content ?? m?.message ?? '';
-            return m?.code && text ? `${m.code}: ${text}` : text || m?.code || '';
-          })
-          .filter(Boolean);
-        if (parts.length > 0) {
-          return parts.join('; ').slice(0, 300);
+  function summarizeErrorForLog(message: string): string {
+    const cleaned = sanitize(message).trim();
+    if (cleaned.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(cleaned) as {
+          messages?: Array<{ code?: string; content?: string; message?: string }>;
+        };
+        if (Array.isArray(parsed?.messages) && parsed.messages.length > 0) {
+          const parts = parsed.messages
+            .map((m) => {
+              const text = m?.content ?? m?.message ?? '';
+              return m?.code && text ? `${m.code}: ${text}` : text || m?.code || '';
+            })
+            .filter(Boolean);
+          if (parts.length > 0) {
+            return sanitize(parts.join('; ')).slice(0, 300);
+          }
         }
+      } catch {
+        // fall through
       }
-    } catch {
-      // fall through
     }
+    return cleaned.slice(0, 300);
   }
-  return trimmed.slice(0, 300);
-}
 
   async function call(
     tool: string,
@@ -324,6 +447,7 @@ function summarizeErrorForLog(message: string): string {
           message: summarizeErrorForLog(err.message),
           ...(err.status !== undefined ? { status: err.status } : {}),
           ...(err.retryAfterMs !== undefined ? { retry_after_ms: err.retryAfterMs } : {}),
+          ...(err.upstreamCode ? { upstream_code: err.upstreamCode } : {}),
         });
       }
       throw err;
