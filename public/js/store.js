@@ -47,6 +47,30 @@ function stageUrl(url, width) {
   return url;
 }
 
+// Build a download filename for the active try-on render on the stage
+function renderDownloadFilename(outfitNumber, kind, url) {
+  const safeNum = Number.isFinite(Number(outfitNumber)) ? outfitNumber : 1;
+  const fallbackExt = kind === 'video' ? 'mp4' : 'jpg';
+  const allowedExts =
+    kind === 'video'
+      ? new Set(['mp4', 'webm', 'mov', 'm4v'])
+      : new Set(['jpg', 'jpeg', 'png', 'webp', 'avif']);
+  let ext = fallbackExt;
+  try {
+    const pathname = new URL(url, window.location.origin).pathname;
+    const match = pathname.match(/\.([a-z0-9]{2,5})$/i);
+    if (match) {
+      const candidate = match[1].toLowerCase();
+      if (allowedExts.has(candidate)) {
+        ext = candidate === 'jpeg' ? 'jpg' : candidate;
+      }
+    }
+  } catch {
+    // Keep the default extension when the URL cannot be parsed
+  }
+  return `alice-look-${safeNum}-${kind}.${ext}`;
+}
+
 function safeExternalUrl(url) {
   if (typeof url !== 'string') return null;
   try {
@@ -586,7 +610,11 @@ export function mountStore(root, { onTalk } = {}) {
   }
 
   function setHasProducts() {
+    const wasSet = document.body.classList.contains('has-products');
     document.body.classList.add('has-products');
+    if (!wasSet && typeof syncHeaderHeight === 'function') {
+      syncHeaderHeight();
+    }
   }
 
   // Contract helper for the bag drawer and product detail panel
@@ -2403,7 +2431,8 @@ export function mountStore(root, { onTalk } = {}) {
       stageVideo,
       videoPlayBtn,
       lookLabel,
-      stageCaption,
+      stageCaptionText,
+      downloadLink,
       thumbBtn,
       thumbImg,
       thumbLabel,
@@ -2506,9 +2535,35 @@ export function mountStore(root, { onTalk } = {}) {
       stagePanel.classList.remove('is-showing-tryon');
     }
 
-    stageCaption.textContent = showingTryOn
+    stageCaptionText.textContent = showingTryOn
       ? RENDER_CAPTIONS[activeKind] || 'On you'
       : 'The flat lay';
+
+    // Point the download link at the full-size active render URL, or hide it when no try-on is on stage
+    const rawRenderUrl = showingTryOn && activeKind ? media.renders[activeKind] : null;
+    const activeImageFailed =
+      Boolean(rawRenderUrl) &&
+      activeKind !== 'video' &&
+      media.failedUrls.has(stageUrl(rawRenderUrl, 900));
+    const safeDownloadHref =
+      rawRenderUrl && !activeImageFailed && safeExternalUrl(rawRenderUrl) ? rawRenderUrl : null;
+    if (showingTryOn && activeKind && safeDownloadHref) {
+      downloadLink.setAttribute('href', safeDownloadHref);
+      downloadLink.setAttribute(
+        'download',
+        renderDownloadFilename(panelRefs.outfit, activeKind, safeDownloadHref)
+      );
+      downloadLink.setAttribute(
+        'aria-label',
+        `Download ${RENDER_CAPTIONS[activeKind] || 'try-on'}`
+      );
+      downloadLink.hidden = false;
+    } else {
+      downloadLink.hidden = true;
+      downloadLink.removeAttribute('href');
+      downloadLink.removeAttribute('download');
+      downloadLink.removeAttribute('aria-label');
+    }
 
     // Corner swap thumbnail appears once revealed so the shopper can toggle between try-on and flat lay
     if (hasReveal) {
@@ -2692,6 +2747,11 @@ export function mountStore(root, { onTalk } = {}) {
           media.activeRender = altKind;
           media.tryOnUrl = media.renders[altKind];
           applyStageState(activePickedRefs, media);
+        } else if (state.view === 'picked' && activePickedRefs && activePickedRefs.outfit === look.number) {
+          activePickedRefs.downloadLink.hidden = true;
+          activePickedRefs.downloadLink.removeAttribute('href');
+          activePickedRefs.downloadLink.removeAttribute('download');
+          activePickedRefs.downloadLink.removeAttribute('aria-label');
         }
       },
     });
@@ -2822,7 +2882,21 @@ export function mountStore(root, { onTalk } = {}) {
       thumbBtn
     );
 
-    const stageCaption = el('figcaption', { className: 'stage-caption' }, 'The flat lay');
+    const stageCaptionText = el('span', { className: 'stage-caption-text' }, 'The flat lay');
+    const downloadLink = el(
+      'a',
+      {
+        className: 'stage-download-link',
+        hidden: true,
+      },
+      'Download'
+    );
+    const stageCaption = el(
+      'figcaption',
+      { className: 'stage-caption' },
+      stageCaptionText,
+      downloadLink
+    );
     const renderStrip = el('div', {
       className: 'stage-render-strip',
       role: 'group',
@@ -2968,6 +3042,8 @@ export function mountStore(root, { onTalk } = {}) {
       videoPlayBtn,
       videoPlayLabel,
       stageCaption,
+      stageCaptionText,
+      downloadLink,
       renderStrip,
       renderTiles: new Map(),
       thumbBtn,
