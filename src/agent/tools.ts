@@ -1,11 +1,42 @@
-import { readFileSync } from 'node:fs';
 import { llm } from '@livekit/agents';
 import { z } from 'zod';
+import { buildOutfits as defaultBuildOutfits, swapPiece as defaultSwapPiece } from '../brain/index.ts';
+import type { BuildOptions, SwapOptions, SwapResult } from '../brain/index.ts';
 import { calllog } from '../calllog.ts';
-import type { Brief, Outfit } from '../types.ts';
+import * as defaultMediaModule from '../media/index.ts';
+import type { SearchOpts } from '../store/catalog.ts';
+import type { BagLineAdded, BagLineNotAdded } from '../store/index.ts';
+import { tryOn as defaultTryOn } from '../tryon.ts';
+import type {
+  BagLine,
+  BagLink,
+  BagOut,
+  BagStore,
+  Brief,
+  BuildResult,
+  CartResult,
+  Gender,
+  Item,
+  Outfit,
+  PageActionName,
+  PageActionReply,
+  PageActions,
+  Piece,
+  SearchResult,
+} from '../types.ts';
+import type { PageSender } from './page.ts';
+import {
+  type BagNotAdded,
+  type CallStateStore,
+  createCallStateStore,
+  normalizeSlotKey,
+  outfitToStateLook,
+} from './state.ts';
 
 export const DUPLICATE_WINDOW_MS = 15_000;
-export const DEFAULT_SLOW_STUB_DELAY_MS = 2_000;
+export const MAX_BUDGET_USD = 10_000;
+export const DEFAULT_TRYON_WAIT_MS = 45_000;
+export const DEFAULT_HIGHLIGHT_WALK_MS = 2_200;
 
 export const SLOW_TOOL_NOTES: Readonly<Record<string, string>> = {
   build_outfits: 'Working on building three outfits now.',
@@ -31,16 +62,74 @@ export interface CameraSnapshot {
   at: number;
 }
 
+export interface TimerLike {
+  unref?: () => unknown;
+}
+
+export interface StoreModuleLike {
+  searchMixed?: (
+    query: string,
+    gender: Gender,
+    opts?: SearchOpts,
+  ) => Promise<SearchResult>;
+  search?: (
+    query: string,
+    gender: Gender,
+    opts?: SearchOpts,
+  ) => Promise<SearchResult>;
+  addToBag?: (
+    outfit: Outfit,
+    sizes: Record<string, string>,
+    gender: Gender,
+  ) => Promise<BagOut>;
+  productImages?: (item: Item) => Promise<string[]>;
+  setCallRoom?: (room: string | null) => void;
+}
+
+export interface ToolDeps {
+  buildOutfits?: (brief: Brief, opts?: BuildOptions) => Promise<BuildResult>;
+  swapPiece?: (
+    outfit: Outfit,
+    slot: string,
+    request: string,
+    brief: Brief,
+    opts?: SwapOptions,
+  ) => Promise<SwapResult>;
+  outfitCollage?: (outfit: Outfit, label?: string) => Promise<string | null>;
+  productImages?: (item: Item) => Promise<string[]>;
+  tryOn?: (
+    personJpeg: Buffer | null,
+    outfit: Outfit,
+    opts?: { label?: string },
+  ) => Promise<{ url: string; path: string; ms: number; id: string }>;
+  searchProducts?: (
+    query: string,
+    gender: Gender,
+    opts?: SearchOpts,
+  ) => Promise<SearchResult>;
+  addToBag?: (
+    outfit: Outfit,
+    sizes: Record<string, string>,
+    gender: Gender,
+  ) => Promise<BagOut>;
+  loadStoreModule?: () => Promise<StoreModuleLike | null>;
+}
+
 export interface ToolRuntimeOptions {
   room: string;
   log?: ToolLogFn;
   now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
-  slowDelayMs?: number;
+  setTimeoutFn?: (fn: () => void, ms: number) => TimerLike;
+  clearTimeoutFn?: (handle: TimerLike) => void;
   duplicateWindowMs?: number;
+  tryOnTimeoutMs?: number;
+  walkIntervalMs?: number;
   sendWorkingNote?: (params: WorkingNoteParams) => boolean | void;
   getSnapshot?: () => CameraSnapshot | null;
-  fixtureUrl?: URL | string;
+  page?: PageSender;
+  state?: CallStateStore;
+  deps?: ToolDeps;
+  signal?: AbortSignal;
 }
 
 export function stableStringify(value: unknown): string {
@@ -61,23 +150,259 @@ export function stableStringify(value: unknown): string {
   return `{${entries.join(',')}}`;
 }
 
-export function formatFixtureSummary(outfits: Outfit[]): string {
-  const lines = outfits.map((outfit, idx) => {
-    const num = outfit.number ?? idx + 1;
-    const pieces = outfit.pieces
-      .map((p) => `${p.slot}: ${p.item.title} ($${p.item.price}, ${p.item.store})`)
-      .join('; ');
-    return `Look ${num} — ${outfit.name} ($${outfit.total.toFixed(2)}): ${pieces}`;
-  });
-  return `Built ${outfits.length} looks:\n${lines.join('\n')}`;
+function formatPrice(amount: number): string {
+  if (!Number.isFinite(amount)) return '$0';
+  return Number.isInteger(amount) ? `$${amount}` : `$${amount.toFixed(2)}`;
 }
 
-export function loadFixtureSummary(
-  fixtureUrl: URL | string = new URL('../../public/fixture.json', import.meta.url),
-): string {
-  const raw = readFileSync(fixtureUrl, 'utf8');
-  const parsed = JSON.parse(raw) as { brief?: Brief; outfits: Outfit[] };
-  return formatFixtureSummary(parsed.outfits);
+function roundMoney(amount: number): number {
+  return Math.round(amount * 100) / 100;
+}
+
+/**
+ * Accepts only HTTP(S) URLs or server-relative `/tryon/...` URLs so a local
+ * filesystem path (e.g. `res.path`, `/tmp/...`, `file://...`) can never be sent
+ * to the call page.
+ */
+export function sanitizePageMediaUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.includes('\\')) return null;
+
+  if (trimmed.startsWith('/tryon/')) {
+    if (trimmed.length <= '/tryon/'.length || trimmed.includes('..')) {
+      return null;
+    }
+    return trimmed;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return trimmed;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/**
+ * Derives up to 5 short bullet strings from a plain-text product description.
+ */
+export function deriveProductDetails(description: string): string[] {
+  if (typeof description !== 'string') return [];
+  const clean = description.replace(/\s+/g, ' ').trim();
+  if (!clean) return [];
+
+  const rawParts = clean
+    .split(/(?:\.\s+|;\s+|\|\s+|\s+[•·]\s+)/)
+    .map((s) => s.trim().replace(/\.$/, ''))
+    .filter((s) => s.length >= 4 && s.length <= 120);
+
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const part of rawParts) {
+    const key = part.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(part);
+    if (unique.length >= 5) break;
+  }
+
+  return unique.length >= 2 ? unique : [];
+}
+
+/**
+ * Local mock cart builder used only when `src/store/index.ts` is not merged yet.
+ * Never touches checkout or payment; carts only.
+ */
+export function mockAddToBag(
+  outfit: Outfit,
+  sizes: Record<string, string>,
+  _gender: Gender,
+): BagOut {
+  const byStore = new Map<string, { store: string; store_domain: string; pieces: Piece[] }>();
+  for (const piece of outfit.pieces) {
+    const key = piece.item.store_domain || piece.item.store;
+    let bucket = byStore.get(key);
+    if (!bucket) {
+      bucket = {
+        store: piece.item.store,
+        store_domain: piece.item.store_domain,
+        pieces: [],
+      };
+      byStore.set(key, bucket);
+    }
+    bucket.pieces.push(piece);
+  }
+
+  const carts: CartResult[] = [];
+  let grandTotal = 0;
+
+  for (const group of byStore.values()) {
+    const added = group.pieces.map((piece) => {
+      const slotKey = piece.slot.toLowerCase();
+      const chosenSize = sizes[slotKey] ?? sizes[normalizeSlotKey(piece.slot)] ?? null;
+      const variantId =
+        (chosenSize && piece.item.variants_by_size?.[chosenSize]) || piece.item.variant_id;
+      return {
+        variant_id: variantId,
+        title: piece.item.title,
+        size: chosenSize,
+      };
+    });
+
+    const storeTotal = roundMoney(group.pieces.reduce((sum, p) => sum + p.item.price, 0));
+    grandTotal = roundMoney(grandTotal + storeTotal);
+
+    carts.push({
+      store: group.store,
+      store_domain: group.store_domain,
+      cart_id: null,
+      continue_url: null,
+      total_usd: storeTotal,
+      added,
+      not_added: [],
+      ms: 0,
+    });
+  }
+
+  return {
+    carts,
+    summary: 'Carts are mocked (store cart module not available yet).',
+    total_usd: grandTotal,
+  };
+}
+
+function findPieceForCartEntry(
+  outfit: Outfit,
+  variantId: string,
+  title: string | undefined,
+  store: string,
+  itemId?: string,
+): Piece | undefined {
+  if (itemId) {
+    const byId = outfit.pieces.find((p) => p.item.id === itemId);
+    if (byId) return byId;
+  }
+  for (const p of outfit.pieces) {
+    if (p.item.variant_id === variantId) return p;
+    if (p.item.variants_by_size && Object.values(p.item.variants_by_size).includes(variantId)) {
+      return p;
+    }
+  }
+  if (title) {
+    const lower = title.trim().toLowerCase();
+    const byTitle = outfit.pieces.find(
+      (p) => p.item.title.trim().toLowerCase() === lower && p.item.store === store,
+    );
+    if (byTitle) return byTitle;
+    return outfit.pieces.find((p) => p.item.title.trim().toLowerCase() === lower);
+  }
+  return undefined;
+}
+
+/**
+ * Returns true only when the store created at least one real cart (cart_id or continue_url)
+ * containing at least one added line.
+ */
+export function hasRealCart(bagOut: BagOut): boolean {
+  return (bagOut.carts ?? []).some(
+    (cart) =>
+      ((typeof cart.cart_id === 'string' && cart.cart_id.trim().length > 0) ||
+        (typeof cart.continue_url === 'string' && cart.continue_url.trim().length > 0)) &&
+      Array.isArray(cart.added) &&
+      cart.added.length > 0,
+  );
+}
+
+/**
+ * Converts a store `BagOut` into the page's `bagReady` RPC payload.
+ */
+export function bagOutToPagePayload(
+  bagOut: BagOut,
+  outfit: Outfit,
+  sizes: Record<string, string>,
+): PageActions['bagReady'] {
+  const stores: BagStore[] = [];
+  const links: BagLink[] = [];
+
+  for (const cart of bagOut.carts) {
+    const added: BagLine[] = (cart.added ?? []).map((entry) => {
+      const ext = entry as Partial<BagLineAdded>;
+      const piece = findPieceForCartEntry(
+        outfit,
+        entry.variant_id,
+        entry.title,
+        cart.store,
+        ext.item_id,
+      );
+      const slot = ext.slot || piece?.slot || '';
+      const fallbackSize = slot
+        ? (sizes[slot.toLowerCase()] ?? sizes[normalizeSlotKey(slot)] ?? null)
+        : null;
+      return {
+        title: entry.title || piece?.item.title || 'Item',
+        slot,
+        image: ext.image || piece?.item.image || '',
+        price:
+          typeof ext.price === 'number' && Number.isFinite(ext.price)
+            ? ext.price
+            : (piece?.item.price ?? 0),
+        size: entry.size !== undefined ? entry.size : fallbackSize,
+      };
+    });
+
+    const not_added: BagLine[] = (cart.not_added ?? []).map((entry) => {
+      const ext = entry as Partial<BagLineNotAdded>;
+      const piece = findPieceForCartEntry(
+        outfit,
+        entry.variant_id,
+        entry.title,
+        cart.store,
+        ext.item_id,
+      );
+      return {
+        title: entry.title || piece?.item.title || 'Item',
+        slot: ext.slot || piece?.slot || '',
+        image: ext.image || piece?.item.image || '',
+        price:
+          typeof ext.price === 'number' && Number.isFinite(ext.price)
+            ? ext.price
+            : (piece?.item.price ?? 0),
+        ...(ext.size !== undefined ? { size: ext.size } : {}),
+        reason: entry.reason,
+      };
+    });
+
+    stores.push({
+      store: cart.store,
+      added,
+      not_added,
+      subtotal: cart.total_usd,
+    });
+
+    if (typeof cart.continue_url === 'string' && cart.continue_url.trim().length > 0) {
+      links.push({ store: cart.store, url: cart.continue_url.trim() });
+    }
+  }
+
+  return {
+    stores,
+    links,
+    total: bagOut.total_usd,
+  };
+}
+
+async function defaultLoadStoreModule(): Promise<StoreModuleLike | null> {
+  try {
+    const modPath = '../store/index.ts';
+    const mod = (await import(modPath)) as StoreModuleLike;
+    return mod ?? null;
+  } catch {
+    return null;
+  }
 }
 
 interface DuplicateEntry {
@@ -91,6 +416,7 @@ export interface ToolWrapperContext {
     name: string,
     handler: (args: TArgs, opts: { toolCallId: string }) => Promise<string> | string,
   ): (args: TArgs, opts?: { toolCallId?: string }) => Promise<string>;
+  invalidate(exceptToolName?: string): void;
 }
 
 export function createToolWrapper(options: ToolRuntimeOptions): ToolWrapperContext {
@@ -108,6 +434,18 @@ export function createToolWrapper(options: ToolRuntimeOptions): ToolWrapperConte
   }
 
   return {
+    invalidate(exceptToolName?: string): void {
+      if (!exceptToolName) {
+        recentCalls.clear();
+        return;
+      }
+      const prefix = `${exceptToolName}:`;
+      for (const key of recentCalls.keys()) {
+        if (!key.startsWith(prefix)) {
+          recentCalls.delete(key);
+        }
+      }
+    },
     wrap<TArgs extends Record<string, unknown>>(
       name: string,
       handler: (args: TArgs, opts: { toolCallId: string }) => Promise<string> | string,
@@ -182,21 +520,286 @@ const slotSchema = z
   .string()
   .describe('Piece slot name (top, bottom, dress, layer, shoes, accessory, bag, or jewelry)');
 
+interface TryOnJob {
+  version: number;
+  hadSnapshot: boolean;
+  promise: Promise<void>;
+}
+
+const NOOP_PAGE_SENDER: PageSender = {
+  async send<K extends PageActionName>(
+    _action: K,
+    _payload: PageActions[K],
+  ): Promise<PageActionReply> {
+    return { ok: false, error: 'no page sender configured' };
+  },
+};
+
+function findPieceInOutfit(outfit: Outfit, rawSlot: string): Piece | undefined {
+  const clean = rawSlot.trim().toLowerCase();
+  const exact = outfit.pieces.find((p) => p.slot.trim().toLowerCase() === clean);
+  if (exact) return exact;
+  const normalized = normalizeSlotKey(rawSlot);
+  return outfit.pieces.find((p) => normalizeSlotKey(p.slot) === normalized);
+}
+
 /**
  * Returns an object map of anonymous function tools keyed by tool name.
  * IMPORTANT: Do NOT set `name` on any entry; @livekit/agents 1.10 rejects named entries in object maps.
  */
 export function createAgentTools(options: ToolRuntimeOptions) {
   const wrapper = createToolWrapper(options);
+  const logFn = options.log ?? calllog;
   const nowFn = options.now ?? (() => Date.now());
-  const sleepFn =
-    options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const slowDelayMs = options.slowDelayMs ?? DEFAULT_SLOW_STUB_DELAY_MS;
-  const waitSlow = async () => {
-    if (slowDelayMs > 0) {
-      await sleepFn(slowDelayMs);
+  const setTimeoutFn: (fn: () => void, ms: number) => TimerLike =
+    options.setTimeoutFn ?? ((fn, ms) => setTimeout(fn, ms));
+  const clearTimeoutFn: (handle: TimerLike) => void =
+    options.clearTimeoutFn ??
+    ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+  const tryOnTimeoutMs = options.tryOnTimeoutMs ?? DEFAULT_TRYON_WAIT_MS;
+  const walkIntervalMs = options.walkIntervalMs ?? DEFAULT_HIGHLIGHT_WALK_MS;
+  const page = options.page ?? NOOP_PAGE_SENDER;
+  const stateStore =
+    options.state ?? createCallStateStore({ roomName: options.room, log: logFn });
+
+  const buildOutfitsFn = options.deps?.buildOutfits ?? defaultBuildOutfits;
+  const swapPieceFn = options.deps?.swapPiece ?? defaultSwapPiece;
+  const outfitCollageFn =
+    options.deps?.outfitCollage ??
+    (typeof defaultMediaModule.outfitCollage === 'function'
+      ? defaultMediaModule.outfitCollage
+      : async () => null);
+  const mediaProductImagesFn =
+    options.deps && 'productImages' in options.deps
+      ? options.deps.productImages
+      : typeof defaultMediaModule.productImages === 'function'
+        ? defaultMediaModule.productImages
+        : undefined;
+  const tryOnFn = options.deps?.tryOn ?? defaultTryOn;
+  const loadStoreModuleFn = options.deps?.loadStoreModule ?? defaultLoadStoreModule;
+
+  const outfitsByNumber = new Map<number, Outfit>();
+  const mediaVersionByLook = new Map<number, number>();
+  const tryOnJobs = new Map<number, TryOnJob>();
+  const baggedResults = new Map<string, string>();
+  let lastBriefNotes: string | undefined;
+
+  let walkGen = 0;
+  let activeWalkTimer: TimerLike | null = null;
+  const activeTimers = new Set<TimerLike>();
+
+  function cancelWalk(): void {
+    walkGen += 1;
+    if (activeWalkTimer !== null) {
+      clearTimeoutFn(activeWalkTimer);
+      activeTimers.delete(activeWalkTimer);
+      activeWalkTimer = null;
     }
-  };
+  }
+
+  function scheduleTimer(fn: () => void, ms: number): TimerLike {
+    const handle = setTimeoutFn(() => {
+      activeTimers.delete(handle);
+      fn();
+    }, ms);
+    handle.unref?.();
+    activeTimers.add(handle);
+    return handle;
+  }
+
+  if (options.signal) {
+    options.signal.addEventListener(
+      'abort',
+      () => {
+        cancelWalk();
+        for (const handle of activeTimers) {
+          clearTimeoutFn(handle);
+        }
+        activeTimers.clear();
+      },
+      { once: true },
+    );
+  }
+
+  function nextLookMediaVersion(lookNumber: number): number {
+    const next = (mediaVersionByLook.get(lookNumber) ?? 0) + 1;
+    mediaVersionByLook.set(lookNumber, next);
+    return next;
+  }
+
+  function isCurrentMediaVersion(lookNumber: number, version: number): boolean {
+    return mediaVersionByLook.get(lookNumber) === version && !options.signal?.aborted;
+  }
+
+  function startTryOnForLook(outfit: Outfit, version: number): TryOnJob {
+    const lookNumber = outfit.number ?? 1;
+    const snap = options.getSnapshot?.() ?? null;
+    const hadSnapshot = Boolean(snap?.jpeg && snap.jpeg.length > 0);
+    const started = nowFn();
+
+    stateStore.dispatch({ type: 'set_tryon', look: lookNumber, status: 'rendering' });
+    void page.send('tryOnStatus', { outfit: lookNumber, status: 'rendering' });
+
+    const promise = (async () => {
+      try {
+        const res = await tryOnFn(snap?.jpeg ?? null, outfit, { label: `look-${lookNumber}` });
+        const ms = Math.max(0, Math.round(nowFn() - started));
+        if (!isCurrentMediaVersion(lookNumber, version)) return;
+
+        const url = sanitizePageMediaUrl(res?.url);
+        if (url) {
+          stateStore.dispatch({ type: 'set_tryon', look: lookNumber, status: 'ready', url });
+          await page.send('tryOnReady', { outfit: lookNumber, url });
+          logFn(options.room, 'tryon', {
+            outfit: lookNumber,
+            status: 'ready',
+            ms,
+            url,
+            had_snapshot: hadSnapshot,
+          });
+        } else {
+          const error = 'try-on returned invalid or empty image url';
+          stateStore.dispatch({ type: 'set_tryon', look: lookNumber, status: 'failed', error });
+          await page.send('tryOnStatus', { outfit: lookNumber, status: 'failed' });
+          logFn(options.room, 'tryon', {
+            outfit: lookNumber,
+            status: 'failed',
+            ms,
+            error,
+            had_snapshot: hadSnapshot,
+          });
+        }
+      } catch (err) {
+        const ms = Math.max(0, Math.round(nowFn() - started));
+        if (!isCurrentMediaVersion(lookNumber, version)) return;
+
+        const error = err instanceof Error ? err.message : String(err);
+        stateStore.dispatch({ type: 'set_tryon', look: lookNumber, status: 'failed', error });
+        await page.send('tryOnStatus', { outfit: lookNumber, status: 'failed' });
+        logFn(options.room, 'tryon', {
+          outfit: lookNumber,
+          status: 'failed',
+          ms,
+          error,
+          had_snapshot: hadSnapshot,
+        });
+      }
+    })();
+
+    const job: TryOnJob = { version, hadSnapshot, promise };
+    tryOnJobs.set(lookNumber, job);
+    return job;
+  }
+
+  function startCollageForLook(outfit: Outfit, version: number): void {
+    const lookNumber = outfit.number ?? 1;
+    const started = nowFn();
+
+    void (async () => {
+      try {
+        const url = await outfitCollageFn(outfit, `look-${lookNumber}`);
+        const ms = Math.max(0, Math.round(nowFn() - started));
+        if (!isCurrentMediaVersion(lookNumber, version)) return;
+
+        const cleanUrl = sanitizePageMediaUrl(url);
+        if (cleanUrl) {
+          await page.send('collageReady', { outfit: lookNumber, url: cleanUrl });
+          logFn(options.room, 'collage', { outfit: lookNumber, ms, ok: true });
+        } else {
+          logFn(options.room, 'collage', { outfit: lookNumber, ms, ok: false });
+        }
+      } catch {
+        const ms = Math.max(0, Math.round(nowFn() - started));
+        if (!isCurrentMediaVersion(lookNumber, version)) return;
+        logFn(options.room, 'collage', { outfit: lookNumber, ms, ok: false });
+      }
+    })();
+  }
+
+  function startBackgroundMediaForLook(outfit: Outfit): TryOnJob {
+    const lookNumber = outfit.number ?? 1;
+    const version = nextLookMediaVersion(lookNumber);
+    const tryOnJob = startTryOnForLook(outfit, version);
+    startCollageForLook(outfit, version);
+    return tryOnJob;
+  }
+
+  function startHighlightWalk(outfit: Outfit): void {
+    cancelWalk();
+    if (options.signal?.aborted || outfit.pieces.length === 0) return;
+    const lookNumber = outfit.number ?? 1;
+    const myWalkGen = walkGen;
+    const slots = outfit.pieces.map((p) => p.slot);
+    let idx = 0;
+
+    const scheduleNext = () => {
+      if (myWalkGen !== walkGen || options.signal?.aborted || idx >= slots.length) {
+        activeWalkTimer = null;
+        return;
+      }
+      const slot = slots[idx]!;
+      idx += 1;
+      activeWalkTimer = scheduleTimer(() => {
+        activeWalkTimer = null;
+        if (myWalkGen !== walkGen || options.signal?.aborted) return;
+        void page.send('highlight', { outfit: lookNumber, piece: slot }).then(() => {
+          scheduleNext();
+        });
+      }, walkIntervalMs);
+    };
+
+    scheduleNext();
+  }
+
+  async function waitForJobWithTimeout(
+    job: TryOnJob,
+    timeoutMs: number,
+  ): Promise<'settled' | 'timeout'> {
+    if (timeoutMs <= 0) return 'timeout';
+    return await new Promise<'settled' | 'timeout'>((resolve) => {
+      let done = false;
+      const timer = scheduleTimer(() => {
+        if (done) return;
+        done = true;
+        resolve('timeout');
+      }, timeoutMs);
+
+      void job.promise.then(() => {
+        if (done) return;
+        done = true;
+        clearTimeoutFn(timer);
+        activeTimers.delete(timer);
+        resolve('settled');
+      });
+    });
+  }
+
+  function resolveLook(explicitOutfit?: number): { lookNum: number; outfit: Outfit } | null {
+    const target = explicitOutfit ?? stateStore.get().pickedLook;
+    if (target === null || target === undefined) return null;
+    const outfit = outfitsByNumber.get(target);
+    if (!outfit) return null;
+    return { lookNum: target, outfit };
+  }
+
+  function availableLookHint(): string {
+    const nums = Array.from(outfitsByNumber.keys()).sort((a, b) => a - b);
+    if (nums.length === 0) {
+      return 'No outfits have been built yet. Call build_outfits first.';
+    }
+    return `Available looks are ${nums.join(', ')}. Ask which look they want or pick one first.`;
+  }
+
+  function currentBrief(): Brief {
+    const st = stateStore.get();
+    return {
+      gender: st.department ?? 'women',
+      occasion: st.occasion ?? '',
+      budget_usd: st.budget.given ?? 0,
+      ...(lastBriefNotes ? { notes: lastBriefNotes } : {}),
+      ...(st.ownPiece ? { own_piece: st.ownPiece } : {}),
+    };
+  }
 
   return {
     remember: llm.tool({
@@ -204,7 +807,10 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       parameters: z.object({
         fact: z.string().describe('Short fact to remember about the shopper'),
       }),
-      execute: wrapper.wrap('remember', async ({ fact }) => `Noted: ${fact}.`),
+      execute: wrapper.wrap('remember', async ({ fact }) => {
+        stateStore.dispatch({ type: 'add_fact', fact });
+        return `Remembered: ${fact.trim()}. Continue naturally.`;
+      }),
     }),
 
     set_department: llm.tool({
@@ -212,7 +818,11 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       parameters: z.object({
         department: z.enum(['men', 'women']).describe('Shopper department'),
       }),
-      execute: wrapper.wrap('set_department', async ({ department }) => `Department set to ${department}.`),
+      execute: wrapper.wrap('set_department', async ({ department }) => {
+        stateStore.dispatch({ type: 'set_department', department });
+        wrapper.invalidate('set_department');
+        return `Department set to ${department}. State your choice casually so they can correct you, then ask occasion and budget if still needed.`;
+      }),
     }),
 
     build_outfits: llm.tool({
@@ -223,9 +833,134 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         notes: z.string().optional().describe('Optional style, color, or fit notes'),
         own_piece: z.string().optional().describe('Optional piece the shopper already owns'),
       }),
-      execute: wrapper.wrap('build_outfits', async () => {
-        await waitSlow();
-        return loadFixtureSummary(options.fixtureUrl);
+      execute: wrapper.wrap('build_outfits', async ({ occasion, budget_usd, notes, own_piece }) => {
+        const department = stateStore.get().department;
+        if (!department) {
+          return 'Department is not set yet. Decide men or women yourself, call set_department first, then call build_outfits.';
+        }
+
+        const budgetCapped = budget_usd > MAX_BUDGET_USD;
+        const effectiveBudget = budgetCapped ? MAX_BUDGET_USD : budget_usd;
+        lastBriefNotes = notes;
+
+        stateStore.dispatch({
+          type: 'set_brief',
+          occasion,
+          budgetAsked: true,
+          budgetGiven: effectiveBudget,
+          ownPiece: own_piece ?? null,
+        });
+
+        const brief: Brief = {
+          gender: department,
+          occasion,
+          budget_usd: effectiveBudget,
+          ...(notes ? { notes } : {}),
+          ...(own_piece ? { own_piece } : {}),
+        };
+
+        cancelWalk();
+        const buildStarted = nowFn();
+        const subtitle = `${occasion} · ${formatPrice(effectiveBudget)} budget`;
+        const delivered = new Set<number>();
+        const pageShowPromises: Promise<PageActionReply>[] = [];
+        const shownOutfits: Outfit[] = [];
+
+        const handleOutfit = (rawOutfit: Outfit, index: number) => {
+          const lookNumber =
+            typeof rawOutfit.number === 'number' && Number.isFinite(rawOutfit.number)
+              ? rawOutfit.number
+              : index + 1;
+          if (delivered.has(lookNumber)) return;
+          delivered.add(lookNumber);
+
+          const numbered: Outfit = { ...rawOutfit, number: lookNumber };
+          const replace = shownOutfits.length === 0 && index === 0;
+          if (replace) {
+            outfitsByNumber.clear();
+            tryOnJobs.clear();
+          }
+          outfitsByNumber.set(lookNumber, numbered);
+          shownOutfits.push(numbered);
+
+          stateStore.dispatch({
+            type: 'set_looks',
+            looks: [outfitToStateLook(numbered, lookNumber)],
+            replace,
+          });
+
+          logFn(options.room, 'build_progress', {
+            index,
+            name: numbered.name,
+            total: numbered.total,
+            ms: Math.max(0, Math.round(nowFn() - buildStarted)),
+          });
+
+          pageShowPromises.push(
+            page.send('showOutfits', {
+              outfits: [numbered],
+              replace,
+              subtitle,
+            }),
+          );
+
+          startBackgroundMediaForLook(numbered);
+        };
+
+        const result = await buildOutfitsFn(brief, {
+          onOutfit: handleOutfit,
+          room: options.room,
+        });
+
+        for (const [idx, outfit] of (result.outfits ?? []).entries()) {
+          handleOutfit(outfit, idx);
+        }
+
+        const pageReplies = await Promise.all(pageShowPromises);
+        const pageConfirmed =
+          pageReplies.length > 0 && pageReplies.every((reply) => reply.ok === true);
+
+        logFn(options.room, 'build_done', {
+          source: result.source,
+          timing: result.timing,
+          problems: result.problems,
+        });
+        wrapper.invalidate('build_outfits');
+
+        const sorted = Array.from(outfitsByNumber.values()).sort(
+          (a, b) => (a.number ?? 0) - (b.number ?? 0),
+        );
+
+        const headerLines: string[] = [];
+        if (budgetCapped) {
+          headerLines.push(
+            `Budget was above $${MAX_BUDGET_USD} and was capped at $${MAX_BUDGET_USD}; mention the cap with attitude.`,
+          );
+        }
+        if (pageConfirmed) {
+          headerLines.push(
+            `Built ${sorted.length} looks and they are now on screen. Give one tight sentence per look and ask which catches their eye.`,
+          );
+        } else {
+          headerLines.push(
+            `Built ${sorted.length} looks, but the page did not confirm displaying them yet. Do not claim they are live on screen; mention loading lightly.`,
+          );
+        }
+
+        const lookLines = sorted.map((outfit) => {
+          const num = outfit.number ?? 1;
+          const piecesText = outfit.pieces
+            .map((p) => `${p.slot}: ${p.item.title} (${formatPrice(p.item.price)}, ${p.item.store})`)
+            .join('; ');
+          return `Look ${num} — ${outfit.name} (${formatPrice(outfit.total)}): ${outfit.difference} Pieces: ${piecesText}`;
+        });
+
+        const footerLines: string[] = [];
+        if (Array.isArray(result.problems) && result.problems.length > 0) {
+          footerLines.push(`Internal notes (do not read aloud): ${result.problems.join('; ')}`);
+        }
+
+        return [...headerLines, ...lookLines, ...footerLines].join('\n');
       }),
     }),
 
@@ -234,74 +969,260 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       parameters: z.object({
         outfit: outfitNumberSchema,
       }),
-      execute: wrapper.wrap('pick_outfit', async ({ outfit }) => `Highlighted look ${outfit} on screen.`),
+      execute: wrapper.wrap('pick_outfit', async ({ outfit: lookNumber }) => {
+        const outfit = outfitsByNumber.get(lookNumber);
+        if (!outfit) {
+          return `Look ${lookNumber} does not exist. ${availableLookHint()}`;
+        }
+
+        stateStore.dispatch({ type: 'pick_look', look: lookNumber });
+        wrapper.invalidate('pick_outfit');
+        const reply = await page.send('highlight', { outfit: lookNumber, piece: null });
+        startHighlightWalk(outfit);
+
+        const tryOnInfo = stateStore.get().tryOn[lookNumber];
+        let tryOnText = 'Try-on has not started yet.';
+        if (tryOnInfo?.status === 'ready') {
+          tryOnText = 'Try-on is ready to reveal.';
+        } else if (tryOnInfo?.status === 'rendering') {
+          tryOnText = 'Try-on is still rendering.';
+        } else if (tryOnInfo?.status === 'failed') {
+          tryOnText = 'Try-on failed for this look.';
+        }
+
+        const pieceLines = outfit.pieces.map(
+          (p) =>
+            `- ${p.slot}: ${p.item.title} (${formatPrice(p.item.price)}, ${p.item.store}) — ${p.why}`,
+        );
+
+        const statusLine = reply.ok
+          ? `Look ${lookNumber} — ${outfit.name} (${formatPrice(outfit.total)}) is highlighted on screen.`
+          : `Look ${lookNumber} — ${outfit.name} (${formatPrice(outfit.total)}) was selected, though the page did not confirm highlighting it.`;
+
+        return [
+          `${statusLine} ${tryOnText}`,
+          ...pieceLines,
+          'Walk through the pieces in four or five sentences using words from their titles, then ask if they want to see it on themselves.',
+        ].join('\n');
+      }),
     }),
 
     show_on_me: llm.tool({
-      description: 'Generate a virtual try-on of the chosen look (1, 2, or 3) on the shopper.',
+      description: 'Reveal a virtual try-on of the chosen look (defaults to the picked look) on the shopper.',
       parameters: z.object({
-        outfit: outfitNumberSchema,
+        outfit: outfitNumberSchema.optional(),
       }),
-      execute: wrapper.wrap('show_on_me', async ({ outfit }) => {
-        await waitSlow();
-        const snap = options.getSnapshot?.() ?? null;
-        if (snap) {
-          const ageSec = Math.max(0, Math.round((nowFn() - snap.at) / 1000));
-          return `Try-on for look ${outfit} is ready and shown on screen (snapshot: yes, ${ageSec} s old).`;
+      execute: wrapper.wrap('show_on_me', async ({ outfit: requestedOutfit }) => {
+        const resolved = resolveLook(requestedOutfit);
+        if (!resolved) {
+          return `No look selected to try on. ${availableLookHint()}`;
         }
-        return `Try-on for look ${outfit} is ready and shown on screen (snapshot: no).`;
+
+        const { lookNum, outfit } = resolved;
+        let job = tryOnJobs.get(lookNum);
+        let tryOnInfo = stateStore.get().tryOn[lookNum];
+
+        if (!tryOnInfo && !job) {
+          const version = nextLookMediaVersion(lookNum);
+          job = startTryOnForLook(outfit, version);
+          tryOnInfo = stateStore.get().tryOn[lookNum];
+        }
+
+        const currentSnap = options.getSnapshot?.() ?? null;
+        const noSnapshot = !(job?.hadSnapshot) && !currentSnap;
+        const snapNote = noSnapshot
+          ? ' No camera snapshot was available (camera may be off); mention that lightly if relevant.'
+          : '';
+
+        if (tryOnInfo?.status === 'rendering' && job) {
+          const outcome = await waitForJobWithTimeout(job, tryOnTimeoutMs);
+          if (outcome === 'timeout') {
+            return `The fitting room is jammed right now for Look ${lookNum} (${outfit.name}) and the try-on timed out. Keep it light and offer the flat-lay and individual pieces instead.${snapNote}`;
+          }
+          tryOnInfo = stateStore.get().tryOn[lookNum];
+        }
+
+        if (tryOnInfo?.status === 'ready' && tryOnInfo.url) {
+          const reply = await page.send('reveal', { outfit: lookNum, url: tryOnInfo.url });
+          if (reply.ok) {
+            stateStore.dispatch({ type: 'mark_revealed', look: lookNum });
+            return `Try-on for Look ${lookNum} (${outfit.name}) is now revealed on screen.${snapNote} React like a friend in a line or two, then ask for top, bottom, and shoe sizes together in one question.`;
+          }
+          return `Try-on for Look ${lookNum} is ready, but the page did not confirm revealing it.${snapNote}`;
+        }
+
+        return `The fitting room is jammed right now for Look ${lookNum} (${outfit.name}). Keep it light and offer the flat-lay and individual pieces instead.${snapNote}`;
       }),
     }),
 
     swap_piece: llm.tool({
-      description: 'Swap a single piece in one of the three looks for something matching the request.',
+      description: 'Swap a single piece in a look (defaults to the picked look) for something matching the request.',
       parameters: z.object({
-        outfit: outfitNumberSchema,
+        outfit: outfitNumberSchema.optional(),
         slot: slotSchema,
         request: z.string().describe('What the shopper wants instead for this piece'),
       }),
-      execute: wrapper.wrap('swap_piece', async ({ outfit, slot, request }) => {
-        await waitSlow();
-        return `Swapped the ${slot} in look ${outfit} to match "${request}".`;
-      }),
-    }),
+      execute: wrapper.wrap('swap_piece', async ({ outfit: requestedOutfit, slot, request }) => {
+        const resolved = resolveLook(requestedOutfit);
+        if (!resolved) {
+          return `No look selected for a swap. ${availableLookHint()}`;
+        }
 
-    add_to_bag: llm.tool({
-      description: 'Add a look to the shopping bag using a map of piece slot to size label.',
-      parameters: z.object({
-        outfit: outfitNumberSchema,
-        sizes: z
-          .record(z.string(), z.string())
-          .describe('Map of piece slot to size label, e.g. {"top": "M", "shoes": "10"}'),
-      }),
-      execute: wrapper.wrap('add_to_bag', async ({ outfit, sizes }) => {
-        const sizeSummary = Object.entries(sizes)
-          .map(([slot, size]) => `${slot}:${size}`)
-          .join(', ');
-        return `Added look ${outfit} to the bag (${sizeSummary || 'default sizes'}).`;
+        const { lookNum, outfit } = resolved;
+        const existingPiece = findPieceInOutfit(outfit, slot);
+        const targetSlot = existingPiece?.slot ?? slot;
+        const started = nowFn();
+
+        const swapResult = await swapPieceFn(outfit, targetSlot, request, currentBrief(), {
+          room: options.room,
+        });
+        const ms = Math.max(0, Math.round(nowFn() - started));
+
+        const updatedOutfit: Outfit = { ...swapResult.outfit, number: lookNum };
+        outfitsByNumber.set(lookNum, updatedOutfit);
+        stateStore.dispatch({
+          type: 'update_look',
+          look: outfitToStateLook(updatedOutfit, lookNum),
+        });
+
+        const reply = await page.send('updateOutfit', {
+          outfit: lookNum,
+          data: updatedOutfit,
+          slot: targetSlot,
+        });
+
+        startBackgroundMediaForLook(updatedOutfit);
+        wrapper.invalidate('swap_piece');
+
+        const newItem = swapResult.piece?.item;
+        logFn(options.room, 'swap', {
+          outfit: lookNum,
+          slot: targetSlot,
+          request,
+          ms,
+          title: newItem?.title ?? null,
+          price: newItem?.price ?? null,
+          store: newItem?.store ?? null,
+          total: updatedOutfit.total,
+          ...(swapResult.note ? { note: swapResult.note } : {}),
+        });
+
+        const pieceDesc = newItem
+          ? `${newItem.title} (${formatPrice(newItem.price)}, ${newItem.store})`
+          : targetSlot;
+        const screenStatus = reply.ok
+          ? `Updated Look ${lookNum} on screen`
+          : `Updated Look ${lookNum} (page did not confirm the visual update)`;
+        const notePart = swapResult.note ? ` Note: ${swapResult.note}` : '';
+
+        return `${screenStatus}: ${targetSlot} is now ${pieceDesc}. New look total: ${formatPrice(updatedOutfit.total)}.${notePart} Try-on and flat-lay are refreshing. Name only the replacement piece and new total.`;
       }),
     }),
 
     show_product: llm.tool({
-      description: 'Open product details for a single piece in one of the looks.',
+      description: 'Open product details for a single piece in a look (defaults to the picked look).',
       parameters: z.object({
-        outfit: outfitNumberSchema,
+        outfit: outfitNumberSchema.optional(),
         slot: slotSchema,
       }),
-      execute: wrapper.wrap(
-        'show_product',
-        async ({ outfit, slot }) => `Showing product details for look ${outfit} ${slot}.`,
-      ),
+      execute: wrapper.wrap('show_product', async ({ outfit: requestedOutfit, slot }) => {
+        const resolved = resolveLook(requestedOutfit);
+        if (!resolved) {
+          return `No look selected to inspect. ${availableLookHint()}`;
+        }
+
+        const { lookNum, outfit } = resolved;
+        const piece = findPieceInOutfit(outfit, slot);
+        if (!piece) {
+          const slots = outfit.pieces.map((p) => p.slot).join(', ');
+          return `Look ${lookNum} does not have a ${slot} piece. Available slots in Look ${lookNum}: ${slots}.`;
+        }
+
+        let images: string[] = [];
+        if (typeof mediaProductImagesFn === 'function') {
+          try {
+            const fetched = await mediaProductImagesFn(piece.item);
+            if (Array.isArray(fetched)) {
+              images = fetched
+                .map((u) => sanitizePageMediaUrl(u))
+                .filter((u): u is string => u !== null);
+            }
+          } catch {
+            images = [];
+          }
+        }
+        if (images.length === 0) {
+          try {
+            const storeMod = await loadStoreModuleFn();
+            if (
+              typeof storeMod?.productImages === 'function' &&
+              storeMod.productImages !== mediaProductImagesFn
+            ) {
+              const storeFetched = await storeMod.productImages(piece.item);
+              if (Array.isArray(storeFetched)) {
+                images = storeFetched
+                  .map((u) => sanitizePageMediaUrl(u))
+                  .filter((u): u is string => u !== null);
+              }
+            }
+          } catch {
+            images = [];
+          }
+        }
+        if (images.length === 0) {
+          const fallbackImg = sanitizePageMediaUrl(piece.item.image);
+          if (fallbackImg) {
+            images = [fallbackImg];
+          }
+        }
+
+        const details = deriveProductDetails(piece.item.description);
+        const reply = await page.send('showProduct', {
+          item: piece.item,
+          images,
+          slot: piece.slot,
+          why: piece.why,
+          sizes: piece.item.sizes,
+          details,
+          description: piece.item.description,
+        });
+
+        const sizesText =
+          piece.item.sizes.length > 0 ? piece.item.sizes.join(', ') : 'sizes not listed';
+        const descText = piece.item.description?.trim() || 'No store description provided.';
+        const statusLine = reply.ok
+          ? `Showing product page on screen for Look ${lookNum} ${piece.slot}:`
+          : `Loaded product details for Look ${lookNum} ${piece.slot} (page did not confirm opening the drawer):`;
+
+        return [
+          `${statusLine} ${piece.item.title} — ${formatPrice(piece.item.price)} at ${piece.item.store}.`,
+          `Sizes in stock: ${sizesText}.`,
+          `Description (state materials/construction strictly from this text only): ${descText}`,
+          `Why it works in the look: ${piece.why}`,
+        ].join('\n');
+      }),
     }),
 
     hide_product: llm.tool({
       description: 'Close the currently open product detail drawer.',
-      execute: wrapper.wrap('hide_product', async () => 'Closed the product view.'),
+      execute: wrapper.wrap('hide_product', async () => {
+        const reply = await page.send('hideProduct', {});
+        return reply.ok
+          ? 'Closed the product view on screen.'
+          : 'Tried to close the product view, though the page did not confirm.';
+      }),
     }),
 
     show_all_looks: llm.tool({
       description: 'Return the screen to showing all three looks side by side.',
-      execute: wrapper.wrap('show_all_looks', async () => 'Showing all three looks on screen.'),
+      execute: wrapper.wrap('show_all_looks', async () => {
+        cancelWalk();
+        stateStore.dispatch({ type: 'pick_look', look: null });
+        const reply = await page.send('showAll', {});
+        return reply.ok
+          ? 'Showing all looks side by side on screen.'
+          : 'Switched back to all looks, though the page did not confirm.';
+      }),
     }),
 
     search_products: llm.tool({
@@ -311,8 +1232,249 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         max_price: z.number().optional().describe('Optional maximum price in US dollars'),
       }),
       execute: wrapper.wrap('search_products', async ({ query, max_price }) => {
-        const cap = max_price !== undefined ? ` under $${max_price}` : '';
-        return `Found matching products for "${query}"${cap} and displayed the results.`;
+        let searchFn = options.deps?.searchProducts;
+        if (!searchFn) {
+          const storeMod = await loadStoreModuleFn();
+          if (typeof storeMod?.searchMixed === 'function') {
+            searchFn = storeMod.searchMixed;
+          } else if (typeof storeMod?.search === 'function') {
+            searchFn = storeMod.search;
+          }
+        }
+
+        if (!searchFn) {
+          return 'Standalone product search is not available yet. Steer back to the curated looks or offer to swap a piece in one of them.';
+        }
+
+        const gender: Gender = stateStore.get().department ?? 'women';
+        const searchOpts: SearchOpts = { limit: 8 };
+        if (max_price !== undefined) {
+          searchOpts.maxPrice = max_price;
+        }
+
+        const res = await searchFn(query, gender, searchOpts);
+        const items = Array.isArray(res?.items) ? res.items : [];
+        const reply = await page.send('showSearch', { query, items });
+
+        if (items.length === 0) {
+          return `Nothing in stock matched "${query}"${max_price !== undefined ? ` under ${formatPrice(max_price)}` : ''}. Steer back to the curated looks.`;
+        }
+
+        const list = items
+          .slice(0, 8)
+          .map((item) => `${item.title} (${formatPrice(item.price)}, ${item.store})`)
+          .join('; ');
+        const screenNote = reply.ok
+          ? `Shown ${items.length} results for "${query}" on screen:`
+          : `Found ${items.length} results for "${query}" (page did not confirm displaying them):`;
+
+        return `${screenNote} ${list}`;
+      }),
+    }),
+
+    add_to_bag: llm.tool({
+      description: 'Add a look (defaults to the picked look) to the shopping bag using a map of piece slot to size label. Carts only, never checkout or payment.',
+      parameters: z.object({
+        outfit: outfitNumberSchema.optional(),
+        sizes: z
+          .record(z.string(), z.string())
+          .describe('Map of piece slot to size label, e.g. {"top": "M", "shoes": "10"}'),
+      }),
+      execute: wrapper.wrap('add_to_bag', async ({ outfit: requestedOutfit, sizes }) => {
+        const resolved = resolveLook(requestedOutfit);
+        if (!resolved) {
+          return `NOT DONE: No look selected to add to the bag. ${availableLookHint()}`;
+        }
+
+        const { lookNum, outfit } = resolved;
+        if (sizes && Object.keys(sizes).length > 0) {
+          stateStore.dispatch({ type: 'merge_sizes', sizes });
+        }
+
+        const rememberedSizes = stateStore.get().sizes;
+        const missingSlots: string[] = [];
+        const resolvedSizes: Record<string, string> = { ...rememberedSizes };
+
+        for (const piece of outfit.pieces) {
+          const slotLower = piece.slot.toLowerCase();
+          const slotNorm = normalizeSlotKey(piece.slot);
+          const heard =
+            rememberedSizes[slotLower] ??
+            rememberedSizes[slotNorm] ??
+            (slotNorm === 'dress' || slotNorm === 'layer' ? rememberedSizes.top : undefined);
+
+          if (heard) {
+            resolvedSizes[slotLower] = heard;
+          }
+
+          if (Array.isArray(piece.item.sizes) && piece.item.sizes.length > 1 && !heard) {
+            if (!missingSlots.includes(piece.slot)) {
+              missingSlots.push(piece.slot);
+            }
+          }
+        }
+
+        if (missingSlots.length > 0) {
+          return `NOT DONE: Still need sizes for: ${missingSlots.join(', ')}. Ask for just those in one question, then call add_to_bag again.`;
+        }
+
+        const dedupeKey = stableStringify({
+          outfit: lookNum,
+          pieces: outfit.pieces.map((p) => ({
+            slot: p.slot,
+            id: p.item.id,
+            variant_id: p.item.variant_id,
+            size: resolvedSizes[p.slot.toLowerCase()] ?? null,
+          })),
+        });
+
+        const earlier = baggedResults.get(dedupeKey);
+        if (earlier) {
+          return `Already in the bag. ${earlier}`;
+        }
+
+        let addToBagFn = options.deps?.addToBag;
+        let usedMock = false;
+        let storeImportFailed = false;
+        if (!addToBagFn) {
+          const storeMod = await loadStoreModuleFn();
+          if (storeMod === null) {
+            storeImportFailed = true;
+          } else if (typeof storeMod.addToBag === 'function') {
+            addToBagFn = storeMod.addToBag;
+          }
+        }
+
+        const gender: Gender = stateStore.get().department ?? 'women';
+        let bagOut: BagOut;
+        if (addToBagFn) {
+          bagOut = await addToBagFn(outfit, resolvedSizes, gender);
+        } else if (storeImportFailed) {
+          usedMock = true;
+          bagOut = mockAddToBag(outfit, resolvedSizes, gender);
+        } else {
+          return 'NOT DONE: Store shopping bag is not available right now. Do not claim the bag is ready.';
+        }
+
+        const bagPayload = bagOutToPagePayload(bagOut, outfit, resolvedSizes);
+
+        const notAdded: BagNotAdded[] = [];
+        for (const store of bagPayload.stores) {
+          for (const line of store.not_added) {
+            notAdded.push({
+              store: store.store,
+              title: line.title,
+              reason: line.reason ?? 'unavailable',
+            });
+          }
+        }
+
+        const rawSummary = typeof bagOut.summary === 'string' ? bagOut.summary.trim() : '';
+        const isNotDoneSummary = /^NOT DONE:/i.test(rawSummary);
+
+        if (!usedMock && isNotDoneSummary) {
+          const afterPrefix = rawSummary.replace(/^NOT DONE:\s*/i, '').trim();
+          const notAddedLines = bagPayload.stores.flatMap((store) =>
+            store.not_added.map((line) => ({
+              title: line.title,
+              slot: line.slot,
+              reason: line.reason ?? '',
+            })),
+          );
+          const missingSizeLines = notAddedLines.filter((l) => /size/i.test(l.reason));
+          const targetLines = missingSizeLines.length > 0 ? missingSizeLines : notAddedLines;
+          const summaryMentionsAll =
+            afterPrefix.length > 0 &&
+            (targetLines.length === 0 ||
+              targetLines.every((l) =>
+                afterPrefix.toLowerCase().includes(l.title.toLowerCase()),
+              ));
+
+          if (summaryMentionsAll) {
+            const sentence = afterPrefix.endsWith('.') ? afterPrefix : `${afterPrefix}.`;
+            return `NOT DONE: ${sentence} Ask for just those in one question, then call add_to_bag again.`;
+          }
+          if (targetLines.length > 0) {
+            const pieceList = targetLines
+              .map((l) => (l.slot ? `${l.title} (${l.slot})` : l.title))
+              .join(', ');
+            return `NOT DONE: Still need sizes for: ${pieceList}. Ask for just those in one question, then call add_to_bag again.`;
+          }
+          return `NOT DONE: ${afterPrefix || 'Some pieces still need a size.'} Ask for the missing sizes in one question, then call add_to_bag again.`;
+        }
+
+        if (!usedMock && !hasRealCart(bagOut)) {
+          const skippedSummaries = notAdded.map(
+            (na) => `${na.title} at ${na.store} (${na.reason})`,
+          );
+          if (skippedSummaries.length > 0) {
+            return `NOT DONE: No store cart could be created. Not added: ${skippedSummaries.join('; ')}. Suggest the nearest size or a swap.`;
+          }
+          const reason = rawSummary ? ` ${rawSummary}` : '';
+          return `NOT DONE: No store cart could be created.${reason} Suggest trying another size or swapping a piece.`;
+        }
+
+        const reply = await page.send('bagReady', bagPayload);
+
+        stateStore.dispatch({
+          type: 'set_bag',
+          bag: {
+            stores: bagPayload.stores,
+            total: bagPayload.total,
+            links: bagPayload.links,
+            notAdded,
+          },
+        });
+
+        logFn(options.room, 'bag', {
+          outfit: lookNum,
+          stores: bagPayload.stores.map((s) => ({
+            store: s.store,
+            added: s.added.length,
+            not_added: s.not_added.length,
+            subtotal: s.subtotal,
+          })),
+          total: bagPayload.total,
+          not_added: notAdded,
+          mocked: usedMock,
+        });
+
+        const storeSummaries = bagPayload.stores
+          .filter((s) => s.added.length > 0)
+          .map((s) => {
+            const items = s.added
+              .map((line) => `${line.title}${line.size ? ` (size ${line.size})` : ''}`)
+              .join(', ');
+            return `${s.store}: ${items}`;
+          });
+
+        const skippedSummaries = notAdded.map(
+          (na) => `${na.title} at ${na.store} (${na.reason})`,
+        );
+
+        const lines: string[] = [];
+        lines.push(
+          reply.ok
+            ? `Bag is ready on screen for Look ${lookNum} (${outfit.name}).`
+            : `Bag built for Look ${lookNum} (${outfit.name}), though the page did not confirm opening it.`,
+        );
+        if (storeSummaries.length > 0) {
+          lines.push(`Added: ${storeSummaries.join(' | ')}.`);
+        } else {
+          lines.push('No items could be added to any store cart.');
+        }
+        if (skippedSummaries.length > 0) {
+          lines.push(`Not added: ${skippedSummaries.join('; ')}. Suggest the nearest size or a swap.`);
+        }
+        lines.push(`Bag total: ${formatPrice(bagPayload.total)}.`);
+        if (usedMock || /mock/i.test(bagOut.summary)) {
+          lines.push(`Note: ${bagOut.summary}`);
+        }
+        lines.push('Read back what made it into the bag and remind them checkout happens directly with each store.');
+
+        const resultText = lines.join(' ');
+        baggedResults.set(dedupeKey, resultText);
+        return resultText;
       }),
     }),
   };
