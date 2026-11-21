@@ -1324,152 +1324,6 @@ describe('Storefront, product, search, and looks API', () => {
   });
 
   it('serves /api/looks across library present, missing, throwing, and slow fallback, plus occasion queries', async () => {
-    const seenCalls: Array<{ gender: Gender; opts?: { limit?: number; occasion?: string } }> = [];
-
-    // 1. Export present (with and without occasion, empty occasion match, and bad_occasion 400)
-    await withServer(
-      {
-        loadLibrary: async () => ({
-          libraryLooks: async (gender: Gender, opts?: { limit?: number; occasion?: string }) => {
-            seenCalls.push({ gender, opts });
-            if (opts?.occasion === 'nonsense xyz') {
-              return [];
-            }
-            return [
-              sampleOutfit(gender),
-              { ...sampleOutfit(gender), number: 2, name: `Second ${opts?.limit ?? 6}` },
-            ];
-          },
-        }),
-      },
-      async (url) => {
-        const res = await fetch(`${url}/api/looks?department=women&limit=1`);
-        assert.equal(res.status, 200);
-        assert.equal(res.headers.get('cache-control'), 'no-store');
-        const body = (await res.json()) as {
-          department: string;
-          occasion: string | null;
-          looks: Outfit[];
-          source: string;
-        };
-        assert.equal(body.department, 'women');
-        assert.equal(body.occasion, null);
-        assert.equal(body.source, 'library');
-        assert.equal(body.looks.length, 1);
-
-        // Occasion passed through and echoed back
-        const occRes = await fetch(
-          `${url}/api/looks?department=men&limit=3&occasion=%20rooftop%20birthday%20`,
-        );
-        assert.equal(occRes.status, 200);
-        const occBody = (await occRes.json()) as {
-          department: string;
-          occasion: string | null;
-          looks: Outfit[];
-          source: string;
-        };
-        assert.equal(occBody.department, 'men');
-        assert.equal(occBody.occasion, 'rooftop birthday');
-        assert.equal(occBody.source, 'library');
-        assert.equal(occBody.looks.length, 2);
-        assert.deepEqual(seenCalls[1], {
-          gender: 'men',
-          opts: { limit: 3, occasion: 'rooftop birthday' },
-        });
-
-        // Empty match for an occasion stays empty with source: 'library' (NO fixture fallback)
-        const emptyOccRes = await fetch(
-          `${url}/api/looks?department=men&occasion=${encodeURIComponent('nonsense xyz')}`,
-        );
-        assert.equal(emptyOccRes.status, 200);
-        const emptyOccBody = (await emptyOccRes.json()) as {
-          department: string;
-          occasion: string | null;
-          looks: Outfit[];
-          source: string;
-        };
-        assert.equal(emptyOccBody.department, 'men');
-        assert.equal(emptyOccBody.occasion, 'nonsense xyz');
-        assert.equal(emptyOccBody.source, 'library');
-        assert.deepEqual(emptyOccBody.looks, []);
-
-        // Over-120-character occasion -> 400 bad_occasion
-        const longOcc = await fetch(`${url}/api/looks?occasion=${'a'.repeat(121)}`);
-        assert.equal(longOcc.status, 400);
-        assert.equal(longOcc.headers.get('cache-control'), 'no-store');
-        assert.deepEqual(await longOcc.json(), { error: 'bad_occasion' });
-      },
-    );
-
-    // 2. Export missing -> fixture fallback (filters to men; falls back to all when none match women)
-    await withServer(
-      {
-        loadLibrary: async () => null,
-      },
-      async (url) => {
-        const menRes = await fetch(`${url}/api/looks?department=men&limit=2`);
-        assert.equal(menRes.status, 200);
-        const menBody = (await menRes.json()) as {
-          department: string;
-          occasion: string | null;
-          looks: Outfit[];
-          source: string;
-        };
-        assert.equal(menBody.department, 'men');
-        assert.equal(menBody.occasion, null);
-        assert.equal(menBody.source, 'fixture');
-        assert.equal(menBody.looks.length, 2);
-
-        const womenRes = await fetch(`${url}/api/looks?department=women&limit=6`);
-        assert.equal(womenRes.status, 200);
-        const womenBody = (await womenRes.json()) as {
-          department: string;
-          occasion: string | null;
-          looks: Outfit[];
-          source: string;
-        };
-        assert.equal(womenBody.department, 'women');
-        assert.equal(womenBody.occasion, null);
-        assert.equal(womenBody.source, 'fixture');
-        assert.ok(womenBody.looks.length > 0);
-      },
-    );
-
-    // 3. Export throws -> fixture fallback when no occasion, empty library when occasion given
-    await withServer(
-      {
-        loadLibrary: async () => ({
-          libraryLooks: async () => {
-            throw new Error('library crashed');
-          },
-        }),
-      },
-      async (url) => {
-        const res = await fetch(`${url}/api/looks?department=men`);
-        assert.equal(res.status, 200);
-        const body = (await res.json()) as {
-          occasion: string | null;
-          source: string;
-          looks: Outfit[];
-        };
-        assert.equal(body.occasion, null);
-        assert.equal(body.source, 'fixture');
-        assert.ok(body.looks.length > 0);
-
-        const occThrow = await fetch(`${url}/api/looks?department=men&occasion=beach`);
-        assert.equal(occThrow.status, 200);
-        const occThrowBody = (await occThrow.json()) as {
-          occasion: string | null;
-          source: string;
-          looks: Outfit[];
-        };
-        assert.equal(occThrowBody.occasion, 'beach');
-        assert.equal(occThrowBody.source, 'library');
-        assert.deepEqual(occThrowBody.looks, []);
-      },
-    );
-
-    // 4. GET /api/occasions across libraryOccasions present, sets.json fallback (missing/throws), and none
     const tmpSetsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alice-sets-'));
     const tmpSetsFile = path.join(tmpSetsDir, 'sets.json');
     fs.writeFileSync(
@@ -1493,7 +1347,188 @@ describe('Storefront, product, search, and looks API', () => {
       }),
     );
 
+    const seenCalls: Array<{ gender: Gender; opts?: { limit?: number; occasion?: string } }> = [];
+
     try {
+      // 1. Export present (no occasion, known keys/slugs, unknown text blocked, and bad_occasion 400)
+      await withServer(
+        {
+          env: { ALICE_LIBRARY_FILE: tmpSetsFile },
+          loadLibrary: async () => ({
+            libraryLooks: async (gender: Gender, opts?: { limit?: number; occasion?: string }) => {
+              seenCalls.push({ gender, opts });
+              return [
+                sampleOutfit(gender),
+                { ...sampleOutfit(gender), number: 2, name: `Second ${opts?.limit ?? 6}` },
+              ];
+            },
+          }),
+        },
+        async (url) => {
+          const res = await fetch(`${url}/api/looks?department=women&limit=1`);
+          assert.equal(res.status, 200);
+          assert.equal(res.headers.get('cache-control'), 'no-store');
+          const body = (await res.json()) as {
+            department: string;
+            occasion: string | null;
+            looks: Outfit[];
+            source: string;
+          };
+          assert.equal(body.department, 'women');
+          assert.equal(body.occasion, null);
+          assert.equal(body.source, 'library');
+          assert.equal(body.looks.length, 1);
+
+          // Known raw key, uppercase key, and slug all pass the set key ('rooftop-birthday')
+          for (const rawParam of [
+            ' rooftop-birthday ',
+            'ROOFTOP-BIRTHDAY',
+            'a-friends-rooftop-birthday-party',
+          ]) {
+            const beforeCalls = seenCalls.length;
+            const occRes = await fetch(
+              `${url}/api/looks?department=men&limit=3&occasion=${encodeURIComponent(rawParam)}`,
+            );
+            assert.equal(occRes.status, 200);
+            assert.equal(occRes.headers.get('cache-control'), 'no-store');
+            const occBody = (await occRes.json()) as {
+              department: string;
+              occasion: string | null;
+              looks: Outfit[];
+              source: string;
+            };
+            assert.equal(occBody.department, 'men');
+            assert.equal(occBody.occasion, rawParam.trim());
+            assert.equal(occBody.source, 'library');
+            assert.equal(occBody.looks.length, 2);
+            assert.equal(seenCalls.length, beforeCalls + 1);
+            assert.deepEqual(seenCalls[seenCalls.length - 1], {
+              gender: 'men',
+              opts: { limit: 3, occasion: 'rooftop-birthday' },
+            });
+          }
+
+          // Unknown text returns empty library answer WITHOUT calling libraryLooks
+          for (const unknownText of ['nonsense xyz', 'rooftop birthday', 'beach']) {
+            const callsBeforeUnknown = seenCalls.length;
+            const emptyOccRes = await fetch(
+              `${url}/api/looks?department=men&occasion=${encodeURIComponent(unknownText)}`,
+            );
+            assert.equal(emptyOccRes.status, 200);
+            assert.equal(emptyOccRes.headers.get('cache-control'), 'no-store');
+            const emptyOccBody = (await emptyOccRes.json()) as {
+              department: string;
+              occasion: string | null;
+              looks: Outfit[];
+              source: string;
+            };
+            assert.equal(emptyOccBody.department, 'men');
+            assert.equal(emptyOccBody.occasion, unknownText);
+            assert.equal(emptyOccBody.source, 'library');
+            assert.deepEqual(emptyOccBody.looks, []);
+            assert.equal(
+              seenCalls.length,
+              callsBeforeUnknown,
+              `libraryLooks must not be called for unknown occasion "${unknownText}"`,
+            );
+          }
+
+          // Over-120-character occasion -> 400 bad_occasion
+          const longOcc = await fetch(`${url}/api/looks?occasion=${'a'.repeat(121)}`);
+          assert.equal(longOcc.status, 400);
+          assert.equal(longOcc.headers.get('cache-control'), 'no-store');
+          assert.deepEqual(await longOcc.json(), { error: 'bad_occasion' });
+        },
+      );
+
+      // 2. Export missing -> fixture fallback when no occasion; empty library for a known key
+      await withServer(
+        {
+          env: { ALICE_LIBRARY_FILE: tmpSetsFile },
+          loadLibrary: async () => null,
+        },
+        async (url) => {
+          const menRes = await fetch(`${url}/api/looks?department=men&limit=2`);
+          assert.equal(menRes.status, 200);
+          const menBody = (await menRes.json()) as {
+            department: string;
+            occasion: string | null;
+            looks: Outfit[];
+            source: string;
+          };
+          assert.equal(menBody.department, 'men');
+          assert.equal(menBody.occasion, null);
+          assert.equal(menBody.source, 'fixture');
+          assert.equal(menBody.looks.length, 2);
+
+          const womenRes = await fetch(`${url}/api/looks?department=women&limit=6`);
+          assert.equal(womenRes.status, 200);
+          const womenBody = (await womenRes.json()) as {
+            department: string;
+            occasion: string | null;
+            looks: Outfit[];
+            source: string;
+          };
+          assert.equal(womenBody.department, 'women');
+          assert.equal(womenBody.occasion, null);
+          assert.equal(womenBody.source, 'fixture');
+          assert.ok(womenBody.looks.length > 0);
+
+          const knownMissing = await fetch(
+            `${url}/api/looks?department=men&occasion=rooftop-birthday`,
+          );
+          assert.equal(knownMissing.status, 200);
+          assert.deepEqual(await knownMissing.json(), {
+            department: 'men',
+            occasion: 'rooftop-birthday',
+            looks: [],
+            source: 'library',
+          });
+        },
+      );
+
+      // 3. Export throws -> fixture fallback when no occasion, empty library when known key given
+      let throwCalls = 0;
+      await withServer(
+        {
+          env: { ALICE_LIBRARY_FILE: tmpSetsFile },
+          loadLibrary: async () => ({
+            libraryLooks: async () => {
+              throwCalls += 1;
+              throw new Error('library crashed');
+            },
+          }),
+        },
+        async (url) => {
+          const res = await fetch(`${url}/api/looks?department=men`);
+          assert.equal(res.status, 200);
+          const body = (await res.json()) as {
+            occasion: string | null;
+            source: string;
+            looks: Outfit[];
+          };
+          assert.equal(body.occasion, null);
+          assert.equal(body.source, 'fixture');
+          assert.ok(body.looks.length > 0);
+
+          const beforeThrow = throwCalls;
+          const occThrow = await fetch(
+            `${url}/api/looks?department=men&occasion=rooftop-birthday`,
+          );
+          assert.equal(occThrow.status, 200);
+          const occThrowBody = (await occThrow.json()) as {
+            occasion: string | null;
+            source: string;
+            looks: Outfit[];
+          };
+          assert.equal(occThrowBody.occasion, 'rooftop-birthday');
+          assert.equal(occThrowBody.source, 'library');
+          assert.deepEqual(occThrowBody.looks, []);
+          assert.equal(throwCalls, beforeThrow + 1);
+        },
+      );
+
+      // 4. GET /api/occasions across libraryOccasions present, sets.json fallback (missing/throws), and none
       await withServer(
         {
           env: { ALICE_LIBRARY_FILE: tmpSetsFile },
@@ -1549,7 +1584,7 @@ describe('Storefront, product, search, and looks API', () => {
       );
 
       // Missing export -> falls back to sets.json with source: 'sets' and slug/capitalised label;
-      // and /api/looks?occasion=<slug> maps the slug back to the occasion text before calling libraryLooks.
+      // and /api/looks?occasion=<slug> maps the slug to the set's rawKey before calling libraryLooks.
       const mappedSeen: Array<{ gender: Gender; occasion?: string }> = [];
       await withServer(
         {
@@ -1595,7 +1630,7 @@ describe('Storefront, product, search, and looks API', () => {
           assert.equal(looksBody.looks.length, 1);
           assert.deepEqual(mappedSeen[0], {
             gender: 'men',
-            occasion: "a friend's rooftop birthday party",
+            occasion: 'rooftop-birthday',
           });
         },
       );
@@ -1641,6 +1676,129 @@ describe('Storefront, product, search, and looks API', () => {
             occasions: [],
             source: 'none',
           });
+        },
+      );
+
+      // 5. Memoisation of sets.json reloads when mtime or size changes
+      const memoSeen: Array<string | undefined> = [];
+      await withServer(
+        {
+          env: { ALICE_LIBRARY_FILE: tmpSetsFile },
+          loadLibrary: async () => ({
+            libraryLooks: async (gender: Gender, opts?: { occasion?: string }) => {
+              memoSeen.push(opts?.occasion);
+              return [sampleOutfit(gender)];
+            },
+          }),
+        },
+        async (url) => {
+          const first = await fetch(`${url}/api/looks?department=men&occasion=rooftop-birthday`);
+          assert.equal(first.status, 200);
+          assert.equal(((await first.json()) as { looks: Outfit[] }).looks.length, 1);
+
+          const second = await fetch(`${url}/api/looks?department=men&occasion=rooftop-birthday`);
+          assert.equal(second.status, 200);
+          assert.equal(((await second.json()) as { looks: Outfit[] }).looks.length, 1);
+          assert.deepEqual(memoSeen, ['rooftop-birthday', 'rooftop-birthday']);
+
+          // Rewrite sets file with a different key (and bump mtime + change size)
+          fs.writeFileSync(
+            tmpSetsFile,
+            JSON.stringify({
+              version: 1,
+              sets: [
+                {
+                  key: 'gallery-opening-night',
+                  gender: 'men',
+                  occasion: 'a late evening contemporary art gallery opening',
+                  outfits: [sampleOutfit('men')],
+                },
+                {
+                  gender: 'men',
+                  occasion: 'casual coffee walk',
+                  outfits: [sampleOutfit('men')],
+                },
+              ],
+            }),
+          );
+          const future = new Date(Date.now() + 2000);
+          fs.utimesSync(tmpSetsFile, future, future);
+
+          const newKeyRes = await fetch(
+            `${url}/api/looks?department=men&occasion=gallery-opening-night`,
+          );
+          assert.equal(newKeyRes.status, 200);
+          assert.equal(((await newKeyRes.json()) as { looks: Outfit[] }).looks.length, 1);
+          assert.equal(memoSeen[memoSeen.length - 1], 'gallery-opening-night');
+
+          // Entry without rawKey falls back to passing matched.occasion
+          const noRawKeyRes = await fetch(
+            `${url}/api/looks?department=men&occasion=casual-coffee-walk`,
+          );
+          assert.equal(noRawKeyRes.status, 200);
+          assert.equal(((await noRawKeyRes.json()) as { looks: Outfit[] }).looks.length, 1);
+          assert.equal(memoSeen[memoSeen.length - 1], 'casual coffee walk');
+
+          // Old key is now unknown and must not invoke libraryLooks
+          const countBeforeOld = memoSeen.length;
+          const oldKeyRes = await fetch(
+            `${url}/api/looks?department=men&occasion=rooftop-birthday`,
+          );
+          assert.equal(oldKeyRes.status, 200);
+          assert.deepEqual(await oldKeyRes.json(), {
+            department: 'men',
+            occasion: 'rooftop-birthday',
+            looks: [],
+            source: 'library',
+          });
+          assert.equal(memoSeen.length, countBeforeOld);
+        },
+      );
+
+      // 6. In-flight sharing deduplicates concurrent identical /api/looks calls without caching results
+      let inFlightCalls = 0;
+      await withServer(
+        {
+          env: { ALICE_LIBRARY_FILE: tmpSetsFile },
+          loadLibrary: async () => ({
+            libraryLooks: async (gender: Gender) => {
+              inFlightCalls += 1;
+              const callNum = inFlightCalls;
+              await new Promise((resolve) => setTimeout(resolve, 150));
+              return [{ ...sampleOutfit(gender), name: `Call ${callNum}` }];
+            },
+          }),
+        },
+        async (url) => {
+          const responses = await Promise.all(
+            Array.from({ length: 5 }, () =>
+              fetch(`${url}/api/looks?department=men&occasion=gallery-opening-night`),
+            ),
+          );
+          const bodies = (await Promise.all(responses.map((r) => r.json()))) as Array<{
+            department: string;
+            occasion: string;
+            looks: Outfit[];
+            source: string;
+          }>;
+          for (const res of responses) {
+            assert.equal(res.status, 200);
+          }
+          assert.equal(inFlightCalls, 1);
+          for (const b of bodies) {
+            assert.equal(b.source, 'library');
+            assert.deepEqual(b.looks, bodies[0].looks);
+            assert.equal(b.looks[0].name, 'Call 1');
+          }
+
+          // A 6th request after the batch settles starts a fresh libraryLooks call (nothing cached)
+          const sixth = await fetch(
+            `${url}/api/looks?department=men&occasion=gallery-opening-night`,
+          );
+          assert.equal(sixth.status, 200);
+          const sixthBody = (await sixth.json()) as { looks: Outfit[] };
+          assert.equal(inFlightCalls, 2);
+          assert.equal(sixthBody.looks[0].name, 'Call 2');
         },
       );
     } finally {
