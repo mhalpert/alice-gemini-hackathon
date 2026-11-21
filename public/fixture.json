@@ -1,0 +1,340 @@
+{
+  "note": "Development fixture for the call page. Real products fetched from the stores’ catalog on 2026-11-21; prices and stock will drift.",
+  "brief": {
+    "gender": "men",
+    "occasion": "a friend's rooftop birthday",
+    "budget_usd": 150
+  },
+  "outfits": [
+    {
+      "number": 1,
+      "name": "Skyline Knit",
+      "difference": "The polished one: a knit polo and dark trousers that read dressed-up without a jacket.",
+      "story": "A knit polo keeps it sharp but relaxed for a rooftop. Dark trousers and clean white sneakers hold the line, and the watch adds one glint when the sun drops.",
+      "pieces": [
+        {
+          "slot": "top",
+          "why": "The knit texture does the work a blazer would.",
+          "item": {
+            "id": "gid://shopify/p/47DOH4caBkTfa9sEOiKt8y",
+            "variant_id": "gid://shopify/ProductVariant/39274334290044",
+            "title": "Kirk Knit Short Sleeve Polo - Taupe/combo",
+            "price": 15,
+            "url": "https://www.fashionnova.com/products/kirk-knit-short-sleeve-polo-fncolorname-taupe-combo?_gsid=nWQ1BfkbYiyH&utm_source=shopify&utm_medium=catalog",
+            "image": "https://cdn.shopify.com/s/files/1/0293/9277/files/ZDF01K410057_Taupe_combo_JR_V1.jpg",
+            "store": "Fashion Nova",
+            "store_domain": "fnova.myshopify.com",
+            "rating": 4.9,
+            "rating_count": 43,
+            "sizes": [
+              "Small (S)",
+              "Medium (M)",
+              "Large (L)",
+              "Extra large (XL)",
+              "Double extra large (XXL)",
+              "Triple extra large (XXXL)"
+            ],
+            "variants_by_size": {},
+            "description": "Available In Taupe/combo. Fold Down Collar Short Sleeve Stripe Detail 100% Cotton Imported",
+            "department": "men"
+          }
+        },
+        {
+          "slot": "bottom",
+          "why": "A dark, clean leg keeps the polo looking intentional.",
+          "item": {
+            "id": "gid://shopify/p/HFJTajxrEKfcipAwkOBe",
+            "variant_id": "gid://shopify/ProductVariant/42506889232470",
+            "title": "Relaxed Fit Chino | Black",
+            "price": 38,
+            "url": "https://www.everlane.com/products/mens-relaxed-fit-chino-black?variant=42506889232470&_gsid=eMHM73FmWBwu&utm_source=shopify&utm_medium=catalog",
+            "image": "https://cdn.shopify.com/s/files/1/0623/7916/3734/files/eb782a09_ffd5.jpg",
+            "store": "Everlane",
+            "store_domain": "m34kzg-ke.myshopify.com",
+            "rating": 3.7,
+            "rating_count": 10,
+            "sizes": [],
+            "variants_by_size": {},
+            "description": "The Relaxed Fit Chino takes cues from vintage officer trousers and gives them a modern reboot: relaxed up top, straight through the leg. Cut from breathable organic cotton twill and crafted with comfort stretch, they’re built for movement, made for whatever’s on your calendar (or not on it). Clean o",
+            "department": "men"
+          }
+        },
+        {
+          "slot": "shoes",
+          "why": "White sneakers keep it easy for standing all night.",
+          "item": {
+            "id": "gid://shopify/p/5Qh2nobbBayE1bOKnbG9n4",
+            "variant_id": "gid://shopify/ProductVariant/39311234433148",
+            "title": "Minimal Faux Leather Low Top Sneaker - White",
+            "price": 27.99,
+            "url": "https://www.fashionnova.com/products/minimal-faux-leather-low-top-sneaker-fncolorname-white?_gsid=pfe7qWRXPVee&utm_source=shopify&utm_medium=catalog",
+            "image": "https://cdn.shopify.com/s/files/1/0293/9277/files/F2606749_White_SL_V2.jpg",
+            "store": "Fashion Nova",
+            "store_domain": "fnova.myshopify.com",
+            "rating": 5,
+            "rating_count": 6,
+            "sizes": [
+              "8",
+              "9",
+              "10",
+              "11",
+              "12"
+            ],
+            "variants_by_size": {},
+            "description": "Available In White. Low Top Sneaker Lace Up Closure 100% Polyurethane Imported",
+            "department": "men"
+          }
+        },
+        {
+          "slot": "accessory",
+          "why": "One metal accent, nothing louder.",
+          "item": {
+            "id": "gid://shopify/p/UwdSvo67Z1r7ENtY11QrF",
+            "variant_id": "gid://shopify/ProductVariant/12192214712444",
+            "title": "Concord Watch - Silver",
+            "price": 23.99,
+            "url": "https://www.fashionnova.com/products/concord-watch-fncolorname-silver?_gsid=YeGtGKR2q6De&utm_source=shopify&utm_medium=catalog",
+            "image": "https://cdn.shopify.com/s/files/1/0293/9277/products/04-14-22Studio2_KJ_KP_15-40-45_112_8832MB_Silver_0948_SG.jpg",
+            "store": "Fashion Nova",
+            "store_domain": "fnova.myshopify.com",
+            "rating": 4.1,
+            "rating_count": 101,
+            "sizes": [
+              "OS"
+            ],
+            "variants_by_size": {},
+            "description": "Available In Silver. Pave Band Rhinestone Detail Cronos Style Dial Imported",
+            "department": "men"
+          }
+        }
+      ],
+      "total": 104.98
+    },
+    {
+      "number": 2,
+      "name": "Warm Neutrals",
+      "difference": "The soft one: cream and brown tones that glow at golden hour.",
+      "story": "Cream up top against brown below is the warmest thing you can wear at sunset. Boots ground it for a November roof, and the belt ties the leathers together.",
+      "pieces": [
+        {
+          "slot": "top",
+          "why": "Cream catches the evening light better than white.",
+          "item": {
+            "id": "gid://shopify/p/y84Au4kKPR4kG6oM3Nzba",
+            "variant_id": "gid://shopify/ProductVariant/39282340692092",
+            "title": "That Stuff Crewneck Sweater - Cream",
+            "price": 23.99,
+            "url": "https://www.fashionnova.com/products/that-stuff-crewneck-sweater-fncolorname-cream?_gsid=tzCDtJH9qJcj&utm_source=shopify&utm_medium=catalog",
+            "image": "https://cdn.shopify.com/s/files/1/0293/9277/files/ZDF01S430034_Cream_JR_V1.jpg",
+            "store": "Fashion Nova",
+            "store_domain": "fnova.myshopify.com",
+            "rating": 4.6,
+            "rating_count": 174,
+            "sizes": [
+              "S",
+              "M",
+              "L",
+              "XL",
+              "XXL",
+              "XXXL"
+            ],
+            "variants_by_size": {},
+            "description": "Available In Cream And Olive. Crew Neck Long Sleeve Ribbed Cuff's and Bottom Hem 52% Acrylic 26% Polyester 22% Nylon Imported",
+            "department": "men"
+          }
+        },
+        {
+          "slot": "bottom",
+          "why": "Brown against cream is the whole point of this look.",
+          "item": {
+            "id": "gid://shopify/p/5oToHLaIXPovYxCDdO75l8",
+            "variant_id": "gid://shopify/ProductVariant/39311179382908",
+            "title": "Baggy Lightweight Textured Esplanade Trouser - Dark Brown",
+            "price": 20.99,
+            "url": "https://www.fashionnova.com/products/baggy-lightweight-textured-esplanade-trouser-fncolorname-dark-brown?_gsid=8nM4FE3zH2e5&utm_source=shopify&utm_medium=catalog",
+            "image": "https://cdn.shopify.com/s/files/1/0293/9277/files/05-22-26_S6_6_B526MTR3701_DarkBrown_SL_AM_08-37-13_0778_MWA.jpg",
+            "store": "Fashion Nova",
+            "store_domain": "fnova.myshopify.com",
+            "rating": 4.7,
+            "rating_count": 3,
+            "sizes": [
+              "S",
+              "M",
+              "L",
+              "XL",
+              "XXL",
+              "XXXL"
+            ],
+            "variants_by_size": {},
+            "description": "Available In Dark Brown. Baggy Fit Hybrid Waist Belt Loops Button Closure Zipper Fly Side Hand Pockets Back Pockets Pleat Details Textured 100% Polyester Imported Available In Plus Sizes",
+            "department": "men"
+          }
+        },
+        {
+          "slot": "shoes",
+          "why": "Boots make sense on a windy roof.",
+          "item": {
+            "id": "gid://shopify/p/4QXVKJiZUMPplDYlTj4JyN",
+            "variant_id": "gid://shopify/ProductVariant/40192783057029",
+            "title": "ALDAIR BROWN",
+            "price": 64,
+            "url": "https://www.stevemadden.com/products/aldair-brown?variant=40192783057029&_gsid=4aeMfkSJVvXA&utm_source=shopify&utm_medium=catalog",
+            "image": "https://cdn.shopify.com/s/files/1/2170/8465/files/STEVEMADDEN_SHOE_MENS_ALDAIR_BROWN_01.jpg",
+            "store": "Steve Madden",
+            "store_domain": "stevemadden.myshopify.com",
+            "rating": 4.6,
+            "rating_count": 64,
+            "sizes": [
+              "7",
+              "7.5",
+              "8",
+              "8.5",
+              "9",
+              "9.5",
+              "10",
+              "10.5",
+              "11",
+              "11.5",
+              "12",
+              "13"
+            ],
+            "variants_by_size": {},
+            "description": "The ALDAIR Chelsea boot combines timeless design with expert craftsmanship. Featuring a sleek finish and elastic side panels, it offers both style and easy wearability. Its durable sole ensures reliable traction, making it a versatile choice for both casual and formal occasions. Elevate your footwea",
+            "department": "men"
+          }
+        },
+        {
+          "slot": "accessory",
+          "why": "Same leather family as the boots.",
+          "item": {
+            "id": "gid://shopify/p/5OE4yigFREJlOuaSfSMc5Q",
+            "variant_id": "gid://shopify/ProductVariant/39310191067260",
+            "title": "Classic Suede Belt - Dark Brown",
+            "price": 2.98,
+            "url": "https://www.fashionnova.com/products/classic-suede-belt-fncolorname-dark-brown?_gsid=8TeRaobT8tHc&utm_source=shopify&utm_medium=catalog",
+            "image": "https://cdn.shopify.com/s/files/1/0293/9277/files/F93170_DarkBrown_JR_V1.jpg",
+            "store": "Fashion Nova",
+            "store_domain": "fnova.myshopify.com",
+            "rating": 5,
+            "rating_count": 1,
+            "sizes": [],
+            "variants_by_size": {},
+            "description": "Available In Dark Brown. Square Buckle Adjustable Pin Closure 100% Polyurethane Imported",
+            "department": "men"
+          }
+        }
+      ],
+      "total": 111.96
+    },
+    {
+      "number": 3,
+      "name": "After Dark",
+      "difference": "The night one: navy and denim with a dressier shoe.",
+      "story": "A navy button-up over dark denim is the birthday classic for a reason. Loafers move it past casual, and sunglasses cover the first hour before the sun goes.",
+      "pieces": [
+        {
+          "slot": "top",
+          "why": "Navy reads sharper than black once it gets dark.",
+          "item": {
+            "id": "gid://shopify/p/46UYpSmGu3GOJ3vmfecIcA",
+            "variant_id": "gid://shopify/ProductVariant/42243019014230",
+            "title": "The Slim Oxford Shirt | Bone/Navy | Standard",
+            "price": 39,
+            "url": "https://www.everlane.com/products/mens-slim-oxford-navy-bone?variant=42243019014230&_gsid=M3TBg6VcB6GV&utm_source=shopify&utm_medium=catalog",
+            "image": "https://cdn.shopify.com/s/files/1/0623/7916/3734/files/23871d9a_e319.jpg",
+            "store": "Everlane",
+            "store_domain": "m34kzg-ke.myshopify.com",
+            "rating": 4,
+            "rating_count": 30,
+            "sizes": [
+              "XS",
+              "S",
+              "XXL"
+            ],
+            "variants_by_size": {},
+            "description": "This piece features a button-down collar, button placket, slim fit, long sleeves, buttoned cuff and sleeve plackets, and chest pocket, in medium weight 40s organic cotton.",
+            "department": "men"
+          }
+        },
+        {
+          "slot": "bottom",
+          "why": "Dark denim keeps it relaxed without looking sloppy.",
+          "item": {
+            "id": "gid://shopify/p/6hQlYVCxkZHZwPD5jQkVxm",
+            "variant_id": "gid://shopify/ProductVariant/711700971537",
+            "title": "Cornell Slim Jeans - Black",
+            "price": 20,
+            "url": "https://www.fashionnova.com/products/cornell-slim-jeans-fncolorname-black?_gsid=XXjphA2yDx4Y&utm_source=shopify&utm_medium=catalog",
+            "image": "https://cdn.shopify.com/s/files/1/0293/9277/files/04-10-25_S7_20_MPDSS1_Black_KF_DJ_13-45-50_106443_PXF.jpg",
+            "store": "Fashion Nova",
+            "store_domain": "fnova.myshopify.com",
+            "rating": 4.5,
+            "rating_count": 10776,
+            "sizes": [
+              "29",
+              "30",
+              "31",
+              "32",
+              "33",
+              "34",
+              "36",
+              "38",
+              "40",
+              "42"
+            ],
+            "variants_by_size": {},
+            "description": "Available In Black, Black Wash, Blue, Dark Wash, Khaki, Light Blue Wash, Light Wash, Taupe, Vintage Blue Wash And White. Model Height: 6'2\" Model is wearing size 34\" Zip Fly Button Front Closure Slim Fit 32 Inseam Shell: 97% Cotton 3% Spandex Imported Available In Plus Sizes",
+            "department": "men"
+          }
+        },
+        {
+          "slot": "shoes",
+          "why": "Loafers are the upgrade that makes this a party outfit.",
+          "item": {
+            "id": "gid://shopify/p/53j3v1MTWEsjpLMIKpxOU2",
+            "variant_id": "gid://shopify/ProductVariant/39308364808316",
+            "title": "Woven Faux Leather Slip On Loafer - Black",
+            "price": 34.99,
+            "url": "https://www.fashionnova.com/products/woven-faux-leather-slip-on-loafer-fncolorname-black?_gsid=UGxiqMW4MM2N&utm_source=shopify&utm_medium=catalog",
+            "image": "https://cdn.shopify.com/s/files/1/0293/9277/files/F2543311_Black_JR_V1_1474bbbe-9ea0-492c-b55f-a18b20e399aa.jpg",
+            "store": "Fashion Nova",
+            "store_domain": "fnova.myshopify.com",
+            "rating": null,
+            "rating_count": null,
+            "sizes": [
+              "9",
+              "10",
+              "11"
+            ],
+            "variants_by_size": {},
+            "description": "Available In Black And Dark Brown. Round Toe Slip On Design Structured Profile Cushioned Insole Woven Fabrication Penny Strap Detail Imported",
+            "department": "men"
+          }
+        },
+        {
+          "slot": "accessory",
+          "why": "For the hour before sunset.",
+          "item": {
+            "id": "gid://shopify/p/4fN0TM7b4S1SSys1XdfD1R",
+            "variant_id": "gid://shopify/ProductVariant/39272445018236",
+            "title": "Just Watch Me Sunglasses - Black",
+            "price": 5.99,
+            "url": "https://www.fashionnova.com/products/just-watch-me-sunglasses-fncolorname-black?_gsid=CkKNBBycKbCy&utm_source=shopify&utm_medium=catalog",
+            "image": "https://cdn.shopify.com/s/files/1/0293/9277/files/12-29-23_S8_77_ZT3245_Black_KF_DJ_10-40-14_29675_EH.jpg",
+            "store": "Fashion Nova",
+            "store_domain": "fnova.myshopify.com",
+            "rating": 4.8,
+            "rating_count": 79,
+            "sizes": [
+              "OS"
+            ],
+            "variants_by_size": {},
+            "description": "Available In Black And Brown. Plastic Frame Square Lens Mirror Lens Imported",
+            "department": "men"
+          }
+        }
+      ],
+      "total": 99.98
+    }
+  ]
+}
