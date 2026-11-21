@@ -402,10 +402,246 @@ describe('Alice server', () => {
     assert.ok(roomConfig && Array.isArray(roomConfig.agents));
     assert.equal(roomConfig.agents[0]?.agentName, 'alice');
 
-    const res2 = await fetch(`${baseUrl}/api/token`, { method: 'GET' });
+    const res2 = await fetch(`${baseUrl}/api/token`, { method: 'POST' });
     assert.equal(res2.status, 200);
     const data2 = (await res2.json()) as Record<string, unknown>;
     assert.notEqual(data2.room, data1.room);
+  });
+
+  it('rejects non-POST methods on /api/token with 405 and Allow: POST', async () => {
+    env.LIVEKIT_API_KEY = 'devkey';
+    env.LIVEKIT_API_SECRET = 'x'.repeat(40);
+    env.LIVEKIT_URL = 'wss://example.livekit.cloud';
+    delete env.ALICE_PASSCODE;
+
+    const getRes = await fetch(`${baseUrl}/api/token`, { method: 'GET' });
+    assert.equal(getRes.status, 405);
+    assert.equal(getRes.headers.get('allow'), 'POST');
+    assert.deepEqual(await getRes.json(), { error: 'method_not_allowed' });
+
+    const headRes = await fetch(`${baseUrl}/api/token`, { method: 'HEAD' });
+    assert.equal(headRes.status, 405);
+    assert.equal(headRes.headers.get('allow'), 'POST');
+
+    const putRes = await fetch(`${baseUrl}/api/token`, { method: 'PUT' });
+    assert.equal(putRes.status, 405);
+    assert.equal(putRes.headers.get('allow'), 'POST');
+    assert.deepEqual(await putRes.json(), { error: 'method_not_allowed' });
+  });
+
+  it('refuses non-loopback /api/token callers when ALICE_PASSCODE is empty', async () => {
+    const lkEnv: Record<string, string | undefined> = {
+      LIVEKIT_API_KEY: 'devkey',
+      LIVEKIT_API_SECRET: 'x'.repeat(40),
+      LIVEKIT_URL: 'wss://example.livekit.cloud',
+    };
+
+    const runWithAddr = async (
+      addr: string | undefined,
+      serverEnv: Record<string, string | undefined>,
+      headers: Record<string, string> = {},
+    ) => {
+      const events: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+      const srv = createAliceServer({
+        publicDir,
+        tryonDir,
+        env: serverEnv,
+        remoteAddress: () => addr,
+        calllog: (room, ev, data) => {
+          events.push({ room, ev, data });
+        },
+      });
+      await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => resolve()));
+      try {
+        const srvPort = (srv.address() as AddressInfo).port;
+        const res = await fetch(`http://127.0.0.1:${srvPort}/api/token`, {
+          method: 'POST',
+          headers,
+        });
+        const body = (await res.json()) as Record<string, unknown>;
+        return { status: res.status, headers: res.headers, body, events };
+      } finally {
+        await new Promise<void>((resolve, reject) =>
+          srv.close((err) => (err ? reject(err) : resolve())),
+        );
+      }
+    };
+
+    // Non-loopback caller with empty ALICE_PASSCODE -> 403 + token_refused log with remote_addr
+    const refused = await runWithAddr('192.168.1.50', { ...lkEnv });
+    assert.equal(refused.status, 403);
+    assert.equal(refused.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(refused.body, { error: 'passcode_not_configured' });
+    assert.equal(refused.events.length, 1);
+    assert.equal(refused.events[0].room, '_server');
+    assert.equal(refused.events[0].ev, 'token_refused');
+    assert.deepEqual(refused.events[0].data, {
+      reason: 'passcode_not_configured',
+      remote_addr: '192.168.1.50',
+    });
+
+    // Same non-loopback caller with ALICE_PASSCODE set + right passcode -> 200
+    const allowedWithPass = await runWithAddr(
+      '192.168.1.50',
+      { ...lkEnv, ALICE_PASSCODE: 'lan-secret' },
+      { 'x-alice-passcode': 'lan-secret' },
+    );
+    assert.equal(allowedWithPass.status, 200);
+    assert.equal(typeof allowedWithPass.body.token, 'string');
+    assert.equal(allowedWithPass.events.length, 1);
+    assert.equal(allowedWithPass.events[0].ev, 'token');
+    assert.equal(allowedWithPass.events[0].data?.remote_addr, '192.168.1.50');
+
+    // Loopback addresses with empty ALICE_PASSCODE -> 200
+    for (const loopback of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
+      const ok = await runWithAddr(loopback, { ...lkEnv });
+      assert.equal(ok.status, 200, `expected 200 for loopback ${loopback}`);
+      assert.equal(typeof ok.body.token, 'string');
+      assert.equal(ok.events[0]?.ev, 'token');
+      assert.equal(ok.events[0]?.data?.remote_addr, loopback);
+    }
+
+    // Unknown / empty remote address with empty ALICE_PASSCODE -> 403
+    for (const missingAddr of [undefined, '']) {
+      const denied = await runWithAddr(missingAddr, { ...lkEnv });
+      assert.equal(denied.status, 403, `expected 403 for remoteAddress=${JSON.stringify(missingAddr)}`);
+      assert.deepEqual(denied.body, { error: 'passcode_not_configured' });
+    }
+  });
+
+  it('caps POST /api/token bodies at 4096 bytes for Content-Length and chunked uploads', async () => {
+    const events: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+    const capServer = createAliceServer({
+      publicDir,
+      tryonDir,
+      env: {
+        LIVEKIT_API_KEY: 'devkey',
+        LIVEKIT_API_SECRET: 'x'.repeat(40),
+        LIVEKIT_URL: 'wss://example.livekit.cloud',
+      },
+      calllog: (room, ev, data) => {
+        events.push({ room, ev, data });
+      },
+    });
+    await new Promise<void>((resolve) => capServer.listen(0, '127.0.0.1', () => resolve()));
+    try {
+      const capPort = (capServer.address() as AddressInfo).port;
+
+      // 1. 10,000-byte JSON body with Content-Length -> 413 body_too_large, no token
+      const bigBody = JSON.stringify({ pad: 'a'.repeat(9990) });
+      assert.equal(Buffer.byteLength(bigBody), 10000);
+      const clRes = await requestServer({
+        scheme: 'http',
+        port: capPort,
+        path: '/api/token',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: bigBody,
+      });
+      assert.equal(clRes.status, 413);
+      assert.equal(clRes.headers['cache-control'], 'no-store');
+      assert.equal(clRes.headers.connection, 'close');
+      const clJson = JSON.parse(clRes.body.toString('utf8')) as Record<string, unknown>;
+      assert.deepEqual(clJson, { error: 'body_too_large' });
+      assert.equal(clJson.token, undefined);
+      assert.deepEqual(events[events.length - 1], {
+        room: '_server',
+        ev: 'token_refused',
+        data: { reason: 'body_too_large', remote_addr: '127.0.0.1' },
+      });
+
+      // 2. Chunked POST (no Content-Length) streaming > 4096 bytes -> 413 body_too_large
+      const chunkedRes = await new Promise<{
+        status: number;
+        headers: http.IncomingHttpHeaders;
+        body: string;
+      }>((resolve, reject) => {
+        let settled = false;
+        const req = http.request(
+          {
+            host: '127.0.0.1',
+            port: capPort,
+            path: '/api/token',
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Transfer-Encoding': 'chunked',
+            },
+          },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (c: Buffer | string) => {
+              chunks.push(typeof c === 'string' ? Buffer.from(c) : c);
+            });
+            res.on('end', () => {
+              if (!settled) {
+                settled = true;
+                resolve({
+                  status: res.statusCode ?? 0,
+                  headers: res.headers,
+                  body: Buffer.concat(chunks).toString('utf8'),
+                });
+              }
+            });
+            res.on('error', () => {
+              // Tolerate socket close once response has been received
+            });
+          },
+        );
+        req.on('error', (err) => {
+          if (!settled) {
+            // Tolerate EPIPE/ECONNRESET while streaming after the server replies 413 and closes
+            const code = (err as NodeJS.ErrnoException).code;
+            if (code !== 'ECONNRESET' && code !== 'EPIPE') {
+              settled = true;
+              reject(err);
+            }
+          }
+        });
+        req.write('{"pad":"' + 'b'.repeat(2048));
+        req.write('c'.repeat(2048));
+        req.write('d'.repeat(1024));
+      });
+      assert.equal(chunkedRes.status, 413);
+      assert.equal(chunkedRes.headers['cache-control'], 'no-store');
+      assert.equal(chunkedRes.headers.connection, 'close');
+      const chunkedJson = JSON.parse(chunkedRes.body) as Record<string, unknown>;
+      assert.deepEqual(chunkedJson, { error: 'body_too_large' });
+      assert.equal(chunkedJson.token, undefined);
+      assert.deepEqual(events[events.length - 1], {
+        room: '_server',
+        ev: 'token_refused',
+        data: { reason: 'body_too_large', remote_addr: '127.0.0.1' },
+      });
+
+      // 3. Exact 4096-byte valid JSON body -> 200
+      const exactBody = JSON.stringify({ name: 'Sam', pad: 'x'.repeat(4096 - 23) });
+      assert.equal(Buffer.byteLength(exactBody), 4096);
+      const okRes = await fetch(`http://127.0.0.1:${capPort}/api/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: exactBody,
+      });
+      assert.equal(okRes.status, 200);
+      const okData = (await okRes.json()) as Record<string, unknown>;
+      assert.equal(typeof okData.token, 'string');
+      assert.equal(events[events.length - 1].ev, 'token');
+      assert.equal(events[events.length - 1].data?.remote_addr, '127.0.0.1');
+
+      // 4. Invalid JSON body -> 200 (treated as {})
+      const badJsonRes = await fetch(`http://127.0.0.1:${capPort}/api/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{not valid json',
+      });
+      assert.equal(badJsonRes.status, 200);
+      const badJsonData = (await badJsonRes.json()) as Record<string, unknown>;
+      assert.equal(typeof badJsonData.token, 'string');
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        capServer.close((err) => (err ? reject(err) : resolve())),
+      );
+    }
   });
 
   it('enforces passcode via header or JSON body and ignores query string', async () => {
@@ -545,15 +781,19 @@ describe('Alice server', () => {
 
       assert.equal(records[0].ev, 'token_refused');
       assert.equal(records[0].reason, 'passcode_required');
+      assert.equal(records[0].remote_addr, '127.0.0.1');
       assert.equal(records[1].ev, 'token_refused');
       assert.equal(records[1].reason, 'bad_passcode');
+      assert.equal(records[1].remote_addr, '127.0.0.1');
       assert.equal(records[2].ev, 'token_refused');
       assert.equal(records[2].reason, 'livekit_not_configured');
+      assert.equal(records[2].remote_addr, '127.0.0.1');
 
       assert.equal(records[3].ev, 'token');
       assert.equal(records[3].room, room);
       assert.equal(records[3].identity, data.identity);
       assert.equal(records[3].agent, data.agent);
+      assert.equal(records[3].remote_addr, '127.0.0.1');
       assert.equal(typeof records[3].t, 'string');
       assert.equal(typeof records[3].ms, 'number');
       assert.equal(typeof records[3].pid, 'number');
@@ -595,7 +835,7 @@ describe('Alice server', () => {
       const last = rlEvents[rlEvents.length - 1];
       assert.equal(last.room, '_server');
       assert.equal(last.ev, 'token_refused');
-      assert.deepEqual(last.data, { reason: 'slow_down' });
+      assert.deepEqual(last.data, { reason: 'slow_down', remote_addr: '127.0.0.1' });
     } finally {
       await new Promise<void>((resolve, reject) => {
         rlLogServer.close((err) => (err ? reject(err) : resolve()));

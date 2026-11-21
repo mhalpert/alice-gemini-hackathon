@@ -49,6 +49,7 @@ export interface AliceServerOptions {
   store?: AliceStoreDeps;
   loadLibrary?: LibraryLoaderFn;
   budgets?: AliceBudgetOptions;
+  remoteAddress?: (req: IncomingMessage) => string | undefined;
 }
 
 export interface AliceHttpsServerOptions extends AliceServerOptions {
@@ -129,44 +130,72 @@ function sendText(
   res.end(body);
 }
 
-async function readOptionalJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+type ReadJsonBodyResult =
+  | { ok: true; body: Record<string, unknown> }
+  | { ok: false; reason: 'body_too_large' };
+
+async function readOptionalJsonBody(
+  req: IncomingMessage,
+  maxBytes: number = MAX_TOKEN_BODY_BYTES,
+): Promise<ReadJsonBodyResult> {
+  const rawContentLength = req.headers['content-length'];
+  if (rawContentLength !== undefined) {
+    const contentLength = Number(rawContentLength);
+    if (contentLength > maxBytes) {
+      return { ok: false, reason: 'body_too_large' };
+    }
+  }
+
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     let total = 0;
-    let overflow = false;
+    let settled = false;
 
-    req.on('data', (chunk: Buffer | string) => {
-      if (overflow) return;
+    const finish = (result: ReadJsonBodyResult): void => {
+      if (settled) return;
+      settled = true;
+      req.removeListener('data', onData);
+      req.removeListener('end', onEnd);
+      req.removeListener('error', onError);
+      resolve(result);
+    };
+
+    const onData = (chunk: Buffer | string): void => {
       const buf = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
       total += buf.length;
-      if (total > MAX_TOKEN_BODY_BYTES) {
-        overflow = true;
+      if (total > maxBytes) {
         chunks.length = 0;
+        req.pause();
+        finish({ ok: false, reason: 'body_too_large' });
         return;
       }
       chunks.push(buf);
-    });
+    };
 
-    req.on('end', () => {
-      if (overflow || chunks.length === 0) {
-        resolve({});
+    const onEnd = (): void => {
+      if (chunks.length === 0) {
+        finish({ ok: true, body: {} });
         return;
       }
       try {
         const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          resolve(parsed as Record<string, unknown>);
+          finish({ ok: true, body: parsed as Record<string, unknown> });
         } else {
-          resolve({});
+          finish({ ok: true, body: {} });
         }
       } catch {
-        resolve({});
+        finish({ ok: true, body: {} });
       }
-    });
+    };
 
-    req.on('error', () => {
-      resolve({});
-    });
+    const onError = (): void => {
+      finish({ ok: true, body: {} });
+    };
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
   });
 }
 
@@ -684,17 +713,18 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         return;
       }
 
-      // 3. POST|GET /api/token
+      // 3. POST /api/token
       if (rawPathname === '/api/token') {
-        if (method !== 'POST' && method !== 'GET') {
-          sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'GET, POST' });
+        if (method !== 'POST') {
+          sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'POST' });
           return;
         }
 
-        const remoteAddr = req.socket.remoteAddress ?? 'unknown';
+        const remoteAddr =
+          (opts.remoteAddress ? opts.remoteAddress(req) : req.socket.remoteAddress) ?? 'unknown';
         const limit = checkRateLimit(remoteAddr);
         if (!limit.allowed) {
-          logServerEvent('token_refused', { reason: 'slow_down' });
+          logServerEvent('token_refused', { reason: 'slow_down', remote_addr: remoteAddr });
           sendJson(
             res,
             429,
@@ -704,7 +734,34 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
           return;
         }
 
-        const body = method === 'POST' ? await readOptionalJsonBody(req) : {};
+        const expectedPasscode = env.ALICE_PASSCODE;
+        if (!expectedPasscode && !isLoopbackHost(remoteAddr)) {
+          logServerEvent('token_refused', {
+            reason: 'passcode_not_configured',
+            remote_addr: remoteAddr,
+          });
+          sendJson(
+            res,
+            403,
+            { error: 'passcode_not_configured' },
+            { 'Cache-Control': 'no-store' },
+          );
+          return;
+        }
+
+        const bodyResult = await readOptionalJsonBody(req);
+        if (!bodyResult.ok) {
+          logServerEvent('token_refused', { reason: 'body_too_large', remote_addr: remoteAddr });
+          res.once('finish', () => req.destroy());
+          sendJson(
+            res,
+            413,
+            { error: 'body_too_large' },
+            { Connection: 'close', 'Cache-Control': 'no-store' },
+          );
+          return;
+        }
+        const body = bodyResult.body;
 
         const headerVal = req.headers['x-alice-passcode'];
         const headerPasscode =
@@ -717,10 +774,12 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         const suppliedPasscode =
           headerPasscode !== undefined && headerPasscode !== '' ? headerPasscode : bodyPasscode;
 
-        const expectedPasscode = env.ALICE_PASSCODE;
         if (expectedPasscode) {
           if (!suppliedPasscode) {
-            logServerEvent('token_refused', { reason: 'passcode_required' });
+            logServerEvent('token_refused', {
+              reason: 'passcode_required',
+              remote_addr: remoteAddr,
+            });
             sendJson(
               res,
               401,
@@ -730,7 +789,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
             return;
           }
           if (!timingSafeMatches(suppliedPasscode, expectedPasscode)) {
-            logServerEvent('token_refused', { reason: 'bad_passcode' });
+            logServerEvent('token_refused', { reason: 'bad_passcode', remote_addr: remoteAddr });
             sendJson(
               res,
               401,
@@ -745,7 +804,10 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         const apiKey = env.LIVEKIT_API_KEY;
         const apiSecret = env.LIVEKIT_API_SECRET;
         if (!url || !apiKey || !apiSecret) {
-          logServerEvent('token_refused', { reason: 'livekit_not_configured' });
+          logServerEvent('token_refused', {
+            reason: 'livekit_not_configured',
+            remote_addr: remoteAddr,
+          });
           sendJson(
             res,
             503,
@@ -779,7 +841,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
 
         const token = await at.toJwt();
         logExtra = `room=${room}`;
-        logServerEvent('token', { room, identity, agent });
+        logServerEvent('token', { room, identity, agent, remote_addr: remoteAddr });
 
         sendJson(
           res,
