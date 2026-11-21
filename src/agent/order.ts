@@ -19,8 +19,15 @@ export const ORDER_OVER_LIMIT =
 export const ORDER_ALREADY_SENT_NOTE =
   "This store's order was already sent. Check your Shop app or email.";
 export const ORDER_PAYMENT_PROCESSING_PREFIX = 'Payment may still be processing';
-export const ORDER_PLACE_UNCONFIRMED_ERROR =
-  'NOT DONE: the order could not be confirmed as placed; do not try again, point them to the store links on screen.';
+export const ORDER_OUTCOME_ALL_PLACED =
+  'Your order is placed. The confirmation is on screen and in your Shop app.';
+export const ORDER_OUTCOME_PARTIAL =
+  'Part of your order is placed. For the rest, finish on the store page using the links on screen.';
+export const ORDER_OUTCOME_HANDOFF =
+  'I could not place this one in the call. Finish on the store page using the link on screen. You have not been charged by me.';
+export const ORDER_OUTCOME_UNKNOWN =
+  'The payment may still be processing. Check your Shop app or email before trying again. Do not order again yet.';
+export const ORDER_PLACE_UNCONFIRMED_ERROR = `${ORDER_OUTCOME_UNKNOWN} Say that exact sentence first, word for word, before anything else. Do not retry and do not offer any store link.`;
 
 export type OrderLogFn = (room: string, ev: string, data?: Record<string, unknown>) => void;
 
@@ -469,9 +476,61 @@ function normalizedStoreStatus(store: OrderStore): string {
   return 'failed';
 }
 
-export function formatOrderPlacedResult(orderId: string, stores: OrderStore[]): string {
+export type OrderPlacedOutcome = 'all_placed' | 'partial' | 'handoff' | 'unknown';
+
+export function classifyOrderPlacedOutcome(stores: OrderStore[]): OrderPlacedOutcome {
   if (!Array.isArray(stores) || stores.length === 0) {
-    return `Order ${orderId}: no store statuses returned.`;
+    return 'unknown';
+  }
+
+  let placedCount = 0;
+  for (const store of stores) {
+    const status = normalizedStoreStatus(store);
+    if (
+      isPaymentProcessingNote(store.note) ||
+      isAlreadySentNote(store.note) ||
+      status === 'placing' ||
+      status === 'review'
+    ) {
+      return 'unknown';
+    }
+    if (status === 'placed') {
+      placedCount += 1;
+    }
+  }
+
+  if (placedCount === stores.length) {
+    return 'all_placed';
+  }
+  if (placedCount > 0) {
+    return 'partial';
+  }
+  return 'handoff';
+}
+
+export function getOrderOutcomeSentence(outcome: OrderPlacedOutcome): string {
+  switch (outcome) {
+    case 'all_placed':
+      return ORDER_OUTCOME_ALL_PLACED;
+    case 'partial':
+      return ORDER_OUTCOME_PARTIAL;
+    case 'handoff':
+      return ORDER_OUTCOME_HANDOFF;
+    case 'unknown':
+      return ORDER_OUTCOME_UNKNOWN;
+  }
+}
+
+export function formatOrderPlacedResult(orderId: string, stores: OrderStore[]): string {
+  const outcome = classifyOrderPlacedOutcome(stores);
+  const opening = getOrderOutcomeSentence(outcome);
+  const verbatimInstruction =
+    outcome === 'unknown'
+      ? 'Say that exact sentence first, word for word, before anything else. Do not offer a retry or a store link.'
+      : 'Say that exact sentence first, word for word, before anything else.';
+
+  if (!Array.isArray(stores) || stores.length === 0) {
+    return `${opening} ${verbatimInstruction} Order ${orderId}: no store statuses returned.`;
   }
   const parts = stores.map((store) => {
     const status = normalizedStoreStatus(store);
@@ -493,7 +552,7 @@ export function formatOrderPlacedResult(orderId: string, stores: OrderStore[]): 
     }
     return `${store.store}: ${status}${noteSuffix}`;
   });
-  return `Order ${orderId}: ${parts.join('; ')}.`;
+  return `${opening} ${verbatimInstruction} Order ${orderId}: ${parts.join('; ')}.`;
 }
 
 /**

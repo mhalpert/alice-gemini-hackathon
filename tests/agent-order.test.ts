@@ -19,14 +19,20 @@ import {
   ORDER_NOT_AVAILABLE,
   ORDER_NOT_DONE_NO_BAG,
   ORDER_NOT_READY_SIGN_IN,
+  ORDER_OUTCOME_ALL_PLACED,
+  ORDER_OUTCOME_HANDOFF,
+  ORDER_OUTCOME_PARTIAL,
+  ORDER_OUTCOME_UNKNOWN,
   ORDER_OVER_LIMIT,
   ORDER_PAYMENT_PROCESSING_PREFIX,
   ORDER_PLACE_UNCONFIRMED_ERROR,
   ORDER_REVIEW_TTL_MS,
+  classifyOrderPlacedOutcome,
   computeBagFingerprint,
   createInitialOrderMachineState,
   createOrderController,
   evaluatePlaceOrderGates,
+  formatOrderPlacedResult,
   isPurchaseReady,
   reduceOrderState,
   type OrderController,
@@ -970,7 +976,8 @@ test('confirmedByTap is true ONLY from page confirmOrder for that exact order_id
     await h.bagLook();
     await h.tools.review_order!.execute({}, fakeToolOpts('rev'));
     const res = await h.tools.place_order!.execute({ spoken_confirmation: true }, fakeToolOpts('p-4'));
-    assert.match(res, /^Order ord-abc-123:/);
+    assert.equal(res.startsWith(ORDER_OUTCOME_PARTIAL), true);
+    assert.match(res, /Order ord-abc-123:/);
     assert.equal(h.placeCalls.length, 1);
     assert.equal(h.placeCalls[0]!.confirmedByTap, true);
   }
@@ -1021,7 +1028,8 @@ test('a newer review_order supersedes an older one and blocks place_order for th
       { spoken_confirmation: true },
       fakeToolOpts('place-new'),
     );
-    assert.match(placedNew, /^Order ord-v2:/);
+    assert.equal(placedNew.startsWith(ORDER_OUTCOME_PARTIAL), true);
+    assert.match(placedNew, /Order ord-v2:/);
     assert.equal(h.placeCalls.length, 1);
     assert.equal(h.placeCalls[0]!.orderId, 'ord-v2');
     assert.equal(h.placeCalls[0]!.idempotencyKey, key2);
@@ -1224,7 +1232,8 @@ test('each place_order gate blocks on its own and calls nothing, including a set
     await h.bagLook();
     await h.tools.review_order!.execute({}, fakeToolOpts('rev'));
     const res = await h.tools.place_order!.execute({ spoken_confirmation: true }, fakeToolOpts('g-6b'));
-    assert.match(res, /^Order ord-abc-123:/);
+    assert.equal(res.startsWith(ORDER_OUTCOME_PARTIAL), true);
+    assert.match(res, /Order ord-abc-123:/);
     assert.equal(h.placeCalls.length, 1);
   }
 
@@ -1257,7 +1266,7 @@ test('each place_order gate blocks on its own and calls nothing, including a set
   }
 });
 
-test('placeOrder throwing returns exact NOT DONE message, does not retry, and blocks a second call', async () => {
+test('placeOrder throwing returns unknown-outcome wording without link/retry, does not retry, and blocks a second call', async () => {
   let placeAttempts = 0;
   const h = await setupHarness({
     placeOrder: async () => {
@@ -1273,6 +1282,9 @@ test('placeOrder throwing returns exact NOT DONE message, does not retry, and bl
     fakeToolOpts('place-throw-1'),
   );
   assert.equal(first, ORDER_PLACE_UNCONFIRMED_ERROR);
+  assert.equal(first.startsWith(ORDER_OUTCOME_UNKNOWN), true);
+  assert.match(first, /Say that exact sentence first, word for word, before anything else\./);
+  assert.match(first, /Do not retry and do not offer any store link\./);
   assert.equal(placeAttempts, 1);
   assert.equal(h.pageCalls.filter((c) => c.action === 'orderPlaced').length, 0);
 
@@ -1583,5 +1595,163 @@ test('createAgentTools respects ALICE_PURCHASE and ALICE_PURCHASE_MAX_USD from p
     else process.env.ALICE_PURCHASE = prevSwitch;
     if (prevMax === undefined) delete process.env.ALICE_PURCHASE_MAX_USD;
     else process.env.ALICE_PURCHASE_MAX_USD = prevMax;
+  }
+});
+
+test('place_order starts with the exact fixed outcome sentence for all four outcomes and keeps NOT DONE when blocked', async () => {
+  // Exact exported constant strings.
+  assert.equal(
+    ORDER_OUTCOME_ALL_PLACED,
+    'Your order is placed. The confirmation is on screen and in your Shop app.',
+  );
+  assert.equal(
+    ORDER_OUTCOME_PARTIAL,
+    'Part of your order is placed. For the rest, finish on the store page using the links on screen.',
+  );
+  assert.equal(
+    ORDER_OUTCOME_HANDOFF,
+    'I could not place this one in the call. Finish on the store page using the link on screen. You have not been charged by me.',
+  );
+  assert.equal(
+    ORDER_OUTCOME_UNKNOWN,
+    'The payment may still be processing. Check your Shop app or email before trying again. Do not order again yet.',
+  );
+
+  const verbatimRe = /Say that exact sentence first, word for word, before anything else\./;
+
+  // 1) Every store placed -> ORDER_OUTCOME_ALL_PLACED.
+  {
+    const h = await setupHarness({
+      placeOrder: async (orderId) =>
+        makePlacedReview(orderId, [
+          {
+            store: 'Everlane',
+            items: [],
+            total: 60,
+            payment_label: CANARY_PAYMENT_LABEL,
+            ready: true,
+            status: 'placed',
+            order_number: '#EV-100',
+          },
+          {
+            store: 'Kith',
+            items: [],
+            total: 80,
+            payment_label: CANARY_PAYMENT_LABEL,
+            ready: true,
+            status: 'placed',
+            order_number: '#KT-200',
+          },
+        ]),
+    });
+    await h.bagLook();
+    await h.tools.review_order!.execute({}, fakeToolOpts('rev-all'));
+    const res = await h.tools.place_order!.execute({ spoken_confirmation: true }, fakeToolOpts('pl-all'));
+    assert.equal(res.startsWith(ORDER_OUTCOME_ALL_PLACED), true);
+    assert.match(res, verbatimRe);
+    assert.match(res, /Everlane: placed \(order #EV-100\)/);
+    assert.match(res, /Kith: placed \(order #KT-200\)/);
+  }
+
+  // 2) Some placed, some handed off -> ORDER_OUTCOME_PARTIAL.
+  {
+    const h = await setupHarness();
+    await h.bagLook();
+    await h.tools.review_order!.execute({}, fakeToolOpts('rev-part'));
+    const res = await h.tools.place_order!.execute({ spoken_confirmation: true }, fakeToolOpts('pl-part'));
+    assert.equal(res.startsWith(ORDER_OUTCOME_PARTIAL), true);
+    assert.match(res, verbatimRe);
+  }
+
+  // 3) Nothing placed, hand-off -> ORDER_OUTCOME_HANDOFF.
+  {
+    const h = await setupHarness({
+      placeOrder: async (orderId) =>
+        makePlacedReview(orderId, [
+          {
+            store: 'Everlane',
+            items: [],
+            total: 60,
+            payment_label: null,
+            ready: false,
+            status: 'handoff',
+            continue_url: 'https://everlane.example/cart/1',
+          },
+          {
+            store: 'Kith',
+            items: [],
+            total: 80,
+            payment_label: null,
+            ready: false,
+            status: 'handoff',
+            continue_url: 'https://kith.example/cart/1',
+          },
+        ]),
+    });
+    await h.bagLook();
+    await h.tools.review_order!.execute({}, fakeToolOpts('rev-ho'));
+    const res = await h.tools.place_order!.execute({ spoken_confirmation: true }, fakeToolOpts('pl-ho'));
+    assert.equal(res.startsWith(ORDER_OUTCOME_HANDOFF), true);
+    assert.match(res, verbatimRe);
+  }
+
+  // 4) Unknown / payment may still be processing -> ORDER_OUTCOME_UNKNOWN, no retry and no link offered.
+  {
+    const h = await setupHarness({
+      placeOrder: async (orderId) =>
+        makePlacedReview(orderId, [
+          {
+            store: 'Everlane',
+            items: [],
+            total: 60,
+            payment_label: CANARY_PAYMENT_LABEL,
+            ready: false,
+            status: 'failed',
+            note: 'Payment may still be processing. Check your Shop app or email before trying again.',
+          },
+        ]),
+    });
+    await h.bagLook();
+    await h.tools.review_order!.execute({}, fakeToolOpts('rev-unk'));
+    const res = await h.tools.place_order!.execute({ spoken_confirmation: true }, fakeToolOpts('pl-unk'));
+    assert.equal(res.startsWith(ORDER_OUTCOME_UNKNOWN), true);
+    assert.match(res, verbatimRe);
+    assert.match(res, /Do not offer a retry or a store link\./);
+    assert.equal(res.includes('hand-off link on screen'), false);
+    assert.equal(res.includes('You have not been charged'), false);
+  }
+
+  // 4b) Pure classification checks: empty stores, already-sent, and processing-plus-placed all resolve to unknown.
+  assert.equal(classifyOrderPlacedOutcome([]), 'unknown');
+  assert.equal(
+    formatOrderPlacedResult('ord-empty', []).startsWith(ORDER_OUTCOME_UNKNOWN),
+    true,
+  );
+  assert.equal(
+    classifyOrderPlacedOutcome([
+      {
+        store: 'Everlane',
+        items: [],
+        total: 60,
+        payment_label: null,
+        ready: false,
+        status: 'failed',
+        note: ORDER_ALREADY_SENT_NOTE,
+      },
+    ]),
+    'unknown',
+  );
+
+  // 5) Blocked before sending (no tap, over limit, stale review) still returns existing NOT DONE messages.
+  {
+    const h = await setupHarness({
+      confirmResponder: () => ({ ok: true, confirmed: false, order_id: 'ord-abc-123' }),
+    });
+    await h.bagLook();
+    await h.tools.review_order!.execute({}, fakeToolOpts('rev-block'));
+    const noTap = await h.tools.place_order!.execute({ spoken_confirmation: true }, fakeToolOpts('pl-notap'));
+    assert.match(noTap, /^NOT DONE:/);
+    assert.equal(noTap.startsWith(ORDER_OUTCOME_HANDOFF), false);
+    assert.equal(noTap.startsWith(ORDER_OUTCOME_UNKNOWN), false);
   }
 });
