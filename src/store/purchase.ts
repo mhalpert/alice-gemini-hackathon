@@ -242,6 +242,20 @@ export function deriveCheckoutIdempotencyUuid(
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
+interface OrderPrepareStoreDiagnostics {
+  reason: string;
+  status: string;
+  methods: number;
+  delivery_groups: number;
+  delivery_options: number[];
+  delivery_selected: number;
+  destinations: number;
+  destination_selected: boolean;
+  instruments: number;
+  totals_types: string[];
+  messages: Array<{ type?: string; code?: string }>;
+}
+
 interface ReviewedStoreRecord {
   store: string;
   store_domain: string;
@@ -259,6 +273,7 @@ interface ReviewedStoreRecord {
   store_unclear: boolean;
   already_ordered_title: string | null;
   note?: string;
+  diagnostics: OrderPrepareStoreDiagnostics;
   checkout_id: string | null;
   cart_continue_url: string | null;
   checkout_continue_url: string | null;
@@ -548,10 +563,17 @@ function isShopPayInstrument(inst: any): boolean {
   return type === 'shop_pay' || handlerId === 'shop_pay';
 }
 
+type PaymentRejectReason = 'payment_none' | 'payment_multiple' | 'payment_not_shop_pay';
+
 function selectShopPayIfAlreadyChosen(
   checkout: any,
   preferredInstrumentId: string | null,
-): { instrument: Record<string, unknown> | null; paymentLabel: string; note?: string } {
+): {
+  instrument: Record<string, unknown> | null;
+  paymentLabel: string;
+  note?: string;
+  reason?: PaymentRejectReason;
+} {
   const instruments = Array.isArray(checkout?.payment?.instruments)
     ? checkout.payment.instruments.filter((i: any) => i && typeof i === 'object')
     : [];
@@ -561,6 +583,7 @@ function selectShopPayIfAlreadyChosen(
       instrument: null,
       paymentLabel: '',
       note: 'No saved payment method is offered for this store; finish on the store page.',
+      reason: 'payment_none',
     };
   }
 
@@ -578,6 +601,7 @@ function selectShopPayIfAlreadyChosen(
       instrument: null,
       paymentLabel: '',
       note: 'Selected payment method is not Shop Pay; finish on the store page.',
+      reason: 'payment_not_shop_pay',
     };
   }
   if (explicitlySelected.length > 1) {
@@ -585,6 +609,7 @@ function selectShopPayIfAlreadyChosen(
       instrument: null,
       paymentLabel: '',
       note: 'Multiple payment methods are marked; choose one on the store page.',
+      reason: 'payment_multiple',
     };
   }
 
@@ -598,6 +623,7 @@ function selectShopPayIfAlreadyChosen(
         instrument: null,
         paymentLabel: '',
         note: 'Default payment method is not Shop Pay; finish on the store page.',
+        reason: 'payment_not_shop_pay',
       };
     }
   }
@@ -610,6 +636,7 @@ function selectShopPayIfAlreadyChosen(
       instrument: null,
       paymentLabel: '',
       note: 'Shop Pay is not available for this store; finish on the store page.',
+      reason: 'payment_not_shop_pay',
     };
   }
 
@@ -617,6 +644,108 @@ function selectShopPayIfAlreadyChosen(
     instrument: null,
     paymentLabel: '',
     note: 'Multiple payment methods are available; choose one on the store page.',
+    reason: 'payment_multiple',
+  };
+}
+
+function classifyCheckoutMessageReason(checkout: any): 'needs_phone' | 'needs_store_page' | null {
+  const msgs = Array.isArray(checkout?.messages) ? checkout.messages : [];
+  let sawPhone = false;
+  for (const m of msgs) {
+    if (!m || typeof m !== 'object') continue;
+    const code = typeof m.code === 'string' ? m.code.trim().toLowerCase() : '';
+    if (!code) continue;
+    if (
+      code.includes('extension') ||
+      code.includes('escalation') ||
+      code.includes('store_page') ||
+      code.includes('buyer_action') ||
+      code.includes('handoff')
+    ) {
+      return 'needs_store_page';
+    }
+    if (code.includes('phone')) {
+      sawPhone = true;
+    }
+  }
+  return sawPhone ? 'needs_phone' : null;
+}
+
+function buildEmptyDiagnostics(reason: string): OrderPrepareStoreDiagnostics {
+  return {
+    reason,
+    status: '',
+    methods: 0,
+    delivery_groups: 0,
+    delivery_options: [],
+    delivery_selected: 0,
+    destinations: 0,
+    destination_selected: false,
+    instruments: 0,
+    totals_types: [],
+    messages: [],
+  };
+}
+
+function buildCheckoutDiagnostics(checkout: any, reason: string): OrderPrepareStoreDiagnostics {
+  const methods = Array.isArray(checkout?.fulfillment?.methods)
+    ? checkout.fulfillment.methods.filter((m: any) => m && typeof m === 'object')
+    : [];
+  let delivery_groups = 0;
+  const delivery_options: number[] = [];
+  let delivery_selected = 0;
+  let destinations = 0;
+
+  for (const m of methods) {
+    const dests = Array.isArray(m.destinations) ? m.destinations : [];
+    destinations += dests.length;
+    const groups = Array.isArray(m.groups) ? m.groups : [];
+    for (const g of groups) {
+      if (!g || typeof g !== 'object') continue;
+      delivery_groups += 1;
+      const opts = Array.isArray(g.options) ? g.options : [];
+      delivery_options.push(opts.length);
+      if (typeof g.selected_option_id === 'string' && g.selected_option_id.trim().length > 0) {
+        delivery_selected += 1;
+      }
+    }
+  }
+
+  const instruments = Array.isArray(checkout?.payment?.instruments)
+    ? checkout.payment.instruments.filter((i: any) => i && typeof i === 'object').length
+    : 0;
+
+  const totals_types = (Array.isArray(checkout?.totals) ? checkout.totals : [])
+    .map((t: any) => (typeof t?.type === 'string' ? t.type.trim() : ''))
+    .filter(Boolean);
+
+  const rawMessages = Array.isArray(checkout?.messages) ? checkout.messages : [];
+  const messages: Array<{ type?: string; code?: string }> = [];
+  for (const m of rawMessages) {
+    if (messages.length >= 3) break;
+    if (!m || typeof m !== 'object') continue;
+    const type = typeof m.type === 'string' && m.type.trim() ? m.type.trim() : undefined;
+    const code = typeof m.code === 'string' && m.code.trim() ? m.code.trim() : undefined;
+    if (type !== undefined || code !== undefined) {
+      messages.push({
+        ...(type !== undefined ? { type } : {}),
+        ...(code !== undefined ? { code } : {}),
+      });
+    }
+  }
+
+  return {
+    reason,
+    status: typeof checkout?.status === 'string' ? checkout.status.trim() : '',
+    methods: methods.length,
+    delivery_groups,
+    delivery_options,
+    delivery_selected,
+    destinations,
+    destination_selected: Boolean(getSelectedCheckoutDestination(checkout)),
+    instruments,
+    totals_types,
+    messages,
   };
 }
 
@@ -1195,6 +1324,7 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           store_unclear: false,
           already_ordered_title: null,
           note: ALREADY_SENT_NOTE,
+          diagnostics: buildEmptyDiagnostics('already_sent'),
           checkout_id: null,
           cart_continue_url: null,
           checkout_continue_url: null,
@@ -1222,6 +1352,7 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           store_unclear: true,
           already_ordered_title: null,
           note: buildStoreUnclearNote(cart.store),
+          diagnostics: buildEmptyDiagnostics('store_unclear'),
           checkout_id: null,
           cart_continue_url: null,
           checkout_continue_url: null,
@@ -1254,6 +1385,7 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           store_unclear: false,
           already_ordered_title: alreadyOrderedTitle,
           note: buildAlreadyOrderedNote(alreadyOrderedTitle),
+          diagnostics: buildEmptyDiagnostics('already_ordered'),
           checkout_id: null,
           cart_continue_url: cart.continue_url ?? null,
           checkout_continue_url: null,
@@ -1280,6 +1412,7 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           store_unclear: false,
           already_ordered_title: null,
           note: 'No cart ID available; finish on the store page.',
+          diagnostics: buildEmptyDiagnostics('no_cart_id'),
           checkout_id: null,
           cart_continue_url: cart.continue_url ?? null,
           checkout_continue_url: null,
@@ -1324,6 +1457,7 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
             store_unclear: false,
             already_ordered_title: null,
             note: 'Could not open store checkout; finish on the store page.',
+            diagnostics: buildCheckoutDiagnostics(checkout, 'checkout_error'),
             checkout_id: null,
             cart_continue_url: cart.continue_url ?? null,
             checkout_continue_url: null,
@@ -1351,6 +1485,7 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
             store_unclear: false,
             already_ordered_title: null,
             note: ALREADY_SENT_NOTE,
+            diagnostics: buildCheckoutDiagnostics(checkout, 'already_sent'),
             checkout_id: checkoutId,
             cart_continue_url: null,
             checkout_continue_url: null,
@@ -1459,10 +1594,22 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           paymentPick.instrument !== null;
 
         let note: string | undefined;
+        let readinessReason = 'ready';
         if (!ready) {
           if (checkoutAlreadyOrderedTitle) {
+            readinessReason = 'already_ordered';
             note = buildAlreadyOrderedNote(checkoutAlreadyOrderedTitle);
           } else if (!isReadyStatus) {
+            const msgReason = classifyCheckoutMessageReason(checkout);
+            if (msgReason) {
+              readinessReason = msgReason;
+            } else if (checkout?.status === 'requires_escalation') {
+              readinessReason = 'status_requires_escalation';
+            } else if (checkout?.status === 'incomplete') {
+              readinessReason = 'status_incomplete';
+            } else {
+              readinessReason = 'status_other';
+            }
             if (!defaultAddress && checkout?.status === 'incomplete') {
               note = 'No default saved shipping address; finish on the store page.';
             } else if (checkout?.status === 'requires_escalation') {
@@ -1475,14 +1622,19 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
                 'Checkout is not ready for one-tap purchase; finish on the store page.';
             }
           } else if (!itemsNonEmpty) {
+            readinessReason = 'no_items';
             note = 'Checkout has no items; finish on the store page.';
           } else if (!itemsMatchBag) {
+            readinessReason = 'items_mismatch';
             note = "Store checkout items don't match your bag; finish on the store page.";
           } else if (!finalTotalValid) {
+            readinessReason = 'total_not_final';
             note = TOTAL_NOT_FINAL_NOTE;
           } else if (!addressOk) {
+            readinessReason = 'address_mismatch';
             note = "Checkout shipping address doesn't match your default address; finish on the store page.";
           } else {
+            readinessReason = paymentPick.reason ?? 'payment_none';
             note = paymentPick.note;
           }
         }
@@ -1504,6 +1656,7 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           store_unclear: false,
           already_ordered_title: checkoutAlreadyOrderedTitle,
           ...(note ? { note: safeMessage(note) } : {}),
+          diagnostics: buildCheckoutDiagnostics(checkout, readinessReason),
           checkout_id: checkoutId,
           cart_continue_url: cart.continue_url ?? null,
           checkout_continue_url: checkoutContinueUrl,
@@ -1531,6 +1684,7 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           store_unclear: false,
           already_ordered_title: null,
           note: 'Could not prepare checkout; finish on the store page.',
+          diagnostics: buildEmptyDiagnostics('checkout_error'),
           checkout_id: null,
           cart_continue_url: cart.continue_url ?? null,
           checkout_continue_url: null,
@@ -1570,7 +1724,12 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
     const ms = Math.max(0, now() - t0);
     logEvent('order_prepare', {
       order_id: orderId,
-      stores: reviewStores.map((s) => ({ store: s.store, total: s.total, ready: s.ready })),
+      stores: storeRecords.map((s) => ({
+        store: s.store,
+        total: s.total,
+        ready: s.ready,
+        ...s.diagnostics,
+      })),
       ms,
     });
 
