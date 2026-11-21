@@ -30,6 +30,8 @@ export function createStore(deps?: StoreDeps): StoreInstance {
     mcp,
     saved,
     search: catalog.search,
+    searchByPhoto: catalog.searchByPhoto,
+    searchLike: catalog.searchLike,
     lookup: catalog.lookup,
     getProduct: catalog.getProduct,
     productImages: catalog.productImages,

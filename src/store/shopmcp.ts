@@ -131,6 +131,20 @@ function isTimeoutError(err: unknown): boolean {
   return name === 'TimeoutError' || name === 'AbortError';
 }
 
+function extractImageDataSecrets(args: Record<string, unknown>): string[] {
+  const catalog = args?.catalog as { like?: unknown } | undefined;
+  const like = catalog?.like;
+  if (!Array.isArray(like)) return [];
+  const out: string[] = [];
+  for (const entry of like) {
+    const data = (entry as { image?: { data?: unknown } } | null)?.image?.data;
+    if (typeof data === 'string' && data.length >= 6) {
+      out.push(data);
+    }
+  }
+  return out;
+}
+
 export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
   const getTargetUrl = () => opts?.url || process.env.SHOP_MCP_URL || DEFAULT_URL;
   const fetchFn = opts?.fetch ?? globalThis.fetch;
@@ -147,8 +161,9 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
   let inFlight = 0;
   const waiters: (() => void)[] = [];
 
-  function sanitize(msg: string): string {
-    return redactSecrets(msg, getSecrets());
+  function sanitize(msg: string, extraSecrets?: readonly string[]): string {
+    const secrets = extraSecrets?.length ? [...getSecrets(), ...extraSecrets] : getSecrets();
+    return redactSecrets(msg, secrets);
   }
 
   function acquire(): Promise<void> {
@@ -214,6 +229,7 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
     tool: string,
     args: Record<string, unknown>,
     o?: ShopMcpCallOptions,
+    argSecrets: readonly string[] = [],
   ): Promise<any> {
     assertToolAllowed(tool, o);
 
@@ -327,7 +343,7 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
         }
         throw new ShopMcpError(
           'network',
-          sanitize(err instanceof Error ? err.message : String(err)),
+          sanitize(err instanceof Error ? err.message : String(err), argSecrets),
         );
       }
 
@@ -342,7 +358,10 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
         if (err instanceof ShopMcpError) throw err;
         throw new ShopMcpError(
           'parse',
-          sanitize(`Invalid JSON from Shop MCP: ${err instanceof Error ? err.message : String(err)}`),
+          sanitize(
+            `Invalid JSON from Shop MCP: ${err instanceof Error ? err.message : String(err)}`,
+            argSecrets,
+          ),
         );
       }
 
@@ -351,7 +370,7 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
           typeof payload.error.message === 'string'
             ? payload.error.message
             : JSON.stringify(payload.error);
-        throw new ShopMcpError('rpc', sanitize(msg));
+        throw new ShopMcpError('rpc', sanitize(msg, argSecrets));
       }
 
       const result = payload?.result;
@@ -380,7 +399,7 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
               .filter(Boolean)
               .join('\n') || 'Shop MCP tool error'
           : 'Shop MCP tool error';
-        throw new ShopMcpError('tool', sanitize(text), { upstreamCode, continueUrl });
+        throw new ShopMcpError('tool', sanitize(text, argSecrets), { upstreamCode, continueUrl });
       }
 
       if (result.structuredContent !== undefined && result.structuredContent !== null) {
@@ -396,6 +415,7 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
             'parse',
             sanitize(
               `Invalid tool content JSON: ${err instanceof Error ? err.message : String(err)}`,
+              argSecrets,
             ),
           );
         }
@@ -407,8 +427,8 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
     }
   }
 
-  function summarizeErrorForLog(message: string): string {
-    const cleaned = sanitize(message).trim();
+  function summarizeErrorForLog(message: string, extraSecrets?: readonly string[]): string {
+    const cleaned = sanitize(message, extraSecrets).trim();
     if (cleaned.startsWith('{')) {
       try {
         const parsed = JSON.parse(cleaned) as {
@@ -422,7 +442,7 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
             })
             .filter(Boolean);
           if (parts.length > 0) {
-            return sanitize(parts.join('; ')).slice(0, 300);
+            return sanitize(parts.join('; '), extraSecrets).slice(0, 300);
           }
         }
       } catch {
@@ -437,14 +457,15 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
     args: Record<string, unknown>,
     o?: ShopMcpCallOptions,
   ): Promise<any> {
+    const argSecrets = extractImageDataSecrets(args);
     try {
-      return await callInner(tool, args, o);
+      return await callInner(tool, args, o, argSecrets);
     } catch (err) {
       if (err instanceof ShopMcpError) {
         logEvent('store_error', {
           tool,
           code: err.code,
-          message: summarizeErrorForLog(err.message),
+          message: summarizeErrorForLog(err.message, argSecrets),
           ...(err.status !== undefined ? { status: err.status } : {}),
           ...(err.retryAfterMs !== undefined ? { retry_after_ms: err.retryAfterMs } : {}),
           ...(err.upstreamCode ? { upstream_code: err.upstreamCode } : {}),

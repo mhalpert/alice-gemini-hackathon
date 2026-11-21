@@ -5,12 +5,14 @@ import { ALL_SITES, OTHER_SITES } from './stores.ts';
 
 export {
   search,
+  searchByPhoto,
+  searchLike,
   lookup,
   getProduct,
   sizeVariant,
   productImages,
 } from './catalog.ts';
-export type { ProductDetail } from './catalog.ts';
+export type { ProductDetail, PhotoSearchOpts } from './catalog.ts';
 
 export { createCart, getCart, updateCart } from './cart.ts';
 

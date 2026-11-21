@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createShopMcp, ShopMcpError } from '../src/store/shopmcp.ts';
+import { setCallLogSink, setCallRoom } from '../src/store/log.ts';
 import { createSavedStore, savedKey } from '../src/store/saved.ts';
 import { toItem, wrongDepartment } from '../src/store/catalog.ts';
 import { createStore } from '../src/store/factory.ts';
@@ -1221,5 +1222,205 @@ describe('cart client', () => {
     assert.match(errRes.error ?? '', /67966605459748 does not exist/);
     assert.equal(errRes.messages.length, 1);
     assert.equal(errRes.messages[0].path, '$.add_items[0].product_variant_id');
+  });
+});
+
+describe('searchByPhoto and searchLike', () => {
+  it('sends like image base64 inside catalog with gender filter, department-filters results, logs kind:"photo" without bytes, and never writes to saved store', async () => {
+    const searchFixture = loadFixtureJson('search.json');
+    const capturedBodies: any[] = [];
+    const fakeJpeg = Buffer.from('FAKE_JPEG_SHOPPER_SELFIE_BYTES_123456');
+    const expectedB64 = fakeJpeg.toString('base64');
+
+    // Add a wrong-department product to the fixture response to prove department filtering runs
+    const responsePayload = structuredClone(searchFixture);
+    const wrongDeptProduct = structuredClone(responsePayload.result.structuredContent.products[0]);
+    wrongDeptProduct.id = 'gid://shopify/p/womens-skirt-wrong';
+    wrongDeptProduct.title = "Women's Pleated Skirt";
+    responsePayload.result.structuredContent.products.push(wrongDeptProduct);
+
+    const fakeFetch: typeof fetch = async (_url, init) => {
+      capturedBodies.push(JSON.parse(String(init?.body)));
+      return jsonResponse(responsePayload);
+    };
+
+    const savedDir = makeTempDir();
+    const saved = createSavedStore({ dir: savedDir });
+    const mcp = createShopMcp({ fetch: fakeFetch });
+    const store = createStore({ mcp, saved });
+
+    const stdoutLines: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => stdoutLines.push(args.map(String).join(' '));
+    try {
+      const res = await store.searchByPhoto(fakeJpeg, 'men', { limit: 12 });
+      assert.equal(res.source, 'live');
+      assert.ok(res.items.length > 0);
+      assert.equal(
+        res.items.some((i) => i.id === 'gid://shopify/p/womens-skirt-wrong'),
+        false,
+        'wrong-department item must be filtered out',
+      );
+    } finally {
+      console.log = origLog;
+    }
+
+    assert.equal(capturedBodies.length, 1);
+    const cat = capturedBodies[0].params.arguments.catalog;
+    assert.equal(cat.query, undefined);
+    assert.deepEqual(cat.like, [
+      { image: { content_type: 'image/jpeg', data: expectedB64 } },
+    ]);
+    assert.deepEqual(cat.filters.attributes, [{ name: 'Target gender', values: ['Male'] }]);
+    assert.equal(cat.filters.available, true);
+    assert.equal(cat.pagination.limit, 12);
+
+    // Nothing written to saved store
+    assert.deepEqual(fs.readdirSync(savedDir), []);
+
+    // Privacy: image bytes / base64 must never appear in stdout logs
+    const joinedOut = stdoutLines.join('\n');
+    assert.equal(joinedOut.includes(expectedB64), false);
+    assert.equal(joinedOut.includes('FAKE_JPEG_SHOPPER'), false);
+    assert.match(joinedOut, /\[store\] photo search men \d+ items \d+ms/);
+  });
+
+  it('refuses oversize images (> 2.5 MB) with zero network requests and returns empty', async () => {
+    let fetchCalls = 0;
+    const mcp = createShopMcp({
+      fetch: async () => {
+        fetchCalls += 1;
+        return jsonResponse({});
+      },
+    });
+    const store = createStore({ mcp, saved: createSavedStore({ dir: makeTempDir() }) });
+
+    const huge = new Uint8Array(2_500_001);
+    const res = await store.searchByPhoto(huge, 'women', { query: "women's casual" });
+    assert.equal(fetchCalls, 0);
+    assert.equal(res.source, 'empty');
+    assert.deepEqual(res.items, []);
+  });
+
+  it('falls back to text search(opts.query) on failure when query is given, else returns empty', async () => {
+    const searchFixture = loadFixtureJson('search.json');
+    const seenCalls: any[] = [];
+    const fakeFetch: typeof fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      seenCalls.push(body.params.arguments.catalog);
+      if (body.params.arguments.catalog.like) {
+        return new Response('boom', { status: 503 });
+      }
+      return jsonResponse(searchFixture);
+    };
+
+    const mcp = createShopMcp({ fetch: fakeFetch });
+    const store = createStore({ mcp, saved: createSavedStore({ dir: makeTempDir() }) });
+
+    // With query -> falls back to text search
+    const withQuery = await store.searchByPhoto(Buffer.from('abc'), 'men', {
+      query: "men's leather loafers",
+      limit: 6,
+    });
+    assert.equal(withQuery.source, 'live');
+    assert.ok(withQuery.items.length > 0);
+    assert.equal(seenCalls.length, 2);
+    assert.ok(seenCalls[0].like);
+    assert.equal(seenCalls[1].like, undefined);
+    assert.equal(seenCalls[1].query, "men's leather loafers");
+
+    // Without query -> returns empty without throwing
+    const noQuery = await store.searchByPhoto(Buffer.from('abc'), 'men');
+    assert.equal(noQuery.source, 'empty');
+    assert.deepEqual(noQuery.items, []);
+  });
+
+  it('searchLike sends up to 2 product/variant IDs in catalog.like, maps results, and never writes to saved store', async () => {
+    const searchFixture = loadFixtureJson('search.json');
+    const seen: any[] = [];
+    const savedDir = makeTempDir();
+    const mcp = createShopMcp({
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        seen.push(body.params.arguments.catalog);
+        return jsonResponse(searchFixture);
+      },
+    });
+    const store = createStore({ mcp, saved: createSavedStore({ dir: savedDir }) });
+
+    const res = await store.searchLike(
+      ['gid://shopify/p/1', 'gid://shopify/p/2', 'gid://shopify/p/3'],
+      'men',
+      { query: 'loafers', limit: 8 },
+    );
+    assert.equal(res.source, 'live');
+    assert.ok(res.items.length > 0);
+    assert.deepEqual(seen[0].like, [{ id: 'gid://shopify/p/1' }, { id: 'gid://shopify/p/2' }]);
+    assert.equal(seen[0].query, 'loafers');
+    assert.deepEqual(seen[0].filters.attributes, [{ name: 'Target gender', values: ['Male'] }]);
+    assert.deepEqual(fs.readdirSync(savedDir), []);
+  });
+
+  it('on failure, store_error event and all console lines contain neither the base64 string nor raw image bytes', async () => {
+    const rawMarker = 'PRIVATE_CAMERA_FRAME_BYTES_998877';
+    const fakeJpeg = Buffer.from(rawMarker);
+    const expectedB64 = fakeJpeg.toString('base64');
+
+    const logEvents: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+    const consoleLines: string[] = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    console.log = (...args: unknown[]) => consoleLines.push(args.map(String).join(' '));
+    console.error = (...args: unknown[]) => consoleLines.push(args.map(String).join(' '));
+    setCallRoom('room-photo-err-test');
+    setCallLogSink((room, ev, data) => logEvents.push({ room, ev, data }));
+
+    try {
+      // Case 1: RPC error echoing the base64 image data back from upstream
+      const mcpRpcErr = createShopMcp({
+        fetch: async () =>
+          jsonResponse({
+            jsonrpc: '2.0',
+            id: 1,
+            error: { message: `bad image payload: ${expectedB64}` },
+          }),
+      });
+      const store1 = createStore({ mcp: mcpRpcErr, saved: createSavedStore({ dir: makeTempDir() }) });
+      const res1 = await store1.searchByPhoto(fakeJpeg, 'men');
+      assert.equal(res1.source, 'empty');
+
+      // Case 2: network throw containing the base64 string
+      const mcpNetErr = createShopMcp({
+        fetch: async () => {
+          throw new Error(`network failure while sending ${expectedB64}`);
+        },
+      });
+      const store2 = createStore({ mcp: mcpNetErr, saved: createSavedStore({ dir: makeTempDir() }) });
+      const res2 = await store2.searchByPhoto(fakeJpeg, 'women');
+      assert.equal(res2.source, 'empty');
+
+      const errorEvents = logEvents.filter((e) => e.ev === 'store_error');
+      assert.equal(errorEvents.length, 2);
+
+      const serialized = JSON.stringify({ logEvents, consoleLines });
+      assert.equal(
+        serialized.includes(expectedB64),
+        false,
+        'base64 image string must never appear in store_error or console output',
+      );
+      assert.equal(
+        serialized.includes(rawMarker),
+        false,
+        'raw image bytes marker must never appear in store_error or console output',
+      );
+      // Confirm redaction actually ran on the echoed RPC error message
+      assert.match(String(errorEvents[0].data?.message ?? ''), /\[REDACTED\]/);
+      assert.match(String(errorEvents[1].data?.message ?? ''), /\[REDACTED\]/);
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+      setCallLogSink(null);
+      setCallRoom(null);
+    }
   });
 });
