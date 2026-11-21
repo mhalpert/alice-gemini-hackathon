@@ -52,13 +52,13 @@ export const ROOM_VAD_PRESETS: Record<RoomMode, Omit<VadConfig, 'room'>> = {
   noisy: {
     startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
     endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
-    silenceDurationMs: 500,
+    silenceDurationMs: 1000,
     prefixPaddingMs: 150,
   },
   quiet: {
     startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
     endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
-    silenceDurationMs: 500,
+    silenceDurationMs: 1000,
     prefixPaddingMs: undefined,
   },
 };

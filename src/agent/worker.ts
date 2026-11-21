@@ -650,6 +650,8 @@ export default defineAgent({
     toolFillerRef = toolFiller;
 
     const silenceCheckIn = createSilenceCheckIn({
+      // 20 s, not the 9 s default: a long opening line was being talked over by the check-in.
+      firstDelayMs: 20_000,
       room: roomName,
       generateReply: (opts) => sessionRef?.generateReply(opts),
       isSuppressed: () =>
