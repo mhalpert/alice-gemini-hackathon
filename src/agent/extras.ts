@@ -2,47 +2,85 @@ import { calllog } from '../calllog.ts';
 import type { AgentStateValue, TimerHandle } from './context.ts';
 
 export type TryOnExtraKind = 'scene' | 'video';
+export type RevealBeatKind = 'studio' | 'scene' | 'video';
+export type ExtraAssetStatus = 'pending' | 'ready' | 'failed' | 'absent';
 
-export const DEFAULT_EXTRA_ANNOUNCE_MAX_WAIT_MS = 10_000;
-export const DEFAULT_EXTRA_ANNOUNCE_RETRY_MS = 500;
+export const DEFAULT_STUDIO_HOLD_MS = 5_000;
+export const DEFAULT_SCENE_HOLD_MS = 6_000;
+export const DEFAULT_EXTRA_WAIT_TIMEOUT_MS = 20_000;
+export const DEFAULT_SIZES_FALLBACK_MS = 3_000;
 
-export type ExtraAnnounceLogFn = (
+export type RevealSequencerLogFn = (
   room: string,
   ev: string,
   data?: Record<string, unknown>,
 ) => void;
 
-export interface ExtraAnnounceEvent {
+export interface StartRevealSequenceParams {
   outfit: number;
-  kind: TryOnExtraKind;
+  version?: number;
   setting: string;
+  scene: ExtraAssetStatus;
+  video: ExtraAssetStatus;
+  sizesAlreadyPrompted?: boolean;
+  getSizesInstruction: () => string;
 }
 
-export interface ExtraAnnouncerOptions {
+export interface RevealSequencerOptions {
   room: string;
+  sendReveal: (payload: { outfit: number; kind: TryOnExtraKind }) => Promise<unknown> | unknown;
   generateReply: (opts: { instructions: string }) => unknown;
-  maxWaitMs?: number;
-  retryIntervalMs?: number;
+  studioHoldMs?: number;
+  sceneHoldMs?: number;
+  extraWaitTimeoutMs?: number;
+  sizesFallbackMs?: number;
   initialAgentState?: AgentStateValue;
   initialUserState?: string;
-  log?: ExtraAnnounceLogFn;
+  log?: RevealSequencerLogFn;
   now?: () => number;
   setTimeoutFn?: (fn: () => void, ms: number) => TimerHandle;
   clearTimeoutFn?: (handle: TimerHandle) => void;
 }
 
-export interface ExtraAnnouncer {
-  announce(ev: ExtraAnnounceEvent): void;
+export interface RevealSequencer {
+  startStudio(params: StartRevealSequenceParams): void;
+  onExtraReady(
+    outfit: number,
+    kind: TryOnExtraKind,
+    opts?: { version?: number; setting?: string },
+  ): void;
+  onExtraFailed(
+    outfit: number,
+    kind: TryOnExtraKind,
+    opts?: { version?: number },
+  ): void;
   onAgentStateChanged(nextState: AgentStateValue): void;
   onUserStateChanged(nextState: string): void;
-  onToolStart(callId: string): void;
+  onShopperSpoke(): void;
+  onAssistantMessage(): void;
+  onToolStart(callId: string, toolName?: string): void;
   onToolEnd(callId: string): void;
+  cancel(outfit?: number): void;
   dispose(): void;
-  readonly hasPending: boolean;
+  readonly isActive: boolean;
 }
 
-interface PendingExtraAnnounce extends ExtraAnnounceEvent {
-  deadline: number;
+interface ActiveSequence {
+  outfit: number;
+  version?: number;
+  setting: string;
+  scene: ExtraAssetStatus;
+  video: ExtraAssetStatus;
+  sceneRevealed: boolean;
+  videoRevealed: boolean;
+  lastBeatKind: RevealBeatKind;
+  lastBeatAt: number;
+  beatSpeechStarted: boolean;
+  beatSpeechDone: boolean;
+  sizesReadySince: number | null;
+  sizesSent: boolean;
+  shopperSpoke: boolean;
+  getSizesInstruction: () => string;
 }
 
 const TRAILING_STOPWORDS = new Set([
@@ -88,32 +126,48 @@ export function shortenSettingPhrase(raw: string | null | undefined): string {
 }
 
 /**
- * Builds the one-line spoken instruction for Alice when a late-landing scene
- * still or short video arrives after the studio reveal already happened.
+ * Builds the one-line spoken instruction for Beat 2 (on-location scene still).
  */
-export function buildExtraAnnounceInstruction(kind: TryOnExtraKind, setting: string): string {
-  const label = kind === 'video' ? 'short video' : 'on-location shot';
+export function buildSceneRevealInstruction(setting: string): string {
   const shortSetting = shortenSettingPhrase(setting);
   const settingPart = shortSetting
-    ? `naming the setting ("${shortSetting}") in three or four words`
-    : 'naming the setting in three or four words';
-  return `Give one short line in your voice as Alice saying the ${label} of them just landed on screen, ${settingPart}. Do not describe any details you cannot know and do not ask a question.`;
+    ? `naming the setting ("${shortSetting}") in a few words (like "and this is you at the ${shortSetting}")`
+    : 'naming the event setting in a few words from the occasion';
+  return `The on-location shot of them in this look just came up on screen. Give ONE short line in your voice as Alice saying this is them at the event, ${settingPart}. Do not invent any visual details and do not ask a question.`;
 }
 
 /**
- * Delivers a one-line spoken reaction when a scene still or short video lands
- * after the studio reveal, only when neither Alice nor the shopper is speaking
- * and no tool is running. Waits and retries for up to 10 s, then skips speech
- * while leaving the reveal on screen.
+ * Builds the one-line spoken instruction for Beat 3 (short motion video).
  */
-export function createExtraAnnouncer(options: ExtraAnnouncerOptions): ExtraAnnouncer {
+export function buildVideoRevealInstruction(setting?: string): string {
+  const shortSetting = shortenSettingPhrase(setting);
+  const eventPart = shortSetting ? ` at the ${shortSetting}` : ' at the event';
+  return `The short video of them in this look just came up on screen. Give ONE short line in your voice as Alice saying this is them in motion${eventPart}. Do not invent any visual details and do not ask a question.`;
+}
+
+/**
+ * Orchestrates the three-beat try-on reveal (studio -> scene -> video) plus the
+ * single end-of-sequence sizes/bag prompt:
+ * - Holds studio at least 5 s and waits for Alice to finish her studio line
+ *   before bringing up the scene still.
+ * - Holds scene at least 6 s and waits for Alice to finish her scene line
+ *   before bringing up the video.
+ * - Waits up to 20 s after the previous beat for a pending render, then skips
+ *   it silently; failed or missing renders are never mentioned.
+ * - If the shopper speaks during the sequence, keeps sending page reveals on
+ *   schedule but skips all remaining spoken lines.
+ * - Logs `reveal_beat { outfit, kind, spoken, waited_ms }`.
+ */
+export function createRevealSequencer(options: RevealSequencerOptions): RevealSequencer {
   const logFn = options.log ?? calllog;
   const nowFn = options.now ?? (() => Date.now());
-  const maxWaitMs = Math.max(0, options.maxWaitMs ?? DEFAULT_EXTRA_ANNOUNCE_MAX_WAIT_MS);
-  const retryIntervalMs = Math.max(
-    1,
-    options.retryIntervalMs ?? DEFAULT_EXTRA_ANNOUNCE_RETRY_MS,
+  const studioHoldMs = Math.max(0, options.studioHoldMs ?? DEFAULT_STUDIO_HOLD_MS);
+  const sceneHoldMs = Math.max(0, options.sceneHoldMs ?? DEFAULT_SCENE_HOLD_MS);
+  const extraWaitTimeoutMs = Math.max(
+    0,
+    options.extraWaitTimeoutMs ?? DEFAULT_EXTRA_WAIT_TIMEOUT_MS,
   );
+  const sizesFallbackMs = Math.max(0, options.sizesFallbackMs ?? DEFAULT_SIZES_FALLBACK_MS);
   const setTimeoutFn = options.setTimeoutFn ?? ((fn, ms) => setTimeout(fn, ms));
   const clearTimeoutFn =
     options.clearTimeoutFn ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
@@ -122,10 +176,10 @@ export function createExtraAnnouncer(options: ExtraAnnouncerOptions): ExtraAnnou
   let userState: string = options.initialUserState ?? 'listening';
   let disposed = false;
   let timer: TimerHandle | null = null;
+  let active: ActiveSequence | null = null;
   let syntheticToolCounter = 0;
 
   const activeTools = new Set<string>();
-  const queue: PendingExtraAnnounce[] = [];
 
   function cancelTimer(): void {
     if (timer !== null) {
@@ -134,117 +188,312 @@ export function createExtraAnnouncer(options: ExtraAnnouncerOptions): ExtraAnnou
     }
   }
 
-  function isBusy(): boolean {
-    return agentState === 'speaking' || userState === 'speaking' || activeTools.size > 0;
-  }
-
-  function speakItem(item: ExtraAnnounceEvent): void {
-    const instructions = buildExtraAnnounceInstruction(item.kind, item.setting);
-    try {
-      options.generateReply({ instructions });
-      logFn(options.room, 'extra_announce', {
-        outfit: item.outfit,
-        kind: item.kind,
-        spoken: true,
-      });
-    } catch (err) {
-      logFn(options.room, 'session_error', {
-        source: 'extra_announce',
-        outfit: item.outfit,
-        kind: item.kind,
-        error: err instanceof Error ? err : new Error(String(err)),
-      });
-      logFn(options.room, 'extra_announce', {
-        outfit: item.outfit,
-        kind: item.kind,
-        spoken: false,
-      });
-    }
-  }
-
-  function scheduleNextTick(): void {
+  function armTimer(delayMs: number): void {
     cancelTimer();
-    if (disposed || queue.length === 0) return;
-
-    const remaining = Math.max(0, queue[0]!.deadline - nowFn());
-    const delay = Math.min(retryIntervalMs, remaining);
+    if (disposed || !active) return;
+    const ms = Math.max(0, Math.ceil(delayMs));
     timer = setTimeoutFn(() => {
       timer = null;
-      processQueue();
-    }, delay);
+      evaluate();
+    }, ms);
     timer.unref?.();
   }
 
-  function processQueue(): void {
-    cancelTimer();
-    if (disposed || queue.length === 0) return;
-
-    const now = nowFn();
-    while (queue.length > 0 && now >= queue[0]!.deadline) {
-      const expired = queue.shift()!;
-      logFn(options.room, 'extra_announce', {
-        outfit: expired.outfit,
-        kind: expired.kind,
-        spoken: false,
-      });
-    }
-
-    if (queue.length === 0) return;
-
-    if (!isBusy()) {
-      const item = queue.shift()!;
-      speakItem(item);
-      if (queue.length > 0) {
-        scheduleNextTick();
-      }
-      return;
-    }
-
-    scheduleNextTick();
+  function isSpeechBlocked(): boolean {
+    return agentState === 'speaking' || userState === 'speaking' || activeTools.size > 0;
   }
 
-  return {
-    get hasPending(): boolean {
-      return queue.length > 0;
-    },
+  function nextTargetBeat(seq: ActiveSequence): TryOnExtraKind | 'sizes' | null {
+    if (!seq.sceneRevealed && (seq.scene === 'ready' || seq.scene === 'pending')) {
+      return 'scene';
+    }
+    if (!seq.videoRevealed && (seq.video === 'ready' || seq.video === 'pending')) {
+      return 'video';
+    }
+    if (!seq.sizesSent && !seq.shopperSpoke) {
+      return 'sizes';
+    }
+    return null;
+  }
 
-    announce(ev: ExtraAnnounceEvent): void {
-      if (disposed) return;
+  function evaluate(): void {
+    cancelTimer();
+    if (disposed || !active) return;
 
-      if (!isBusy() && queue.length === 0) {
-        speakItem(ev);
+    while (active && !disposed) {
+      const seq = active;
+      const target = nextTargetBeat(seq);
+
+      if (target === null) {
+        active = null;
         return;
       }
 
-      queue.push({
-        outfit: ev.outfit,
-        kind: ev.kind,
-        setting: ev.setting,
-        deadline: nowFn() + maxWaitMs,
+      const now = nowFn();
+
+      if (target === 'scene' || target === 'video') {
+        const elapsed = now - seq.lastBeatAt;
+        const minHoldMs = seq.lastBeatKind === 'scene' ? sceneHoldMs : studioHoldMs;
+        const status = target === 'scene' ? seq.scene : seq.video;
+
+        if (status === 'pending') {
+          if (elapsed >= extraWaitTimeoutMs) {
+            if (target === 'scene') {
+              seq.scene = 'failed';
+            } else {
+              seq.video = 'failed';
+            }
+            continue;
+          }
+          armTimer(extraWaitTimeoutMs - elapsed);
+          return;
+        }
+
+        // Asset is ready: always respect minimum on-screen hold for the previous beat.
+        if (elapsed < minHoldMs) {
+          armTimer(minHoldMs - elapsed);
+          return;
+        }
+
+        // Wait until Alice finishes her current beat line (unless shopper already spoke and speech is skipped).
+        if (!seq.shopperSpoke && isSpeechBlocked()) {
+          return;
+        }
+
+        const waitedMs = Math.max(0, Math.round(elapsed));
+        if (target === 'scene') {
+          seq.sceneRevealed = true;
+        } else {
+          seq.videoRevealed = true;
+        }
+        seq.lastBeatKind = target;
+        seq.lastBeatAt = now;
+        seq.sizesReadySince = null;
+
+        try {
+          void Promise.resolve(options.sendReveal({ outfit: seq.outfit, kind: target })).catch(
+            () => {},
+          );
+        } catch {
+          // Ignore synchronous send errors so sequencing does not stall.
+        }
+
+        let spoken = false;
+        if (!seq.shopperSpoke) {
+          const instructions =
+            target === 'scene'
+              ? buildSceneRevealInstruction(seq.setting)
+              : buildVideoRevealInstruction(seq.setting);
+          try {
+            options.generateReply({ instructions });
+            spoken = true;
+          } catch (err) {
+            logFn(options.room, 'session_error', {
+              source: 'reveal_beat',
+              outfit: seq.outfit,
+              kind: target,
+              error: err instanceof Error ? err : new Error(String(err)),
+            });
+          }
+        }
+
+        seq.beatSpeechStarted = false;
+        seq.beatSpeechDone = !spoken;
+
+        logFn(options.room, 'reveal_beat', {
+          outfit: seq.outfit,
+          kind: target,
+          spoken,
+          waited_ms: waitedMs,
+        });
+
+        continue;
+      }
+
+      // target === 'sizes'
+      if (isSpeechBlocked()) {
+        return;
+      }
+
+      if (seq.beatSpeechDone) {
+        seq.sizesSent = true;
+        active = null;
+        try {
+          const instructions = seq.getSizesInstruction();
+          if (instructions && instructions.trim().length > 0) {
+            options.generateReply({ instructions });
+          }
+        } catch (err) {
+          logFn(options.room, 'session_error', {
+            source: 'reveal_sizes',
+            outfit: seq.outfit,
+            error: err instanceof Error ? err : new Error(String(err)),
+          });
+        }
+        return;
+      }
+
+      // Waiting for Alice to start and finish the last beat's spoken line; fall back if silent.
+      if (seq.sizesReadySince === null) {
+        seq.sizesReadySince = now;
+      }
+      const waitElapsed = now - seq.sizesReadySince;
+      if (waitElapsed >= sizesFallbackMs) {
+        seq.beatSpeechDone = true;
+        continue;
+      }
+
+      armTimer(sizesFallbackMs - waitElapsed);
+      return;
+    }
+  }
+
+  return {
+    get isActive(): boolean {
+      return active !== null;
+    },
+
+    startStudio(params: StartRevealSequenceParams): void {
+      if (disposed) return;
+      cancelTimer();
+
+      const now = nowFn();
+      const sizesAlreadyPrompted = Boolean(params.sizesAlreadyPrompted);
+
+      active = {
+        outfit: params.outfit,
+        version: params.version,
+        setting: params.setting,
+        scene: params.scene,
+        video: params.video,
+        sceneRevealed: false,
+        videoRevealed: false,
+        lastBeatKind: 'studio',
+        lastBeatAt: now,
+        beatSpeechStarted: false,
+        beatSpeechDone: false,
+        sizesReadySince: null,
+        sizesSent: sizesAlreadyPrompted,
+        shopperSpoke: false,
+        getSizesInstruction: params.getSizesInstruction,
+      };
+
+      logFn(options.room, 'reveal_beat', {
+        outfit: params.outfit,
+        kind: 'studio',
+        spoken: true,
+        waited_ms: 0,
       });
-      scheduleNextTick();
+
+      evaluate();
+    },
+
+    onExtraReady(
+      outfit: number,
+      kind: TryOnExtraKind,
+      opts?: { version?: number; setting?: string },
+    ): void {
+      if (disposed || !active) return;
+      if (active.outfit !== outfit) return;
+      if (
+        active.version !== undefined &&
+        opts?.version !== undefined &&
+        active.version !== opts.version
+      ) {
+        return;
+      }
+
+      if (opts?.setting && opts.setting.trim().length > 0) {
+        active.setting = opts.setting.trim();
+      }
+
+      if (kind === 'scene' && !active.sceneRevealed) {
+        active.scene = 'ready';
+      } else if (kind === 'video' && !active.videoRevealed) {
+        active.video = 'ready';
+      }
+
+      evaluate();
+    },
+
+    onExtraFailed(
+      outfit: number,
+      kind: TryOnExtraKind,
+      opts?: { version?: number },
+    ): void {
+      if (disposed || !active) return;
+      if (active.outfit !== outfit) return;
+      if (
+        active.version !== undefined &&
+        opts?.version !== undefined &&
+        active.version !== opts.version
+      ) {
+        return;
+      }
+
+      if (kind === 'scene' && !active.sceneRevealed) {
+        active.scene = 'failed';
+      } else if (kind === 'video' && !active.videoRevealed) {
+        active.video = 'failed';
+      }
+
+      evaluate();
     },
 
     onAgentStateChanged(nextState: AgentStateValue): void {
       if (disposed) return;
+      const prevState = agentState;
       agentState = nextState;
-      if (queue.length > 0 && !isBusy()) {
-        processQueue();
+
+      if (!active) return;
+
+      if (nextState === 'speaking') {
+        active.beatSpeechStarted = true;
+        active.sizesReadySince = null;
+        return;
       }
+
+      if (prevState === 'speaking' && active.beatSpeechStarted) {
+        active.beatSpeechDone = true;
+      }
+
+      evaluate();
     },
 
     onUserStateChanged(nextState: string): void {
       if (disposed) return;
       userState = nextState;
-      if (queue.length > 0 && !isBusy()) {
-        processQueue();
+
+      if (!active) return;
+
+      if (nextState === 'speaking') {
+        active.shopperSpoke = true;
+      }
+
+      evaluate();
+    },
+
+    onShopperSpoke(): void {
+      if (disposed || !active) return;
+      active.shopperSpoke = true;
+      evaluate();
+    },
+
+    onAssistantMessage(): void {
+      if (disposed || !active) return;
+      if (active.beatSpeechStarted && agentState !== 'speaking') {
+        active.beatSpeechDone = true;
+        evaluate();
       }
     },
 
-    onToolStart(callId: string): void {
+    onToolStart(callId: string, toolName?: string): void {
       if (disposed) return;
       const key = callId || `__tool_${++syntheticToolCounter}`;
       activeTools.add(key);
+      if (active && toolName === 'add_to_bag') {
+        active.shopperSpoke = true;
+      }
     },
 
     onToolEnd(callId: string): void {
@@ -254,15 +503,22 @@ export function createExtraAnnouncer(options: ExtraAnnouncerOptions): ExtraAnnou
       } else {
         activeTools.clear();
       }
-      if (queue.length > 0 && !isBusy()) {
-        processQueue();
+      if (active) {
+        evaluate();
       }
+    },
+
+    cancel(outfit?: number): void {
+      if (!active) return;
+      if (outfit !== undefined && active.outfit !== outfit) return;
+      cancelTimer();
+      active = null;
     },
 
     dispose(): void {
       disposed = true;
       cancelTimer();
-      queue.length = 0;
+      active = null;
       activeTools.clear();
     },
   };

@@ -2,9 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as google from '@livekit/agents-plugin-google';
 import {
+  DEFAULT_REPEAT_WINDOW_MS,
   INTERRUPT_TOOL_NAMES,
   REQUIRED_PATCH_METHODS,
+  SILENT_TOOL_NAMES,
   applyRealtimeSessionPatches,
+  createRepeatDetector,
   sendInterimToolNote,
   type PatchableRealtimeSession,
 } from '../src/agent/patches.ts';
@@ -59,7 +62,7 @@ test('patch (a) suppresses handleInputSpeechStarted during startNewGeneration an
   assert.equal(speechStartedCalls, 3);
 });
 
-test('patch (b) schedules final priority tool results INTERRUPT and leaves others WHEN_IDLE', () => {
+test('patch (b) schedules set_department/remember SILENT, priority tools INTERRUPT, and others WHEN_IDLE', () => {
   const fakeSession: PatchableRealtimeSession = {
     handleInputSpeechStarted() {},
     startNewGeneration() {},
@@ -74,8 +77,9 @@ test('patch (b) schedules final priority tool results INTERRUPT and leaves other
           { id: '6', name: 'pick_outfit', response: { output: 'picked' } },
           { id: '7', name: 'show_product', response: { output: 'shown' } },
           { id: '8', name: 'remember', response: { output: 'noted' }, scheduling: FunctionResponseScheduling.WHEN_IDLE },
-          { id: '9', name: 'set_department', response: { output: 'men' } },
+          { id: '9', name: 'set_department', response: { output: 'Department set to men.' } },
           { id: '10', name: 'hide_product', response: { output: 'closed' }, scheduling: FunctionResponseScheduling.SILENT },
+          { id: '11', name: 'show_all_looks', response: { output: 'all' } },
         ],
       };
     },
@@ -96,14 +100,79 @@ test('patch (b) schedules final priority tool results INTERRUPT and leaves other
   // Interim willContinue: true stays WHEN_IDLE even for a priority tool.
   assert.equal(byId.get('2')!.scheduling, FunctionResponseScheduling.WHEN_IDLE);
 
-  // Non-priority tools stay WHEN_IDLE (and SILENT stays SILENT).
-  assert.equal(byId.get('8')!.scheduling, FunctionResponseScheduling.WHEN_IDLE);
-  assert.equal(byId.get('9')!.scheduling, FunctionResponseScheduling.WHEN_IDLE);
+  // set_department and remember become SILENT so their results do not trigger a repeated model turn.
+  for (const id of ['8', '9']) {
+    const fr = byId.get(id)!;
+    assert.ok(SILENT_TOOL_NAMES.has(fr.name!));
+    assert.equal(fr.scheduling, FunctionResponseScheduling.SILENT, `expected SILENT for ${fr.name}`);
+  }
+
+  // Already-SILENT stays SILENT, other non-priority tools become WHEN_IDLE.
   assert.equal(byId.get('10')!.scheduling, FunctionResponseScheduling.SILENT);
+  assert.equal(byId.get('11')!.scheduling, FunctionResponseScheduling.WHEN_IDLE);
 
   // On Vertex AI (vertexai=true), scheduling is left untouched.
   const vertexOut = fakeSession.getToolResultsForRealtime!({}, true);
   assert.equal(vertexOut!.functionResponses![0]!.scheduling, FunctionResponseScheduling.WHEN_IDLE);
+});
+
+test('createRepeatDetector logs repeat_detected on normalised exact or 60-char prefix match within 20s only', () => {
+  let now = 10_000;
+  const logs: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+  const detector = createRepeatDetector({
+    room: 'rep-room',
+    now: () => now,
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+  });
+
+  // First line: no repeat.
+  assert.equal(
+    detector.onAssistantMessage("I'm setting your department to men, so tell me, what's the occasion?"),
+    false,
+  );
+  assert.equal(logs.length, 0);
+
+  // Identical normalised line 5s later -> repeat_detected!
+  now += 5_000;
+  assert.equal(
+    detector.onAssistantMessage("I'm setting your department to men so tell me what's the occasion!"),
+    true,
+  );
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0]!.ev, 'repeat_detected');
+  assert.equal(logs[0]!.data?.delta_ms, 5_000);
+
+  // Different line -> no repeat.
+  now += 3_000;
+  assert.equal(
+    detector.onAssistantMessage(
+      'Okay wait, this espresso merino knit polo with the charcoal pleated wool trousers is giving serious downtown energy for tonight.',
+    ),
+    false,
+  );
+  assert.equal(logs.length, 1);
+
+  // Shares first 60 normalised characters within 20s -> repeat_detected!
+  now += 8_000;
+  assert.equal(
+    detector.onAssistantMessage(
+      'Okay wait, this espresso merino knit polo with the charcoal pleated wool trousers is an absolute serve, want to see it on you?',
+    ),
+    true,
+  );
+  assert.equal(logs.length, 2);
+  assert.equal(logs[1]!.ev, 'repeat_detected');
+  assert.equal(logs[1]!.data?.delta_ms, 8_000);
+
+  // Same line AFTER >20s window -> no repeat_detected.
+  now += DEFAULT_REPEAT_WINDOW_MS + 1;
+  assert.equal(
+    detector.onAssistantMessage(
+      'Okay wait, this espresso merino knit polo with the charcoal pleated wool trousers is an absolute serve, want to see it on you?',
+    ),
+    false,
+  );
+  assert.equal(logs.length, 2);
 });
 
 test('missing-method startup check logs loud error and session_error with source patch_check without crashing', () => {

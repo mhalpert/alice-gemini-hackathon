@@ -25,7 +25,9 @@ import {
   createToolWrapper,
   deriveProductDetails,
   resolveOutfitBoard,
+  extractHeroFact,
   sanitizePageMediaUrl,
+  selectHeroPieces,
   stableStringify,
   type CameraSnapshot,
   type TimerLike,
@@ -243,6 +245,7 @@ function makeFakeDeps(overrides: Partial<ToolDeps> = {}): ToolDeps {
         id: `tryon-${outfit.number ?? 1}`,
       };
     },
+    tryOnExtras: null,
     async loadStoreModule() {
       return null;
     },
@@ -556,11 +559,13 @@ test('pick_outfit validates look, highlights pieces every 2.2s, and cancels walk
 
   const picked = await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
   assert.equal(state.get().pickedLook, 1);
-  assert.match(picked, /Knit texture elevates the neckline/);
+  assert.match(picked, /HERO \(top\): Merino Knit Polo - Espresso.*100% extra-fine merino wool/);
+  assert.match(picked, /HERO \(shoes\): Minimal Leather Sneaker - White.*Full-grain leather upper/);
+  assert.match(picked, /Other pieces already on screen \(do not list them\): bottom: Pleated Wool Trouser - Charcoal/);
   assert.match(picked, /Try-on is ready/i);
-  assert.match(picked, /two or three short sentences/i);
-  assert.match(picked, /about 12 seconds/i);
-  assert.match(picked, /walk order/i);
+  assert.match(picked, /about ten seconds/i);
+  assert.match(picked, /Never invent materials/i);
+  assert.match(picked, /ask about seeing it on them/i);
   assert.doesNotMatch(picked, /four or five sentences/i);
 
   // Initial highlight with piece: null.
@@ -2365,7 +2370,7 @@ test('build_outfits enforces single active build: skips same-brief passing remar
   assert.ok(supersedeLog, 'must log build_skipped when a build is superseded');
 });
 
-test('set_department and other tool results avoid duplicating prompt-arc questions', async () => {
+test('set_department returns bare factual confirmation and other tool results avoid duplicating prompt-arc questions', async () => {
   const { page } = createFakePage();
   const state = createCallStateStore({ roomName: 'r-norepeat', log: () => {} });
 
@@ -2378,8 +2383,7 @@ test('set_department and other tool results avoid duplicating prompt-arc questio
   });
 
   const deptRes = await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
-  assert.match(deptRes, /Department set to men/i);
-  assert.match(deptRes, /without repeating a question you just asked/i);
+  assert.equal(deptRes, 'Department set to men.');
   assert.doesNotMatch(deptRes, /ask occasion and budget/i);
 
   const buildRes = await tools.build_outfits.execute(
@@ -2390,13 +2394,90 @@ test('set_department and other tool results avoid duplicating prompt-arc questio
   assert.doesNotMatch(buildRes, /ask which catches their eye/i);
 
   const pickRes = await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
-  assert.doesNotMatch(pickRes, /see it on themselves/i);
+  assert.match(pickRes, /HERO \(top\):/);
+  assert.match(pickRes, /HERO \(shoes\):/);
+  assert.match(pickRes, /ask about seeing it on them/i);
 
   const swapRes = await tools.swap_piece.execute(
     { slot: 'shoes', request: 'loafers' },
     fakeToolOpts('sw1'),
   );
   assert.doesNotMatch(swapRes, /Name only the replacement piece/i);
+});
+
+test('selectHeroPieces and extractHeroFact choose layer/dress/top + shoes/priciest and pull facts strictly from item data or why', async () => {
+  // 1) Layer + shoes wins over top/bottom/accessory.
+  const layerPiece = {
+    slot: 'layer',
+    why: 'Sharpens the shoulder line.',
+    item: makeItem({
+      id: 'l1',
+      title: 'Structured Wool Blazer',
+      price: 180,
+      description: 'Machine wash cold. Double-breasted Italian wool-blend twill with peak lapels.',
+    }),
+  };
+  const topPiece = {
+    slot: 'top',
+    why: 'Clean base layer.',
+    item: makeItem({ id: 't1', title: 'Cotton Tee', price: 30, description: '100% organic cotton jersey.' }),
+  };
+  const bottomPiece = {
+    slot: 'bottom',
+    why: 'Relaxed leg.',
+    item: makeItem({ id: 'b1', title: 'Tailored Trouser', price: 95, description: '' }),
+  };
+  const shoesPiece = {
+    slot: 'shoes',
+    why: 'Polished leather finish.',
+    item: makeItem({ id: 's1', title: 'Penny Loafer', price: 110, description: '' }),
+  };
+  const bagPiece = {
+    slot: 'bag',
+    why: 'Holds essentials.',
+    item: makeItem({ id: 'a1', title: 'Structured Leather Tote', price: 220, description: 'Pebbled calfskin tote with magnetic clasp.' }),
+  };
+
+  const withLayerAndShoes = selectHeroPieces([topPiece, bottomPiece, layerPiece, shoesPiece, bagPiece]);
+  assert.deepEqual(withLayerAndShoes.map((p) => p.slot), ['layer', 'shoes']);
+
+  // Fact skips boilerplate ("Machine wash cold") and grabs the real fabric/cut sentence.
+  assert.equal(
+    extractHeroFact(layerPiece),
+    'Double-breasted Italian wool-blend twill with peak lapels',
+  );
+  // Empty description falls back to stylist note (`why`).
+  assert.equal(extractHeroFact(shoesPiece), 'Polished leather finish');
+
+  // 2) Dress + most expensive remaining piece when shoes are absent.
+  const dressPiece = {
+    slot: 'dress',
+    why: 'Bias cut catches the light.',
+    item: makeItem({
+      id: 'd1',
+      title: 'Satin Slip Dress',
+      price: 150,
+      description: 'Bias-cut hammered satin with adjustable spaghetti straps.',
+    }),
+  };
+  const dressLookHeroes = selectHeroPieces([dressPiece, bottomPiece, bagPiece]);
+  assert.deepEqual(dressLookHeroes.map((p) => p.slot), ['dress', 'bag']);
+  assert.equal(
+    extractHeroFact(dressPiece),
+    'Bias-cut hammered satin with adjustable spaghetti straps',
+  );
+  assert.equal(
+    extractHeroFact(bagPiece),
+    'Pebbled calfskin tote with magnetic clasp',
+  );
+
+  // 3) No layer or dress, no shoes -> top + most expensive remaining piece.
+  const topNoShoes = selectHeroPieces([topPiece, bottomPiece, bagPiece]);
+  assert.deepEqual(topNoShoes.map((p) => p.slot), ['top', 'bag']);
+
+  // 4) Single-piece look -> single hero piece.
+  const singleHero = selectHeroPieces([dressPiece]);
+  assert.deepEqual(singleHero.map((p) => p.slot), ['dress']);
 });
 
 test('onCritique wires background critic into call state, logs critique_seen, never blocks build_outfits, and surfaces swap offer on pick_outfit without mentioning scores or critic', async () => {

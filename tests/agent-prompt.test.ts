@@ -75,9 +75,9 @@ test('ALICE_SYSTEM_PROMPT mentions CALL STATE and CAMERA STATUS', () => {
   assert.match(ALICE_SYSTEM_PROMPT, /\bCAMERA STATUS\b/);
 });
 
-test('ALICE_SYSTEM_PROMPT word count is within 450 to 1150 words and avoids tables/emoji', () => {
+test('ALICE_SYSTEM_PROMPT word count is within 450 to 1250 words and avoids tables/emoji', () => {
   const words = countWords(ALICE_SYSTEM_PROMPT);
-  assert.ok(words >= 450 && words <= 1150, `expected word count between 450 and 1150, got ${words}`);
+  assert.ok(words >= 450 && words <= 1250, `expected word count between 450 and 1250, got ${words}`);
 
   assert.equal(ALICE_SYSTEM_PROMPT.includes('|---'), false, 'prompt must not contain markdown tables');
   assert.equal(/\p{Extended_Pictographic}/u.test(ALICE_SYSTEM_PROMPT), false, 'prompt must not contain emoji');
@@ -138,10 +138,22 @@ test('ALICE_SYSTEM_PROMPT encodes polish2 rules: bag accuracy, size confirmation
   assert.match(ALICE_SYSTEM_PROMPT, /30x34/i);
   assert.match(ALICE_SYSTEM_PROMPT, /later explicit correction.*replaces the remembered size/i);
 
-  // 4. pick_outfit brevity and walk order (~12s, 2-3 short sentences).
-  assert.match(ALICE_SYSTEM_PROMPT, /two or three short sentences/i);
-  assert.match(ALICE_SYSTEM_PROMPT, /walk order/i);
+  // 4. pick_outfit hero pieces brevity (~10s, 1-2 hero pieces, no full listing, never invent materials).
+  assert.match(ALICE_SYSTEM_PROMPT, /one line naming the look's idea/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /one or two hero pieces/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never invent materials/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /do not list the other pieces/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /~10s total/i);
   assert.doesNotMatch(ALICE_SYSTEM_PROMPT, /four or five sentences/i);
+
+  // 5. Tightened opening (under 3 minutes): one-sentence look check, step back only if no clothing visible, occasion + budget in one question.
+  assert.match(ALICE_SYSTEM_PROMPT, /check their look in ONE sentence/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /ask to step back only if you can see no clothing at all/i);
+  assert.match(
+    ALICE_SYSTEM_PROMPT,
+    /occasion and budget in ONE question \("what's the occasion and what's the budget\?"\)/i,
+  );
+  assert.match(ALICE_SYSTEM_PROMPT, /hold the sizes question until the last beat finishes/i);
 
   // 5. General noisy-room rule.
   assert.match(ALICE_SYSTEM_PROMPT, /fragment that does not fit the conversation/i);

@@ -81,6 +81,9 @@ export function buildNudgeInstruction(toolName: string, resultText: string): str
     if (/^No look selected/i.test(resultText.trim())) {
       return 'Respond to the latest show_on_me tool result now.';
     }
+    if (/do not ask for sizes yet/i.test(resultText)) {
+      return 'The studio try-on from show_on_me has arrived. React to the studio shot in ONE short line with big New York energy and do not ask for sizes yet.';
+    }
     return 'The try-on result from show_on_me has arrived. React to it with big New York energy now and follow up naturally.';
   }
 
