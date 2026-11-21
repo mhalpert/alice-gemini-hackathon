@@ -509,6 +509,14 @@ function normalizeOccasionChoices(raw: unknown): OccasionChoice[] | null {
   return out;
 }
 
+interface MemoizedSetsOccasions {
+  mtimeMs: number;
+  size: number;
+  entries: SetsOccasionEntry[];
+}
+
+const setsOccasionsMemo = new Map<string, MemoizedSetsOccasions>();
+
 async function readLibraryOccasionsFromSets(
   department: Gender,
   env: Record<string, string | undefined>,
@@ -518,13 +526,23 @@ async function readLibraryOccasionsFromSets(
     override && override.trim().length > 0
       ? path.resolve(override)
       : path.join(import.meta.dirname, 'src', 'library', 'sets.json');
+  const cacheKey = `${filePath}\0${department}`;
 
   try {
+    const stat = await fs.promises.stat(filePath);
+    const cached = setsOccasionsMemo.get(cacheKey);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      return cached.entries;
+    }
+
     const raw = await fs.promises.readFile(filePath, 'utf8');
     const parsed = JSON.parse(raw) as {
       sets?: Array<{ key?: unknown; gender?: unknown; occasion?: unknown; outfits?: unknown }>;
     };
-    if (!Array.isArray(parsed?.sets)) return [];
+    if (!Array.isArray(parsed?.sets)) {
+      setsOccasionsMemo.delete(cacheKey);
+      return [];
+    }
 
     const matching = parsed.sets.filter(
       (s) =>
@@ -556,8 +574,10 @@ async function readLibraryOccasionsFromSets(
         ...(typeof s.key === 'string' && s.key.trim() ? { rawKey: s.key.trim() } : {}),
       });
     }
+    setsOccasionsMemo.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, entries: out });
     return out;
   } catch {
+    setsOccasionsMemo.delete(cacheKey);
     return [];
   }
 }
@@ -573,6 +593,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
   const startedAt = Date.now();
   const rateBuckets = new Map<string, number[]>();
   const browseRateBuckets = new Map<string, number[]>();
+  const inFlightLooks = new Map<string, Promise<Outfit[] | null>>();
   const logSink = opts.calllog ?? defaultCalllog;
   const loadLibraryFn = opts.loadLibrary ?? defaultLoadLibrary;
   const storefrontBudgetMs = opts.budgets?.storefrontMs ?? STOREFRONT_BUDGET_MS;
@@ -1002,7 +1023,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
             return;
           }
           const occasion: string | null = trimmedOccasion.length > 0 ? trimmedOccasion : null;
-          let queryOccasion = occasion;
+          let queryOccasion: string | null = null;
           if (occasion !== null) {
             const lower = occasion.toLowerCase();
             const setsOccasions = await readLibraryOccasionsFromSets(department, env);
@@ -1011,31 +1032,52 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
                 entry.key === lower ||
                 (entry.rawKey !== undefined && entry.rawKey.toLowerCase() === lower),
             );
-            if (matched) {
-              queryOccasion = matched.occasion;
+            if (!matched) {
+              logExtra = `dept=${department} source=library n=0 unknown_occasion=true`;
+              sendJson(
+                res,
+                200,
+                { department, occasion, looks: [], source: 'library' },
+                { 'Cache-Control': 'no-store' },
+              );
+              return;
             }
+            queryOccasion = matched.rawKey ?? matched.occasion;
           }
 
           let libraryOutfits: Outfit[] | null = null;
           let libraryAnsweredEmpty = false;
           try {
-            const runLibrary = async (): Promise<Outfit[] | null> => {
-              const mod = await loadLibraryFn();
-              if (mod && typeof mod.libraryLooks === 'function') {
-                const fn = mod.libraryLooks as (
-                  g: Gender,
-                  o?: { limit?: number; occasion?: string },
-                ) => Promise<Outfit[]>;
-                const callOpts = queryOccasion !== null ? { limit, occasion: queryOccasion } : { limit };
-                const resOutfits = await fn(department, callOpts);
-                if (Array.isArray(resOutfits)) {
-                  return resOutfits.slice(0, limit);
+            const inFlightKey = `${department}|${limit}|${queryOccasion ?? ''}`;
+            let looksPromise = inFlightLooks.get(inFlightKey);
+            if (!looksPromise) {
+              const created = (async (): Promise<Outfit[] | null> => {
+                const mod = await loadLibraryFn();
+                if (mod && typeof mod.libraryLooks === 'function') {
+                  const fn = mod.libraryLooks as (
+                    g: Gender,
+                    o?: { limit?: number; occasion?: string },
+                  ) => Promise<Outfit[]>;
+                  const callOpts =
+                    queryOccasion !== null ? { limit, occasion: queryOccasion } : { limit };
+                  const resOutfits = await fn(department, callOpts);
+                  if (Array.isArray(resOutfits)) {
+                    return resOutfits.slice(0, limit);
+                  }
                 }
-              }
-              return null;
-            };
+                return null;
+              })();
+              inFlightLooks.set(inFlightKey, created);
+              const cleanup = (): void => {
+                if (inFlightLooks.get(inFlightKey) === created) {
+                  inFlightLooks.delete(inFlightKey);
+                }
+              };
+              created.then(cleanup, cleanup);
+              looksPromise = created;
+            }
 
-            const raced = await raceWithBudget(runLibrary(), looksBudgetMs);
+            const raced = await raceWithBudget(looksPromise, looksBudgetMs);
             if (!raced.timedOut && raced.value !== null) {
               if (raced.value.length > 0) {
                 libraryOutfits = raced.value;
