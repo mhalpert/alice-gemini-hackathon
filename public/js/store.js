@@ -235,7 +235,10 @@ function normalizeOccasions(data) {
   if (!data || !Array.isArray(data.occasions)) return [];
   const seen = new Set();
   const out = [];
-  for (const entry of data.occasions) {
+  for (const raw of data.occasions) {
+    // A plain string is an occasion whose text is also its key
+    const entry =
+      typeof raw === 'string' ? { key: raw, label: raw.charAt(0).toUpperCase() + raw.slice(1) } : raw;
     if (!entry || typeof entry !== 'object') continue;
     const key = typeof entry.key === 'string' ? entry.key.trim() : '';
     const label =
@@ -733,6 +736,12 @@ export function mountStore(root, { onTalk } = {}) {
     const occasionsNavItem = navItems.get('Occasions');
     if (occasionsNavItem) {
       occasionsNavItem.hidden = boutique.occasions.length === 0 || !hasBoutiqueAvailable();
+    }
+
+    // "Stores" needs a store rail to jump to, and a short storefront reply may hold none
+    const storesNavItem = navItems.get('Stores');
+    if (storesNavItem) {
+      storesNavItem.hidden = !boutique.sections.some((sec) => sec.id.startsWith('from-'));
     }
 
     if (boutiqueRefs && boutiqueRefs.deptButtons) {
@@ -1462,6 +1471,14 @@ export function mountStore(root, { onTalk } = {}) {
   // between Women and Men does not repeat the same store searches. A reload starts fresh.
   const boutiqueMemo = new Map(); // department -> { looks?, sections?, occasions? }
 
+  // Rails from a later reply replace the same rail and add the missing ones; store rails stay last
+  function mergeRails(existing, fresh) {
+    const byId = new Map();
+    for (const sec of [...existing, ...fresh]) byId.set(sec.id || sec.title, sec);
+    const isStoreRail = (sec) => sec.id.startsWith('from-');
+    return [...byId.values()].sort((x, y) => Number(isStoreRail(x)) - Number(isStoreRail(y)));
+  }
+
   function rememberBoutique(dept, part, value) {
     boutiqueMemo.set(dept, { ...boutiqueMemo.get(dept), [part]: value });
   }
@@ -1558,29 +1575,42 @@ export function mountStore(root, { onTalk } = {}) {
     // Fetch looks, storefront rails and occasions in parallel; ignore stale replies on department switch
     loadBoutiqueLooks(dept, null, reqId, { render: false });
 
-    fetchJson(`/api/storefront?department=${encodedDept}`, { signal: controller.signal }).then(
-      (data) => {
-        if (reqId !== boutique.reqId) return;
-        boutique.storefrontPending = false;
-        boutique.sections =
-          data && Array.isArray(data.sections)
-            ? data.sections
-                .filter((sec) => sec && typeof sec === 'object' && Array.isArray(sec.items))
-                .map((sec) => ({
-                  id: typeof sec.id === 'string' ? sec.id : '',
-                  title: typeof sec.title === 'string' ? sec.title.trim() : '',
-                  items: sec.items.filter((it) => it && typeof it === 'object'),
-                }))
-                .filter((sec) => sec.items.length > 0)
-            : [];
-        if (boutique.sections.length > 0) rememberBoutique(dept, 'sections', boutique.sections);
-        syncBoutiqueBodyClass();
-        if (state.view === 'boutique' && boutiqueRefs) {
-          renderBoutiqueRailsSlot();
+    // The storefront route answers within a time budget and marks a short reply as partial.
+    // A partial reply is shown at once, then asked for again (twice at most) and merged by rail.
+    const fetchStorefront = (attempt) => {
+      fetchJson(`/api/storefront?department=${encodedDept}`, { signal: controller.signal }).then(
+        (data) => {
+          if (reqId !== boutique.reqId) return;
+          boutique.storefrontPending = false;
+          const fresh =
+            data && Array.isArray(data.sections)
+              ? data.sections
+                  .filter((sec) => sec && typeof sec === 'object' && Array.isArray(sec.items))
+                  .map((sec) => ({
+                    id: typeof sec.id === 'string' ? sec.id : '',
+                    title: typeof sec.title === 'string' ? sec.title.trim() : '',
+                    items: sec.items.filter((it) => it && typeof it === 'object'),
+                  }))
+                  .filter((sec) => sec.items.length > 0)
+              : [];
+          const partial = Boolean(data && data.partial);
+          boutique.sections = mergeRails(attempt === 0 ? [] : boutique.sections, fresh);
+          if (boutique.sections.length > 0 && !partial) rememberBoutique(dept, 'sections', boutique.sections);
+          syncBoutiqueBodyClass();
+          if (state.view === 'boutique' && boutiqueRefs) {
+            renderBoutiqueRailsSlot();
+          }
+          updateNavActive();
+          finishBoutiqueCheck();
+          if (partial && attempt < 2) {
+            setTimeout(() => {
+              if (reqId === boutique.reqId) fetchStorefront(attempt + 1);
+            }, 2500);
+          }
         }
-        finishBoutiqueCheck();
-      }
-    );
+      );
+    };
+    fetchStorefront(0);
 
     fetchJson(`/api/occasions?department=${encodedDept}`, { signal: controller.signal }).then(
       (data) => {
