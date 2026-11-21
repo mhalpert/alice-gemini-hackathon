@@ -22,6 +22,18 @@ export { STORES, ALL_SITES, OTHER_SITES } from './stores.ts';
 export { shopMcp, ShopMcpError } from './shopmcp.ts';
 export { setCallRoom } from './log.ts';
 
+export { startSignIn, signInStatus, signOut } from './auth.ts';
+export type { SignInState, StartSignInResult } from './auth.ts';
+
+export { prepareOrder, placeOrder, endCall } from './purchase.ts';
+export type {
+  OrderStore,
+  OrderStoreStatus,
+  OrderReview,
+  PrepareOrderResult,
+  PlaceOrderOptions,
+} from './purchase.ts';
+
 export async function searchMixed(
   query: string,
   gender: Gender,
