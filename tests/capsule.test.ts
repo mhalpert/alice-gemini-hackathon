@@ -1,4 +1,4 @@
-import { describe, test } from 'node:test';
+import { beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -12,13 +12,17 @@ import {
   type CapsuleApiClient,
 } from '../src/capsule/environment.ts';
 import {
+  DEFAULT_CAPSULE_MAX_RUNS,
   DEFAULT_CAPSULE_MODEL,
+  getCapsuleRunCount,
   isCapsuleCriticEnabled,
   isCapsuleEnabled,
   mapPipelineToCapsuleResult,
   packCapsule,
   parseAgentOutput,
   repackCapsule,
+  resetCapsuleRunCount,
+  resolveCapsuleMaxRuns,
   resolveCapsuleModel,
   type CapsuleBrief,
   type CapsuleStep,
@@ -364,6 +368,10 @@ describe('capsule environment lifecycle', () => {
 });
 
 describe('capsule packing, download-first, critic, dress-code repack, and switch', () => {
+  beforeEach(() => {
+    resetCapsuleRunCount();
+  });
+
   test('default model is gemini-4-hydrogen and ALICE_CAPSULE defaults off with exact problem string', async () => {
     const prevSwitch = process.env.ALICE_CAPSULE;
     const prevModel = process.env.ALICE_MODEL_CAPSULE;
@@ -783,6 +791,261 @@ describe('capsule packing, download-first, critic, dress-code repack, and switch
     });
     assert.equal(res.ok, false);
     assert.ok(res.problems.length > 0);
+  });
+
+  test('prefers our store.lookup price over sandbox price_usd and recomputes piece, outfit, and capsule totals', async () => {
+    const pipelineWithCheaperSandboxPrice: RawPipelineOutput = {
+      ok: true,
+      pieces: [
+        {
+          slot: 'top',
+          title: 'Linen Camp Shirt',
+          store: 'Everlane',
+          store_domain: 'm34kzg-ke.myshopify.com',
+          price_usd: 10.0,
+          url: 'https://www.everlane.com/products/shirt',
+          id: 'gid://shopify/Product/5001',
+          variant_id: 'gid://shopify/ProductVariant/6001',
+          size_label: 'M',
+        },
+        {
+          slot: 'bottom',
+          title: 'Fallback Only Chino',
+          store: 'Everlane',
+          store_domain: 'm34kzg-ke.myshopify.com',
+          price_usd: 20.0,
+          url: 'https://www.everlane.com/products/chino',
+          id: 'gid://shopify/Product/5002',
+          variant_id: 'gid://shopify/ProductVariant/6002',
+          size_label: '32',
+        },
+      ],
+      owned_pieces_used: [
+        {
+          id: 'owned:loafers',
+          slot: 'shoes',
+          title: 'Brown Loafers (Owned)',
+          size_label: '10',
+        },
+      ],
+      outfits: [
+        {
+          day: 'Day 1 - City',
+          dress_code: 'casual',
+          piece_ids: [
+            'gid://shopify/Product/5001',
+            'gid://shopify/Product/5002',
+            'owned:loafers',
+          ],
+          total_new_usd: 30.0,
+        },
+        {
+          day: 'Day 2 - Dinner',
+          dress_code: 'smart_casual',
+          piece_ids: ['gid://shopify/Product/5001', 'owned:loafers'],
+          total_new_usd: 10.0,
+        },
+      ],
+      total_usd: 30.0,
+      stores: ['Everlane'],
+      mix_and_match_count: 1,
+      certificate: {
+        all_sizes_in_stock: true,
+        within_budget: true,
+        checks: [{ name: 'within_budget', ok: true }],
+      },
+      searched: 20,
+      timings: { total_s: 1.0 },
+    };
+
+    const overrideStore: CapsuleStoreLayer = {
+      async lookup(ids: string[]) {
+        const m = new Map<string, LookupEntry>();
+        if (ids.includes('gid://shopify/ProductVariant/6001')) {
+          m.set('gid://shopify/ProductVariant/6001', {
+            item: {
+              id: 'gid://shopify/Product/5001',
+              variant_id: 'gid://shopify/ProductVariant/6001',
+              title: 'Linen Camp Shirt',
+              price: 12.0,
+              url: 'https://www.everlane.com/products/shirt',
+              image: 'https://cdn.shopify.com/s/files/shirt.jpg',
+              store: 'Everlane',
+              store_domain: 'm34kzg-ke.myshopify.com',
+              rating: 4.8,
+              rating_count: 50,
+              sizes: ['M'],
+              variants_by_size: { M: 'gid://shopify/ProductVariant/6001' },
+              description: 'Shirt',
+              department: 'men',
+            },
+            available: true,
+            price: 12.0,
+          });
+        }
+        return m;
+      },
+      async getProduct() {
+        return null;
+      },
+    };
+
+    const mapped = await mapPipelineToCapsuleResult(
+      pipelineWithCheaperSandboxPrice,
+      SAMPLE_BRIEF,
+      {
+        explanation: 'ok',
+        totalMs: 2000,
+        interactionMs: 1800,
+        model: 'gemini-4-hydrogen',
+        environmentId: 'env-1',
+      },
+      overrideStore,
+    );
+
+    // Sandbox said 10.00, store.lookup said 12.00 -> lookup price wins; second piece falls back to 20.00
+    assert.equal(mapped.pieces[0]!.item.price, 12.0);
+    assert.equal(mapped.pieces[1]!.item.price, 20.0);
+    assert.equal(mapped.outfits[0]!.total, 32.0);
+    assert.equal(mapped.outfits[1]!.total, 12.0);
+    assert.equal(mapped.total_usd, 32.0);
+  });
+
+  test('enforces per-process run limit across pack and repack and supports ALICE_CAPSULE_MAX_RUNS override', async () => {
+    await withTempDir(async (dir) => {
+      const toolsDir = makeFakeToolsDir(dir);
+      const statePath = path.join(dir, 'environment.json');
+      let apiCalls = 0;
+
+      const countingClient: CapsuleApiClient = {
+        environments: {
+          async create() {
+            apiCalls += 1;
+            return { id: 'env-limit-1' };
+          },
+          async get(id: string) {
+            return { id, state: 'ACTIVE' };
+          },
+          files: {
+            async upload() {
+              return { ok: true };
+            },
+            async download() {
+              return Buffer.from(JSON.stringify(SAMPLE_PIPELINE), 'utf8');
+            },
+          },
+        },
+        interactions: {
+          async create(params) {
+            if (!params.stream) {
+              return { id: 'setup-limit', environment_id: params.environment, output_text: 'READY' };
+            }
+            apiCalls += 1;
+            return {
+              id: `int-limit-${apiCalls}`,
+              environment_id: params.environment,
+              output_text: 'DONE\nSolved.',
+            };
+          },
+        },
+      };
+
+      const prevMax = process.env.ALICE_CAPSULE_MAX_RUNS;
+      delete process.env.ALICE_CAPSULE_MAX_RUNS;
+      try {
+        assert.equal(DEFAULT_CAPSULE_MAX_RUNS, 3);
+        assert.equal(resolveCapsuleMaxRuns(), 3);
+        assert.equal(resolveCapsuleMaxRuns('5'), 5);
+        assert.equal(resolveCapsuleMaxRuns('invalid'), 3);
+
+        const r1 = await packCapsule(SAMPLE_BRIEF, {
+          client: countingClient,
+          toolsDir,
+          statePath,
+          store: makeFakeStore(),
+          force: true,
+        });
+        assert.equal(r1.ok, true);
+        const r2 = await repackCapsule(r1, 'add rain jacket', {
+          client: countingClient,
+          toolsDir,
+          statePath,
+          store: makeFakeStore(),
+          force: true,
+        });
+        assert.equal(r2.ok, true);
+        const r3 = await repackCapsule(r2, 'black tie dinner', {
+          client: countingClient,
+          toolsDir,
+          statePath,
+          store: makeFakeStore(),
+          force: true,
+        });
+        assert.equal(r3.ok, true);
+        assert.equal(getCapsuleRunCount(), 3);
+
+        const callsBeforeLimit = apiCalls;
+        const r4Pack = await packCapsule(SAMPLE_BRIEF, {
+          client: countingClient,
+          toolsDir,
+          statePath,
+          store: makeFakeStore(),
+          force: true,
+        });
+        assert.equal(r4Pack.ok, false);
+        assert.deepEqual(r4Pack.problems, ['capsule run limit reached for this call']);
+        assert.equal(apiCalls, callsBeforeLimit, 'must not make any API call once limit reached');
+
+        const r4Repack = await repackCapsule(r3, 'one more change', {
+          client: countingClient,
+          toolsDir,
+          statePath,
+          store: makeFakeStore(),
+          force: true,
+        });
+        assert.equal(r4Repack.ok, false);
+        assert.deepEqual(r4Repack.problems, ['capsule run limit reached for this call']);
+        assert.equal(apiCalls, callsBeforeLimit, 'repack must not make any API call once limit reached');
+
+        // Override via ALICE_CAPSULE_MAX_RUNS allows another run
+        process.env.ALICE_CAPSULE_MAX_RUNS = '4';
+        const r4Allowed = await repackCapsule(r3, 'override allowed', {
+          client: countingClient,
+          toolsDir,
+          statePath,
+          store: makeFakeStore(),
+          force: true,
+        });
+        assert.equal(r4Allowed.ok, true);
+        assert.equal(getCapsuleRunCount(), 4);
+      } finally {
+        if (prevMax === undefined) delete process.env.ALICE_CAPSULE_MAX_RUNS;
+        else process.env.ALICE_CAPSULE_MAX_RUNS = prevMax;
+      }
+    });
+  });
+
+  test('Python shop_client self-test enforces read-only MCP tool allowlist', () => {
+    const toolsDir = path.resolve(import.meta.dirname, '..', 'src', 'capsule', 'tools');
+    const pyScript = [
+      'import json, sys, types',
+      `sys.path.insert(0, ${JSON.stringify(toolsDir)})`,
+      'try:',
+      '    import requests  # noqa: F401',
+      'except ImportError:',
+      '    req = types.ModuleType("requests")',
+      '    req.Session = object',
+      '    ad = types.ModuleType("requests.adapters")',
+      '    ad.HTTPAdapter = object',
+      '    sys.modules["requests"] = req',
+      '    sys.modules["requests.adapters"] = ad',
+      'import shop_client',
+      'print(json.dumps(shop_client.run_self_test()))',
+    ].join('\n');
+    const out = execFileSync('python3', ['-B', '-c', pyScript], { encoding: 'utf8' });
+    const parsed = JSON.parse(out) as { shop_client_self_test?: string; allowed_tools?: string[] };
+    assert.equal(parsed.shop_client_self_test, 'ok');
+    assert.deepEqual(parsed.allowed_tools, ['get_product', 'search_catalog']);
   });
 
   test('Python solver self-test passes locally when ortools is installed', (t) => {

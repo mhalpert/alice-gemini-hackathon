@@ -16,6 +16,10 @@ from requests.adapters import HTTPAdapter
 ENDPOINT = "https://mcp.shop.com/"
 SHOPS = ["fashionnova.com", "everlane.com", "stevemadden.com", "kith.com"]
 
+# Strictly read-only Shop MCP tools used by the capsule pipeline.
+# The store rule "no cart, checkout or payment tool" holds inside the sandbox too.
+ALLOWED_MCP_TOOLS: frozenset[str] = frozenset({"search_catalog", "get_product"})
+
 ALLOWED_DOMAINS: dict[str, str] = {
     "fnova.myshopify.com": "Fashion Nova",
     "m34kzg-ke.myshopify.com": "Everlane",
@@ -110,6 +114,8 @@ def get_session() -> requests.Session:
 
 
 def call_mcp(tool_name: str, arguments: dict[str, Any], req_id: int = 1, retries: int = 1) -> dict[str, Any]:
+    if not isinstance(tool_name, str) or tool_name not in ALLOWED_MCP_TOOLS:
+        raise ValueError(f"Disallowed Shop MCP tool in capsule sandbox: {tool_name!r}")
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
@@ -934,3 +940,49 @@ def fetch_and_check_pool(
         "search_calls": search_calls,
         "size_check_calls": size_calls,
     }
+
+
+def run_self_test() -> dict[str, Any]:
+    """Verify call_mcp strictly enforces the read-only tool allowlist before any HTTP call."""
+    global _SESSION
+    assert ALLOWED_MCP_TOOLS == frozenset({"search_catalog", "get_product"}), (
+        f"unexpected ALLOWED_MCP_TOOLS: {ALLOWED_MCP_TOOLS}"
+    )
+
+    class _FailSession:
+        def post(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("HTTP request attempted for disallowed MCP tool")
+
+    prev_session = _SESSION
+    _SESSION = _FailSession()  # type: ignore[assignment]
+    disallowed = [
+        "create_cart",
+        "get_cart",
+        "update_cart",
+        "create_checkout",
+        "update_checkout",
+        "get_checkout",
+        "complete_checkout",
+        "create_spend_request",
+        "complete_spend_request",
+        "lookup_catalog",
+        "pay_order",
+        "",
+    ]
+    try:
+        for bad_tool in disallowed:
+            try:
+                call_mcp(bad_tool, {})
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"call_mcp did not reject disallowed tool: {bad_tool!r}")
+    finally:
+        _SESSION = prev_session
+
+    return {"shop_client_self_test": "ok", "allowed_tools": sorted(ALLOWED_MCP_TOOLS)}
+
+
+if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        print(json.dumps(run_self_test()))

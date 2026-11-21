@@ -1,3 +1,5 @@
+// Never call this from an HTTP route: each call's agent runs in its own process,
+// and the per-process run cap below assumes one call per process.
 import { critiqueAll as defaultCritiqueAll, type Critique, type CritiqueOptions } from '../brain/critic.ts';
 import { breaksDressCode } from '../brain/words.ts';
 import { estimateCostUsd, recordCost } from '../ledger.ts';
@@ -26,7 +28,9 @@ export type {
 } from './environment.ts';
 
 export const DEFAULT_CAPSULE_MODEL = 'gemini-4-hydrogen';
+export const DEFAULT_CAPSULE_MAX_RUNS = 3;
 const CRITIC_TIMEOUT_MS = 8000;
+let capsuleRunsUsed = 0;
 
 export interface CapsuleBrief {
   gender: Gender;
@@ -191,6 +195,25 @@ export function isCapsuleCriticEnabled(
 
 export function resolveCapsuleModel(explicit?: string): string {
   return explicit?.trim() || process.env.ALICE_MODEL_CAPSULE?.trim() || DEFAULT_CAPSULE_MODEL;
+}
+
+export function resolveCapsuleMaxRuns(
+  raw: string | undefined = process.env.ALICE_CAPSULE_MAX_RUNS,
+): number {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_CAPSULE_MAX_RUNS;
+  const parsed = Number(raw.trim());
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 0) {
+    return DEFAULT_CAPSULE_MAX_RUNS;
+  }
+  return parsed;
+}
+
+export function getCapsuleRunCount(): number {
+  return capsuleRunsUsed;
+}
+
+export function resetCapsuleRunCount(): void {
+  capsuleRunsUsed = 0;
 }
 
 function emptyFailure(
@@ -414,10 +437,21 @@ export async function mapPipelineToCapsuleResult(
       // URL must remain untouched from store layer (or pipeline's untouched MCP URL)
       const url = baseItem?.url || detail?.variant?.url || String(rp.url ?? '');
       const image = cleanImageUrl(baseItem?.image || detail?.images?.[0] || String(rp.image ?? ''));
+      // Prefer our own store.lookup price when available; use sandbox price_usd only as fallback
+      const lookupPrice =
+        typeof lookupEntry?.price === 'number' && Number.isFinite(lookupEntry.price)
+          ? lookupEntry.price
+          : typeof baseItem?.price === 'number' && Number.isFinite(baseItem.price)
+            ? baseItem.price
+            : typeof detail?.variant?.price === 'number' && Number.isFinite(detail.variant.price)
+              ? detail.variant.price
+              : null;
       const price =
-        typeof rp.price_usd === 'number' && Number.isFinite(rp.price_usd)
-          ? rp.price_usd
-          : (lookupEntry?.price ?? detail?.variant?.price ?? baseItem?.price ?? 0);
+        lookupPrice !== null
+          ? lookupPrice
+          : typeof rp.price_usd === 'number' && Number.isFinite(rp.price_usd)
+            ? rp.price_usd
+            : 0;
 
       const item: Item = {
         id: baseItem?.id || detail?.id || pid,
@@ -522,10 +556,14 @@ export async function mapPipelineToCapsuleResult(
     checks,
   };
 
+  // Always recompute total_usd from the piece prices actually used (preferring our store lookup prices)
   const totalUsd =
-    typeof pipeline.total_usd === 'number' && Number.isFinite(pipeline.total_usd)
-      ? Math.round(pipeline.total_usd * 100) / 100
-      : Math.round(finalPieces.reduce((s, p) => s + p.item.price, 0) * 100) / 100;
+    Math.round(
+      finalPieces.reduce(
+        (s, p) => s + (p.item.store_domain === 'owned' ? 0 : p.item.price),
+        0,
+      ) * 100,
+    ) / 100;
 
   const stores =
     Array.isArray(pipeline.stores) && pipeline.stores.length > 0
@@ -995,6 +1033,14 @@ export async function packCapsule(
     });
   }
 
+  if (capsuleRunsUsed >= resolveCapsuleMaxRuns()) {
+    return emptyFailure(t0, ['capsule run limit reached for this call'], {
+      model,
+      brief,
+    });
+  }
+  capsuleRunsUsed += 1;
+
   const emitStep = (kind: string, text: string) => {
     const step: CapsuleStep = { t_ms: Math.max(0, Date.now() - t0), kind, text };
     logEvent('capsule_step', { t_ms: step.t_ms, kind: step.kind, text: step.text });
@@ -1133,6 +1179,14 @@ export async function repackCapsule(
       brief,
     });
   }
+
+  if (capsuleRunsUsed >= resolveCapsuleMaxRuns()) {
+    return emptyFailure(t0, ['capsule run limit reached for this call'], {
+      model,
+      brief,
+    });
+  }
+  capsuleRunsUsed += 1;
 
   const emitStep = (kind: string, text: string) => {
     const step: CapsuleStep = { t_ms: Math.max(0, Date.now() - t0), kind, text };
