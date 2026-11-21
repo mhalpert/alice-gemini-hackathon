@@ -23,6 +23,7 @@ import {
   createAgentTools,
   createToolWrapper,
   deriveProductDetails,
+  sanitizePageMediaUrl,
   stableStringify,
   type CameraSnapshot,
   type TimerLike,
@@ -1286,4 +1287,118 @@ test('show_product falls back to store productImages when media version is absen
     'https://store.cdn/polo-front.jpg',
     'https://store.cdn/polo-detail.jpg',
   ]);
+});
+
+test('real media layer shapes: /tryon URLs only (never file paths), slow 25s tryOn, null collage, and deduped productImages', async () => {
+  assert.equal(sanitizePageMediaUrl('/tryon/tryon-abc123.jpg'), '/tryon/tryon-abc123.jpg');
+  assert.equal(sanitizePageMediaUrl('https://alice.example/tryon/board-1.jpg'), 'https://alice.example/tryon/board-1.jpg');
+  assert.equal(sanitizePageMediaUrl('/tmp/tryon-1.jpg'), null);
+  assert.equal(sanitizePageMediaUrl('/Users/alice/data/tryon/tryon-1.jpg'), null);
+  assert.equal(sanitizePageMediaUrl('file:///tmp/tryon-1.jpg'), null);
+  assert.equal(sanitizePageMediaUrl('/tryon/../etc/passwd'), null);
+  assert.equal(sanitizePageMediaUrl(null), null);
+
+  const logs: RecordedLog[] = [];
+  const clock = createFakeClock();
+  const { page, calls } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-real-media', log: () => {} });
+
+  let resolveSlowTryOn!: (val: { url: string; path: string; ms: number; id: string }) => void;
+  const slowTryOnGate = new Promise<{ url: string; path: string; ms: number; id: string }>((r) => {
+    resolveSlowTryOn = r;
+  });
+
+  let sharedProductImagesCalls = 0;
+  const sharedProductImages = async (_item: Item): Promise<string[]> => {
+    sharedProductImagesCalls += 1;
+    return [];
+  };
+
+  const tools = createAgentTools({
+    room: 'r-real-media',
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+    page,
+    state,
+    deps: makeFakeDeps({
+      async tryOn(_jpeg, outfit) {
+        if (outfit.number === 1) {
+          return slowTryOnGate;
+        }
+        // Look 2 erroneously puts a local filesystem path in url -> must NEVER reach the page.
+        return {
+          url: '/tmp/secret/tryon-2.jpg',
+          path: '/tmp/secret/tryon-2.jpg',
+          ms: 20,
+          id: 'bad-2',
+        };
+      },
+      async outfitCollage(outfit) {
+        // Look 1 collage degrades to null; Look 2 returns real relative /tryon/ URL.
+        return outfit.number === 1 ? null : '/tryon/board-look-2-a1b2c3d4.jpg';
+      },
+      productImages: sharedProductImages,
+      async loadStoreModule() {
+        return { productImages: sharedProductImages };
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute({ occasion: 'dinner', budget_usd: 200 }, fakeToolOpts('b1'));
+  await flushMicrotasks();
+
+  // Look 1 collage returned null -> no collageReady for look 1, logged ok:false; look 2 sent /tryon/ URL.
+  const collageCalls = calls.filter((c) => c.action === 'collageReady');
+  assert.equal(collageCalls.length, 1);
+  assert.deepEqual(collageCalls[0]!.payload, {
+    outfit: 2,
+    url: '/tryon/board-look-2-a1b2c3d4.jpg',
+  });
+  const collageLogs = logs.filter((l) => l.ev === 'collage');
+  assert.equal(collageLogs.find((l) => l.data?.outfit === 1)?.data?.ok, false);
+  assert.equal(collageLogs.find((l) => l.data?.outfit === 2)?.data?.ok, true);
+
+  // Look 2 had a filesystem path in url -> rejected, never sent via tryOnReady, marked failed.
+  assert.equal(state.get().tryOn[2]?.status, 'failed');
+  assert.equal(
+    calls.some(
+      (c) => c.action === 'tryOnReady' && (c.payload as PageActions['tryOnReady']).outfit === 2,
+    ),
+    false,
+  );
+
+  // Look 1 tryOn takes 25s -> show_on_me waits and reveals ONLY the /tryon/ url, never `path`.
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+  const showPromise = tools.show_on_me.execute({}, fakeToolOpts('s1'));
+  await flushMicrotasks();
+  await clock.advance(25_000);
+
+  resolveSlowTryOn({
+    url: '/tryon/tryon-real123.jpg',
+    path: '/Users/alice/data/tryon/tryon-real123.jpg',
+    ms: 25_000,
+    id: 'real123',
+  });
+  const showRes = await showPromise;
+  assert.match(showRes, /revealed on screen/i);
+
+  const ready1 = calls.find(
+    (c) => c.action === 'tryOnReady' && (c.payload as PageActions['tryOnReady']).outfit === 1,
+  );
+  assert.deepEqual(ready1?.payload, { outfit: 1, url: '/tryon/tryon-real123.jpg' });
+
+  const reveal1 = calls.find((c) => c.action === 'reveal');
+  assert.deepEqual(reveal1?.payload, { outfit: 1, url: '/tryon/tryon-real123.jpg' });
+
+  // Verify no page payload anywhere contains a filesystem path.
+  const serializedCalls = JSON.stringify(calls);
+  assert.equal(serializedCalls.includes('/Users/alice/'), false);
+  assert.equal(serializedCalls.includes('/tmp/secret/'), false);
+
+  // show_product must not invoke store.productImages a second time when it is the same function.
+  await tools.show_product.execute({ slot: 'top' }, fakeToolOpts('sp-dedupe'));
+  assert.equal(sharedProductImagesCalls, 1);
 });

@@ -168,6 +168,46 @@ export async function bindStoreCallRoom(
   }
 }
 
+export interface MediaWarmModuleLike {
+  warmMedia?: () => Promise<void>;
+  setCallRoom?: (room: string | null) => void;
+}
+
+export async function warmCallMedia(
+  roomName: string,
+  opts?: {
+    loadMediaModule?: () => Promise<MediaWarmModuleLike | null>;
+    log?: (room: string, ev: string, data?: Record<string, unknown>) => void;
+  },
+): Promise<boolean> {
+  const logFn = opts?.log ?? calllog;
+  const loadMedia =
+    opts?.loadMediaModule ??
+    (async () => {
+      const modPath = '../media/index.ts';
+      return (await import(modPath)) as MediaWarmModuleLike;
+    });
+
+  try {
+    const mediaMod = await loadMedia();
+    if (typeof mediaMod?.warmMedia === 'function') {
+      await mediaMod.warmMedia();
+      return true;
+    }
+    logFn(roomName, 'session_error', {
+      source: 'media_warm',
+      error: new Error('media module does not export warmMedia'),
+    });
+    return false;
+  } catch (err) {
+    logFn(roomName, 'session_error', {
+      source: 'media_warm',
+      error: err instanceof Error ? err : new Error(String(err)),
+    });
+    return false;
+  }
+}
+
 export default defineAgent({
   entry: async (ctx: JobContext) => {
     const config = loadConfig();
@@ -176,6 +216,12 @@ export default defineAgent({
     startCallLog(roomName);
     const uninstallCrashLogging = installCrashLogging(roomName);
     await bindStoreCallRoom(roomName);
+    void warmCallMedia(roomName).catch((err) => {
+      calllog(roomName, 'session_error', {
+        source: 'media_warm',
+        error: err instanceof Error ? err : new Error(String(err)),
+      });
+    });
 
     if (config.avatar !== 'none') {
       console.warn(`[alice] AVATAR="${config.avatar}" is not supported yet; running with avatar=none.`);

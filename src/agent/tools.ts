@@ -160,6 +160,34 @@ function roundMoney(amount: number): number {
 }
 
 /**
+ * Accepts only HTTP(S) URLs or server-relative `/tryon/...` URLs so a local
+ * filesystem path (e.g. `res.path`, `/tmp/...`, `file://...`) can never be sent
+ * to the call page.
+ */
+export function sanitizePageMediaUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.includes('\\')) return null;
+
+  if (trimmed.startsWith('/tryon/')) {
+    if (trimmed.length <= '/tryon/'.length || trimmed.includes('..')) {
+      return null;
+    }
+    return trimmed;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return trimmed;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/**
  * Derives up to 5 short bullet strings from a plain-text product description.
  */
 export function deriveProductDetails(description: string): string[] {
@@ -618,8 +646,8 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         const ms = Math.max(0, Math.round(nowFn() - started));
         if (!isCurrentMediaVersion(lookNumber, version)) return;
 
-        const url = typeof res?.url === 'string' ? res.url.trim() : '';
-        if (url.length > 0) {
+        const url = sanitizePageMediaUrl(res?.url);
+        if (url) {
           stateStore.dispatch({ type: 'set_tryon', look: lookNumber, status: 'ready', url });
           await page.send('tryOnReady', { outfit: lookNumber, url });
           logFn(options.room, 'tryon', {
@@ -630,7 +658,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             had_snapshot: hadSnapshot,
           });
         } else {
-          const error = 'try-on returned empty image url';
+          const error = 'try-on returned invalid or empty image url';
           stateStore.dispatch({ type: 'set_tryon', look: lookNumber, status: 'failed', error });
           await page.send('tryOnStatus', { outfit: lookNumber, status: 'failed' });
           logFn(options.room, 'tryon', {
@@ -673,8 +701,8 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         const ms = Math.max(0, Math.round(nowFn() - started));
         if (!isCurrentMediaVersion(lookNumber, version)) return;
 
-        const cleanUrl = typeof url === 'string' ? url.trim() : '';
-        if (cleanUrl.length > 0) {
+        const cleanUrl = sanitizePageMediaUrl(url);
+        if (cleanUrl) {
           await page.send('collageReady', { outfit: lookNumber, url: cleanUrl });
           logFn(options.room, 'collage', { outfit: lookNumber, ms, ok: true });
         } else {
@@ -1115,9 +1143,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           try {
             const fetched = await mediaProductImagesFn(piece.item);
             if (Array.isArray(fetched)) {
-              images = fetched.filter(
-                (u): u is string => typeof u === 'string' && u.trim().length > 0,
-              );
+              images = fetched
+                .map((u) => sanitizePageMediaUrl(u))
+                .filter((u): u is string => u !== null);
             }
           } catch {
             images = [];
@@ -1126,20 +1154,26 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         if (images.length === 0) {
           try {
             const storeMod = await loadStoreModuleFn();
-            if (typeof storeMod?.productImages === 'function') {
+            if (
+              typeof storeMod?.productImages === 'function' &&
+              storeMod.productImages !== mediaProductImagesFn
+            ) {
               const storeFetched = await storeMod.productImages(piece.item);
               if (Array.isArray(storeFetched)) {
-                images = storeFetched.filter(
-                  (u): u is string => typeof u === 'string' && u.trim().length > 0,
-                );
+                images = storeFetched
+                  .map((u) => sanitizePageMediaUrl(u))
+                  .filter((u): u is string => u !== null);
               }
             }
           } catch {
             images = [];
           }
         }
-        if (images.length === 0 && piece.item.image) {
-          images = [piece.item.image];
+        if (images.length === 0) {
+          const fallbackImg = sanitizePageMediaUrl(piece.item.image);
+          if (fallbackImg) {
+            images = [fallbackImg];
+          }
         }
 
         const details = deriveProductDetails(piece.item.description);
