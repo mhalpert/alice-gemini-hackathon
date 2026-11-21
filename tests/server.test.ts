@@ -1485,7 +1485,8 @@ describe('Storefront, product, search, and looks API', () => {
           assert.equal(womenBody.department, 'women');
           assert.equal(womenBody.occasion, null);
           assert.equal(womenBody.source, 'fixture');
-          assert.ok(womenBody.looks.length > 0);
+          // Menswear fixture must never leak onto the women's page
+          assert.deepEqual(womenBody.looks, []);
 
           const knownMissing = await fetch(
             `${url}/api/looks?department=men&occasion=rooftop-birthday`,
@@ -1895,7 +1896,7 @@ describe('Storefront, product, search, and looks API', () => {
           return { status: res.status, ms, body };
         };
 
-        // Run all five slow-fake budget checks in parallel (~1.4s total; storefront uses wait=500)
+        // Run all five slow-fake budget checks in parallel (default /api/looks uses 4 s; others <= 1.4 s)
         const [sf, prod, srch, lks, occ] = await Promise.all([
           timedFetch('/api/storefront?department=women&wait=500'),
           timedFetch('/api/product?variant_id=gid%3A%2F%2Fshopify%2FProductVariant%2F41356358090885'),
@@ -1920,13 +1921,209 @@ describe('Storefront, product, search, and looks API', () => {
         assert.equal(lks.status, 200);
         assert.equal(lks.body.source, 'fixture');
         assert.ok((lks.body.looks as unknown[]).length > 0);
-        assert.ok(lks.ms < 1550, `/api/looks exceeded budget: ${lks.ms}ms`);
+        assert.ok(lks.ms >= 3800 && lks.ms < 4500, `/api/looks default budget unexpected: ${lks.ms}ms`);
 
         assert.equal(occ.status, 200);
         assert.deepEqual(occ.body, { department: 'men', occasions: [], menu: [], source: 'none' });
         assert.ok(occ.ms < 1550, `/api/occasions exceeded budget: ${occ.ms}ms`);
       },
     );
+  });
+
+  it('gives default /api/looks 4 s (2.5 s library succeeds, concurrent share 1 call), keeps 1.4 s with occasion, keeps timed-out calls in flight, and filters fixture by department', async () => {
+    const tmpSetsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alice-looks-budget-'));
+    const tmpSetsFile = path.join(tmpSetsDir, 'sets.json');
+    fs.writeFileSync(
+      tmpSetsFile,
+      JSON.stringify({
+        version: 1,
+        sets: [
+          {
+            key: 'rooftop-birthday',
+            gender: 'men',
+            occasion: "a friend's rooftop birthday party",
+            outfits: [sampleOutfit('men')],
+          },
+        ],
+      }),
+    );
+
+    try {
+      // 1. Default budgets: 2.5 s library succeeds for no-occasion (2 concurrent -> 1 call),
+      //    while with-occasion times out at 1.4 s.
+      let defaultCalls = 0;
+      let occasionCalls = 0;
+      await withServer(
+        {
+          env: { ALICE_LIBRARY_FILE: tmpSetsFile },
+          loadLibrary: async () => ({
+            libraryLooks: async (gender: Gender, opts?: { occasion?: string }) => {
+              if (opts?.occasion) {
+                occasionCalls += 1;
+              } else {
+                defaultCalls += 1;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 2500));
+              return [sampleOutfit(gender)];
+            },
+          }),
+        },
+        async (url) => {
+          const tOcc0 = Date.now();
+          const occPromise = fetch(`${url}/api/looks?department=men&occasion=rooftop-birthday`).then(
+            async (r) => ({
+              status: r.status,
+              ms: Date.now() - tOcc0,
+              body: (await r.json()) as { source: string; looks: Outfit[]; occasion: string | null },
+            }),
+          );
+
+          const [def1Res, def2Res, occRes] = await Promise.all([
+            fetch(`${url}/api/looks?department=women`),
+            fetch(`${url}/api/looks?department=women`),
+            occPromise,
+          ]);
+
+          assert.equal(def1Res.status, 200);
+          assert.equal(def2Res.status, 200);
+          const def1 = (await def1Res.json()) as {
+            department: string;
+            source: string;
+            looks: Outfit[];
+          };
+          const def2 = (await def2Res.json()) as {
+            department: string;
+            source: string;
+            looks: Outfit[];
+          };
+          assert.equal(defaultCalls, 1, 'two concurrent no-occasion requests must share one library call');
+          assert.equal(def1.source, 'library');
+          assert.equal(def1.looks.length, 1);
+          assert.equal(def1.looks[0].pieces[0].item.department, 'women');
+          assert.deepEqual(def2, def1);
+
+          assert.equal(occasionCalls, 1);
+          assert.equal(occRes.status, 200);
+          assert.equal(occRes.body.source, 'library');
+          assert.deepEqual(occRes.body.looks, []);
+          assert.ok(
+            occRes.ms >= 1300 && occRes.ms < 1900,
+            `with-occasion request should keep 1.4 s budget, took ${occRes.ms}ms`,
+          );
+        },
+      );
+
+      // 2. When library exceeds budget: women get empty list with menswear fixture, timeout=true is logged,
+      //    and the timed-out promise stays in flight so the next request joins it (still 1 library call).
+      let slowWomenCalls = 0;
+      let resolveSlowWomen!: (outfits: Outfit[]) => void;
+      const slowWomenPromise = new Promise<Outfit[]>((resolve) => {
+        resolveSlowWomen = resolve;
+      });
+      const loggedLines: string[] = [];
+      const origLog = console.log;
+      console.log = (...args: unknown[]) => {
+        loggedLines.push(args.map(String).join(' '));
+      };
+
+      try {
+        await withServer(
+          {
+            budgets: { looksDefaultMs: 120 },
+            loadLibrary: async () => ({
+              libraryLooks: async (gender: Gender) => {
+                if (gender === 'women') {
+                  slowWomenCalls += 1;
+                  return slowWomenPromise;
+                }
+                return new Promise<Outfit[]>(() => {});
+              },
+            }),
+          },
+          async (url) => {
+            // Women timeout -> menswear fixture filtered to [] + timeout=true in log
+            const womenTimedOut = await fetch(`${url}/api/looks?department=women`);
+            assert.equal(womenTimedOut.status, 200);
+            assert.deepEqual(await womenTimedOut.json(), {
+              department: 'women',
+              occasion: null,
+              looks: [],
+              source: 'fixture',
+            });
+            assert.equal(slowWomenCalls, 1);
+            assert.ok(
+              loggedLines.some(
+                (line) =>
+                  line.includes('GET /api/looks 200') &&
+                  line.includes('dept=women source=fixture n=0 timeout=true'),
+              ),
+              `expected timeout=true in log, got: ${loggedLines.join('\n')}`,
+            );
+
+            // Second request joins the still-running promise instead of starting a second call
+            const secondReq = fetch(`${url}/api/looks?department=women`);
+            setTimeout(() => resolveSlowWomen([sampleOutfit('women')]), 25);
+            const secondRes = await secondReq;
+            assert.equal(secondRes.status, 200);
+            const secondBody = (await secondRes.json()) as {
+              source: string;
+              looks: Outfit[];
+            };
+            assert.equal(slowWomenCalls, 1, 'timed-out library promise must stay in flight for joiners');
+            assert.equal(secondBody.source, 'library');
+            assert.equal(secondBody.looks.length, 1);
+
+            // Men timeout -> gets men's looks from fixture
+            const menTimedOut = await fetch(`${url}/api/looks?department=men`);
+            assert.equal(menTimedOut.status, 200);
+            const menBody = (await menTimedOut.json()) as { source: string; looks: Outfit[] };
+            assert.equal(menBody.source, 'fixture');
+            assert.ok(menBody.looks.length > 0);
+            for (const look of menBody.looks) {
+              assert.ok(look.pieces.every((p) => p.item.department === 'men'));
+            }
+          },
+        );
+      } finally {
+        console.log = origLog;
+      }
+
+      // 3. Mixed fixture file: filters strictly by piece department (allowing untagged pieces)
+      const mixedPublicDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alice-mixed-fixture-'));
+      try {
+        const untaggedOutfit = sampleOutfit('women');
+        delete (untaggedOutfit.pieces[0].item as Partial<Item>).department;
+        fs.writeFileSync(
+          path.join(mixedPublicDir, 'fixture.json'),
+          JSON.stringify({
+            brief: { gender: 'men' },
+            outfits: [sampleOutfit('men'), sampleOutfit('women'), untaggedOutfit],
+          }),
+        );
+
+        await withServer(
+          {
+            publicDir: mixedPublicDir,
+            loadLibrary: async () => null,
+          },
+          async (url) => {
+            const wRes = await fetch(`${url}/api/looks?department=women`);
+            const wBody = (await wRes.json()) as { source: string; looks: Outfit[] };
+            assert.equal(wBody.source, 'fixture');
+            assert.equal(wBody.looks.length, 2);
+            assert.ok(
+              wBody.looks.every((o) =>
+                o.pieces.every((p) => !p.item.department || p.item.department === 'women'),
+              ),
+            );
+          },
+        );
+      } finally {
+        fs.rmSync(mixedPublicDir, { recursive: true, force: true });
+      }
+    } finally {
+      fs.rmSync(tmpSetsDir, { recursive: true, force: true });
+    }
   });
 
   it('serves /api/occasions menu and /api/occasions/match with validation, truncation, error handling, and zero looks calls', async () => {
