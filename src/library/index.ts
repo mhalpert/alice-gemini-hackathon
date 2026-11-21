@@ -11,6 +11,7 @@ import { breaksDressCode, wrongSlot } from '../brain/words.ts';
 import { embed as defaultEmbed, cosine, occasionText } from './embed.ts';
 import { DEMO_OCCASION_KEY, OCCASIONS, type LibraryOccasion } from './occasions.ts';
 import type { GradesFile, OutfitGrade, SetGrade } from './grade.ts';
+import { readWeather, weatherFit } from './weather-fit.ts';
 
 export interface LibraryMatch {
   key: string;
@@ -361,7 +362,8 @@ export async function matchLibrary(brief: Brief): Promise<LibraryMatch | null> {
 }
 
 function lookupEntryFor(stock: Map<string, LookupEntry>, item: Item): LookupEntry | undefined {
-  return stock.get(item.variant_id) ?? stock.get(item.id);
+  if (!item.variant_id) return undefined;
+  return stock.get(item.variant_id);
 }
 
 function collectIds(outfits: Outfit[]): string[] {
@@ -378,6 +380,15 @@ function collectIds(outfits: Outfit[]): string[] {
 function livePriceOf(entry: LookupEntry): number | null {
   const p = entry.price ?? entry.item?.price ?? null;
   return typeof p === 'number' && Number.isFinite(p) && p > 0 ? p : null;
+}
+
+function livePriceFor(stock: Map<string, LookupEntry>, item: Item, entry: LookupEntry): number | null {
+  const direct = livePriceOf(entry);
+  if (direct !== null) return direct;
+  if (!item.id) return null;
+  const prodEntry = stock.get(item.id);
+  if (!prodEntry || prodEntry.item?.variant_id !== item.variant_id) return null;
+  return livePriceOf(prodEntry);
 }
 
 export async function serveLibrary(
@@ -412,6 +423,24 @@ export async function serveLibrary(
       return null;
     }
 
+    let eligibleOutfits = selected.outfits;
+    let weatherDropped = 0;
+    const weatherLine = typeof brief.weather === 'string' ? brief.weather.trim() : '';
+    if (weatherLine.length > 0) {
+      const parsedWeather = readWeather(weatherLine);
+      const fitting = eligibleOutfits.filter((o) => weatherFit(o, parsedWeather).ok);
+      weatherDropped = eligibleOutfits.length - fitting.length;
+      if (fitting.length < 2) {
+        log(opts.room, 'library_skip', {
+          key: match.key,
+          reason: 'weather',
+          weather: brief.weather,
+        });
+        return null;
+      }
+      eligibleOutfits = fitting;
+    }
+
     if (!opts.anyMatch && set.budget_usd > 0 && brief.budget_usd > set.budget_usd * maxBudgetRatio()) {
       log(opts.room, 'library_skip', {
         key: match.key,
@@ -429,11 +458,16 @@ export async function serveLibrary(
       ms: matchMs,
     });
 
-    const candidates = selected.outfits.slice(0, SERVE_MAX_OUTFITS + SERVE_MAX_SPARES);
+    const candidates = eligibleOutfits.slice(0, SERVE_MAX_OUTFITS + SERVE_MAX_SPARES);
     const stock = await deps.lookup(collectIds(candidates));
     const problems: string[] = [
       `library: matched ${match.key} (similarity ${match.similarity.toFixed(3)})`,
     ];
+    if (weatherDropped > 0) {
+      problems.push(
+        `library: dropped ${weatherDropped} ${weatherDropped === 1 ? 'outfit' : 'outfits'} for weather`,
+      );
+    }
 
     const enforceBudget = brief.budget_usd < set.budget_usd * 0.85;
     const surviving: Outfit[] = [];
@@ -447,7 +481,7 @@ export async function serveLibrary(
       for (const piece of outfit.pieces) {
         const entry = lookupEntryFor(stock, piece.item);
         if (entry?.available) {
-          const livePrice = livePriceOf(entry);
+          const livePrice = livePriceFor(stock, piece.item, entry);
           if (livePrice !== null && livePrice !== piece.item.price) {
             piece.item.price = livePrice;
           }
@@ -600,7 +634,7 @@ export async function libraryLooks(
             allAvailable = false;
             break;
           }
-          const livePrice = livePriceOf(entry);
+          const livePrice = livePriceFor(stock, piece.item, entry);
           if (livePrice !== null && livePrice !== piece.item.price) {
             piece.item.price = livePrice;
           }
@@ -650,7 +684,7 @@ export async function libraryLooks(
             allAvailable = false;
             break;
           }
-          const livePrice = livePriceOf(entry);
+          const livePrice = livePriceFor(stock, piece.item, entry);
           if (livePrice !== null && livePrice !== piece.item.price) {
             piece.item.price = livePrice;
           }
