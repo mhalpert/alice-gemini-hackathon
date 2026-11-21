@@ -9,6 +9,7 @@ export interface CostEntry {
   images?: number;
   usd?: number;
   ms?: number;
+  prewarm?: boolean;
 }
 
 export interface LedgerTotal {

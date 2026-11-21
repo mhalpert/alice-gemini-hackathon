@@ -61,7 +61,7 @@ async function handleOp(op: string, args: unknown): Promise<unknown> {
       const { studio, outfit, opts } = (args ?? {}) as {
         studio: { path: string };
         outfit: Outfit;
-        opts: { setting: string; label?: string };
+        opts: { setting: string; label?: string; prewarm?: boolean };
       };
       return renderTryOnScene(studio, outfit, opts);
     }

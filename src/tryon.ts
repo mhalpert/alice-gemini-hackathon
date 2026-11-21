@@ -1,7 +1,10 @@
 import { mediaRequest } from './media/client.ts';
 import {
   buildSetting,
+  createScenePrewarmCache,
   runTryOnExtrasLoop,
+  scenePrewarmKey,
+  type PrewarmSceneResult,
   type TryOnCheck,
   type TryOnExtraRender,
   type TryOnExtraRenderEvent,
@@ -9,6 +12,8 @@ import {
 } from './media/pure.ts';
 import { logEvent } from './store/log.ts';
 import type { Outfit } from './types.ts';
+
+const scenePrewarmCache = createScenePrewarmCache();
 
 function positiveCapMs(envName: string, fallback: number): number {
   const n = Number(process.env[envName]);
@@ -62,7 +67,7 @@ export async function tryOn(
 export async function tryOnScene(
   studio: { path: string },
   outfit: Outfit,
-  opts: { setting: string; label?: string },
+  opts: { setting: string; label?: string; prewarm?: boolean },
 ): Promise<TryOnExtraRender | null> {
   const t0 = Date.now();
   const outfitTag = outfit?.number ?? opts?.label ?? null;
@@ -75,7 +80,11 @@ export async function tryOnScene(
       return null;
     }
 
-    logEvent('tryon_scene_start', { outfit: outfitTag, setting: opts.setting });
+    logEvent('tryon_scene_start', {
+      outfit: outfitTag,
+      setting: opts.setting,
+      ...(opts.prewarm ? { prewarm: true } : {}),
+    });
 
     const capMs = positiveCapMs('ALICE_TRYON_SCENE_CAP_MS', 45_000);
     const res = await mediaRequest<TryOnExtraRender | null>(
@@ -85,19 +94,78 @@ export async function tryOnScene(
     );
 
     if (res && typeof res.url === 'string' && res.url.length > 0) {
-      logEvent('tryon_scene_ready', { outfit: outfitTag, url: res.url, ms: res.ms });
+      logEvent('tryon_scene_ready', {
+        outfit: outfitTag,
+        url: res.url,
+        ms: res.ms,
+        ...(opts.prewarm ? { prewarm: true } : {}),
+      });
       return res;
     }
 
-    logEvent('tryon_scene_fail', { outfit: outfitTag, ms: Date.now() - t0 });
+    logEvent('tryon_scene_fail', {
+      outfit: outfitTag,
+      ms: Date.now() - t0,
+      ...(opts.prewarm ? { prewarm: true } : {}),
+    });
     return null;
   } catch (err) {
     logEvent('tryon_scene_fail', {
       outfit: outfitTag,
       error: (err as Error)?.message ?? String(err),
       ms: Date.now() - t0,
+      ...(opts.prewarm ? { prewarm: true } : {}),
     });
     return null;
+  }
+}
+
+export async function prewarmScene(
+  studio: { path: string },
+  outfit: Outfit,
+  ctx: { occasion: string; where?: string; when?: string; weather?: string },
+): Promise<PrewarmSceneResult> {
+  const t0 = Date.now();
+  const outfitTag = outfit?.number ?? null;
+
+  try {
+    if (process.env.ALICE_TRYON_SCENE === 'off' || !studio?.path) {
+      return { ok: false, duration_ms: 0 };
+    }
+
+    const setting = buildSetting({
+      occasion: ctx?.occasion ?? '',
+      where: ctx?.where,
+      when: ctx?.when,
+      weather: ctx?.weather,
+    });
+    const key = scenePrewarmKey(studio.path, setting);
+    const alreadyKnown = scenePrewarmCache.hasFinished(key) || scenePrewarmCache.hasInFlight(key);
+
+    if (!alreadyKnown) {
+      logEvent('tryon_scene_prewarm_start', { outfit: outfitTag, setting });
+    }
+
+    const res = await scenePrewarmCache.prewarm(key, () =>
+      tryOnScene(studio, outfit, { setting, prewarm: true }),
+    );
+
+    logEvent('tryon_scene_prewarm', {
+      outfit: outfitTag,
+      ok: res.ok,
+      duration_ms: res.duration_ms,
+      ...(res.reused ? { reused: true } : {}),
+    });
+
+    return res;
+  } catch {
+    const duration_ms = Math.max(0, Date.now() - t0);
+    logEvent('tryon_scene_prewarm', {
+      outfit: outfitTag,
+      ok: false,
+      duration_ms,
+    });
+    return { ok: false, duration_ms };
   }
 }
 
@@ -160,17 +228,33 @@ export async function tryOnExtras(
     when: opts?.when,
     weather: opts?.weather,
   });
+  const outfitTag = outfit?.number ?? null;
 
   try {
     if (!studio?.path) {
       return { scene: null, video: null, setting };
     }
 
+    const key = scenePrewarmKey(studio.path, setting);
+
     return await runTryOnExtrasLoop({
       setting,
       sceneEnabled: process.env.ALICE_TRYON_SCENE !== 'off',
       videoEnabled: process.env.ALICE_TRYON_VIDEO !== 'off',
-      runScene: () => tryOnScene(studio, outfit, { setting }),
+      runScene: async () => {
+        const res = await scenePrewarmCache.getOrRender(key, () =>
+          tryOnScene(studio, outfit, { setting }),
+        );
+        if (res?.reused) {
+          logEvent('tryon_scene_ready', {
+            outfit: outfitTag,
+            url: res.url,
+            ms: res.ms,
+            reused: true,
+          });
+        }
+        return res;
+      },
       runVideo: () => tryOnVideo(studio, outfit, { setting }),
       onRender: opts?.onRender,
     });

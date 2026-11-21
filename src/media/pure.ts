@@ -1422,10 +1422,11 @@ export interface TryOnExtraRenderEvent {
   ok: boolean;
   url?: string;
   ms: number;
+  reused?: boolean;
 }
 
 export interface TryOnExtrasResult {
-  scene: { url: string; path: string; ms: number } | null;
+  scene: { url: string; path: string; ms: number; reused?: boolean } | null;
   video: { url: string; path: string; ms: number } | null;
   setting: string;
 }
@@ -1434,10 +1435,160 @@ export interface RunTryOnExtrasDeps {
   setting: string;
   sceneEnabled: boolean;
   videoEnabled: boolean;
-  runScene: () => Promise<{ url: string; path: string; ms: number } | null>;
+  runScene: () => Promise<{ url: string; path: string; ms: number; reused?: boolean } | null>;
   runVideo: () => Promise<{ url: string; path: string; ms: number } | null>;
   onRender?: (r: TryOnExtraRenderEvent) => void;
   now?: () => number;
+}
+
+export const MAX_SCENE_PREWARM_ENTRIES = 12;
+
+export function scenePrewarmKey(studioPath: string, setting: string): string {
+  return `${studioPath}\0${setting.trim()}`;
+}
+
+export interface SceneRenderOutput {
+  url: string;
+  path: string;
+  ms: number;
+  id?: string;
+  reused?: boolean;
+}
+
+export interface PrewarmSceneResult {
+  ok: boolean;
+  url?: string;
+  duration_ms: number;
+  reused?: boolean;
+}
+
+export interface ScenePrewarmCache {
+  prewarm(
+    key: string,
+    render: () => Promise<SceneRenderOutput | null>,
+  ): Promise<PrewarmSceneResult>;
+  getOrRender(
+    key: string,
+    render: () => Promise<SceneRenderOutput | null>,
+  ): Promise<SceneRenderOutput | null>;
+  hasFinished(key: string): boolean;
+  hasInFlight(key: string): boolean;
+  size(): number;
+  clear(): void;
+}
+
+export function createScenePrewarmCache(opts?: {
+  maxEntries?: number;
+  now?: () => number;
+}): ScenePrewarmCache {
+  const maxEntries = Math.max(1, opts?.maxEntries ?? MAX_SCENE_PREWARM_ENTRIES);
+  const now = opts?.now ?? (() => Date.now());
+  const finished = new Map<string, SceneRenderOutput>();
+  const inFlight = new Map<string, Promise<SceneRenderOutput | null>>();
+
+  const storeFinished = (key: string, value: SceneRenderOutput): void => {
+    if (finished.has(key)) {
+      finished.delete(key);
+    } else if (finished.size >= maxEntries) {
+      const oldest = finished.keys().next().value;
+      if (oldest !== undefined) {
+        finished.delete(oldest);
+      }
+    }
+    finished.set(key, value);
+  };
+
+  const startRender = (
+    key: string,
+    render: () => Promise<SceneRenderOutput | null>,
+  ): Promise<SceneRenderOutput | null> => {
+    const p = (async (): Promise<SceneRenderOutput | null> => {
+      try {
+        const res = await render();
+        if (res && typeof res.url === 'string' && res.url.length > 0) {
+          storeFinished(key, {
+            url: res.url,
+            path: res.path,
+            ms: res.ms,
+            ...(res.id ? { id: res.id } : {}),
+          });
+          return res;
+        }
+        return null;
+      } catch {
+        return null;
+      } finally {
+        if (inFlight.get(key) === p) {
+          inFlight.delete(key);
+        }
+      }
+    })();
+    inFlight.set(key, p);
+    return p;
+  };
+
+  async function prewarm(
+    key: string,
+    render: () => Promise<SceneRenderOutput | null>,
+  ): Promise<PrewarmSceneResult> {
+    const cached = finished.get(key);
+    if (cached) {
+      return { ok: true, url: cached.url, duration_ms: 0, reused: true };
+    }
+
+    const pending = inFlight.get(key);
+    if (pending) {
+      const t0 = now();
+      const res = await pending;
+      const duration_ms = Math.max(0, now() - t0);
+      if (res) {
+        return { ok: true, url: res.url, duration_ms, reused: true };
+      }
+      return { ok: false, duration_ms };
+    }
+
+    const t0 = now();
+    const res = await startRender(key, render);
+    const duration_ms = Math.max(0, now() - t0);
+    if (res) {
+      return { ok: true, url: res.url, duration_ms };
+    }
+    return { ok: false, duration_ms };
+  }
+
+  async function getOrRender(
+    key: string,
+    render: () => Promise<SceneRenderOutput | null>,
+  ): Promise<SceneRenderOutput | null> {
+    const cached = finished.get(key);
+    if (cached) {
+      return { ...cached, ms: 0, reused: true };
+    }
+
+    const pending = inFlight.get(key);
+    if (pending) {
+      const t0 = now();
+      const res = await pending;
+      if (res) {
+        return { ...res, ms: Math.max(0, now() - t0), reused: true };
+      }
+      return null;
+    }
+
+    return startRender(key, render);
+  }
+
+  return {
+    prewarm,
+    getOrRender,
+    hasFinished: (key) => finished.has(key),
+    hasInFlight: (key) => inFlight.has(key),
+    size: () => finished.size,
+    clear: () => {
+      finished.clear();
+      inFlight.clear();
+    },
+  };
 }
 
 export async function runTryOnExtrasLoop(deps: RunTryOnExtrasDeps): Promise<TryOnExtrasResult> {
@@ -1451,25 +1602,34 @@ export async function runTryOnExtrasLoop(deps: RunTryOnExtrasDeps): Promise<TryO
     }
   };
 
-  const scenePromise: Promise<{ url: string; path: string; ms: number } | null> = deps.sceneEnabled
-    ? (async () => {
-        const t0 = now();
-        try {
-          const res = await deps.runScene();
-          const ms = res?.ms ?? Math.max(0, now() - t0);
-          notify({
-            kind: 'scene',
-            ok: Boolean(res),
-            ...(res ? { url: res.url } : {}),
-            ms,
-          });
-          return res ? { url: res.url, path: res.path, ms: res.ms } : null;
-        } catch {
-          notify({ kind: 'scene', ok: false, ms: Math.max(0, now() - t0) });
-          return null;
-        }
-      })()
-    : Promise.resolve(null);
+  const scenePromise: Promise<{ url: string; path: string; ms: number; reused?: boolean } | null> =
+    deps.sceneEnabled
+      ? (async () => {
+          const t0 = now();
+          try {
+            const res = await deps.runScene();
+            const ms = res?.ms ?? Math.max(0, now() - t0);
+            notify({
+              kind: 'scene',
+              ok: Boolean(res),
+              ...(res ? { url: res.url } : {}),
+              ...(res?.reused ? { reused: true } : {}),
+              ms,
+            });
+            return res
+              ? {
+                  url: res.url,
+                  path: res.path,
+                  ms: res.ms,
+                  ...(res.reused ? { reused: true } : {}),
+                }
+              : null;
+          } catch {
+            notify({ kind: 'scene', ok: false, ms: Math.max(0, now() - t0) });
+            return null;
+          }
+        })()
+      : Promise.resolve(null);
 
   const videoPromise: Promise<{ url: string; path: string; ms: number } | null> = deps.videoEnabled
     ? (async () => {
