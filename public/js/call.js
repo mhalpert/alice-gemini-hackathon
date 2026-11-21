@@ -3,7 +3,8 @@
 // as a LiveKit RPC method so the agent can drive the shop.
 //
 // Body classes this file sets:  call-idle | call-connecting | call-live,
-//   no-face (no video of Alice yet, show the orb), face-hidden (shopper hid her face).
+//   no-face (no video of Alice yet, show the orb), face-hidden (shopper hid her face),
+//   controls-open (phone controls row expanded).
 // Body classes it reads (set by store.js):  has-products, panel-open.
 
 import { Room, RoomEvent, Track } from '../vendor/livekit-client.esm.mjs';
@@ -31,6 +32,7 @@ export function mountCall(root, { handlers = {} } = {}) {
         <video class="selfview" autoplay playsinline muted aria-label="Your camera"></video>
       </div>
       <div class="captions" aria-live="polite"></div>
+      <button type="button" class="controls-toggle" aria-label="Call controls" aria-expanded="false"><span aria-hidden="true"></span></button>
       <div class="controls" role="toolbar" aria-label="Call controls">
         <button type="button" data-act="mute" aria-pressed="false">Mute</button>
         <button type="button" data-act="video" aria-pressed="false">Stop video</button>
@@ -46,6 +48,7 @@ export function mountCall(root, { handlers = {} } = {}) {
     passcode: $('.call-start__passcode'), status: $('.call-start__status'),
     aliceVideo: $('.alice__video'), aliceAudio: $('.alice__audio'), orb: $('.alice__orb'),
     selfview: $('.selfview'), captions: $('.captions'), controls: $('.controls'),
+    controlsToggle: $('.controls-toggle'),
   };
 
   let room = null;
@@ -77,7 +80,10 @@ export function mountCall(root, { handlers = {} } = {}) {
       el.captions.append(pill);
     }
     pill.textContent = clean;
-    pill.classList.add('is-on');
+    for (const other of el.captions.querySelectorAll('.caption.is-latest')) {
+      if (other !== pill) other.classList.remove('is-latest');
+    }
+    pill.classList.add('is-on', 'is-latest');
     clearTimeout(captionTimers.get(who));
     captionTimers.set(who, setTimeout(() => pill.classList.remove('is-on'), CAPTION_LINGER_MS));
   }
@@ -179,6 +185,26 @@ export function mountCall(root, { handlers = {} } = {}) {
     button.textContent = pressed ? labelOn : labelOff;
   }
 
+  // Toggle the collapsed call controls on phones; tapping outside or pressing Escape closes them.
+  function setControlsOpen(open) {
+    body.classList.toggle('controls-open', open);
+    el.controlsToggle.setAttribute('aria-expanded', String(open));
+  }
+
+  el.controlsToggle.addEventListener('click', () => {
+    setControlsOpen(!body.classList.contains('controls-open'));
+  });
+
+  document.addEventListener('pointerdown', (event) => {
+    if (!body.classList.contains('controls-open')) return;
+    if (el.controls.contains(event.target) || el.controlsToggle.contains(event.target)) return;
+    setControlsOpen(false);
+  }, true);
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && body.classList.contains('controls-open')) setControlsOpen(false);
+  });
+
   el.controls.addEventListener('click', async (event) => {
     const button = event.target.closest('button[data-act]');
     if (!button || !room) return;
@@ -279,6 +305,7 @@ export function mountCall(root, { handlers = {} } = {}) {
     stopOrb();
     room = null;
     body.classList.remove('no-face', 'face-hidden', 'camera-off');
+    setControlsOpen(false);
     for (const button of el.controls.querySelectorAll('button[aria-pressed]')) button.setAttribute('aria-pressed', 'false');
     el.controls.querySelector('[data-act="mute"]').textContent = 'Mute';
     el.controls.querySelector('[data-act="video"]').textContent = 'Stop video';
