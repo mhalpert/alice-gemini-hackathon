@@ -31,6 +31,11 @@ export interface TryOnInfo {
   error?: string;
 }
 
+export interface TryOnExtrasInfo {
+  scene?: string;
+  video?: string;
+}
+
 export interface BagNotAdded {
   store: string;
   title: string;
@@ -48,11 +53,15 @@ export interface CallState {
   shopperName: string | null;
   department: Gender | null;
   occasion: string | null;
+  where: string | null;
+  when: string | null;
+  weather: string | null;
   budget: { asked: boolean; given: number | null };
   ownPiece: string | null;
   looks: StateLook[];
   pickedLook: number | null;
   tryOn: Record<number, TryOnInfo>;
+  tryOnExtras: Record<number, TryOnExtrasInfo>;
   critiques: Record<number, LookCritique>;
   revealsDone: number[];
   sizes: Record<string, string>;
@@ -69,6 +78,9 @@ export type CallStateAction =
   | {
       type: 'set_brief';
       occasion?: string | null;
+      where?: string | null;
+      when?: string | null;
+      weather?: string | null;
       budgetAsked?: boolean;
       budgetGiven?: number | null;
       ownPiece?: string | null;
@@ -78,6 +90,7 @@ export type CallStateAction =
   | { type: 'update_look'; look: StateLook }
   | { type: 'pick_look'; look: number | null }
   | { type: 'set_tryon'; look: number; status: TryOnState; url?: string; error?: string }
+  | { type: 'set_tryon_extra'; look: number; kind: 'scene' | 'video'; url: string }
   | { type: 'set_critique'; look: number; critique: LookCritique }
   | { type: 'mark_revealed'; look: number }
   | { type: 'merge_sizes'; sizes: Record<string, string> }
@@ -94,11 +107,15 @@ export function createInitialCallState(overrides: Partial<CallState> = {}): Call
     shopperName: null,
     department: null,
     occasion: null,
+    where: null,
+    when: null,
+    weather: null,
     budget: { asked: false, given: null },
     ownPiece: null,
     looks: [],
     pickedLook: null,
     tryOn: {},
+    tryOnExtras: {},
     critiques: {},
     revealsDone: [],
     sizes: {},
@@ -239,6 +256,9 @@ export function reduceCallState(
 
     case 'set_brief': {
       let nextOccasion = state.occasion;
+      let nextWhere = state.where;
+      let nextWhen = state.when;
+      let nextWeather = state.weather;
       let nextBudget = state.budget;
       let nextOwnPiece = state.ownPiece;
 
@@ -247,6 +267,30 @@ export function reduceCallState(
         if (clean !== state.occasion) {
           nextOccasion = clean;
           changed.push('occasion');
+        }
+      }
+
+      if (action.where !== undefined) {
+        const clean = action.where ? action.where.trim() : null;
+        if (clean !== state.where) {
+          nextWhere = clean;
+          changed.push('where');
+        }
+      }
+
+      if (action.when !== undefined) {
+        const clean = action.when ? action.when.trim() : null;
+        if (clean !== state.when) {
+          nextWhen = clean;
+          changed.push('when');
+        }
+      }
+
+      if (action.weather !== undefined) {
+        const clean = action.weather ? action.weather.trim() : null;
+        if (clean !== state.weather) {
+          nextWeather = clean;
+          changed.push('weather');
         }
       }
 
@@ -270,6 +314,9 @@ export function reduceCallState(
         state: {
           ...state,
           occasion: nextOccasion,
+          where: nextWhere,
+          when: nextWhen,
+          weather: nextWeather,
           budget: nextBudget,
           ownPiece: nextOwnPiece,
         },
@@ -286,6 +333,7 @@ export function reduceCallState(
 
       let nextPicked = state.pickedLook;
       let nextTryOn = state.tryOn;
+      let nextTryOnExtras = state.tryOnExtras;
       let nextCritiques = state.critiques;
       let nextReveals = state.revealsDone;
 
@@ -300,6 +348,10 @@ export function reduceCallState(
         if (Object.keys(state.tryOn).length > 0) {
           nextTryOn = {};
           changed.push('tryOn');
+        }
+        if (Object.keys(state.tryOnExtras).length > 0) {
+          nextTryOnExtras = {};
+          changed.push('tryOnExtras');
         }
         if (Object.keys(state.critiques).length > 0) {
           nextCritiques = {};
@@ -318,6 +370,7 @@ export function reduceCallState(
           looks: nextLooks,
           pickedLook: nextPicked,
           tryOn: nextTryOn,
+          tryOnExtras: nextTryOnExtras,
           critiques: nextCritiques,
           revealsDone: nextReveals,
         },
@@ -337,6 +390,13 @@ export function reduceCallState(
         tryOnChanged = true;
       }
 
+      const nextTryOnExtras = { ...state.tryOnExtras };
+      let tryOnExtrasChanged = false;
+      if (nextTryOnExtras[action.look.number] !== undefined) {
+        delete nextTryOnExtras[action.look.number];
+        tryOnExtrasChanged = true;
+      }
+
       const nextCritiques = { ...state.critiques };
       let critiquesChanged = false;
       if (nextCritiques[action.look.number] !== undefined) {
@@ -349,6 +409,7 @@ export function reduceCallState(
 
       if (!sameLooksArray(state.looks, nextLooks)) changed.push('looks');
       if (tryOnChanged) changed.push('tryOn');
+      if (tryOnExtrasChanged) changed.push('tryOnExtras');
       if (critiquesChanged) changed.push('critiques');
       if (revealsChanged) changed.push('revealsDone');
 
@@ -358,6 +419,7 @@ export function reduceCallState(
           ...state,
           looks: nextLooks,
           tryOn: nextTryOn,
+          tryOnExtras: nextTryOnExtras,
           critiques: nextCritiques,
           revealsDone: nextReveals,
         },
@@ -394,6 +456,25 @@ export function reduceCallState(
           tryOn: { ...state.tryOn, [action.look]: nextInfo },
         },
         changed: ['tryOn'],
+      };
+    }
+
+    case 'set_tryon_extra': {
+      const url = action.url.trim();
+      if (!url) return { state, changed };
+      const prev = state.tryOnExtras[action.look];
+      if (prev && prev[action.kind] === url) {
+        return { state, changed };
+      }
+      return {
+        state: {
+          ...state,
+          tryOnExtras: {
+            ...state.tryOnExtras,
+            [action.look]: { ...prev, [action.kind]: url },
+          },
+        },
+        changed: ['tryOnExtras'],
       };
     }
 
@@ -589,9 +670,14 @@ export function summarize(state: CallState): string {
     const lookStrs = state.looks.map((look) => {
       const tryOn = state.tryOn[look.number];
       const tryOnTag = tryOn ? ` tryon=${tryOn.status}` : '';
+      const extras = state.tryOnExtras[look.number];
+      const extraFlags: string[] = [];
+      if (extras?.scene) extraFlags.push('scene ready');
+      if (extras?.video) extraFlags.push('video ready');
+      const extrasTag = extraFlags.length > 0 ? ` ${extraFlags.join(', ')}` : '';
       const revTag = state.revealsDone.includes(look.number) ? ' revealed' : '';
       const critTag = formatCritiqueStateTag(state.critiques[look.number]);
-      return `#${look.number} ${look.name} (${formatMoney(look.total)}: ${look.slots.join(',')}${tryOnTag}${revTag}${critTag})`;
+      return `#${look.number} ${look.name} (${formatMoney(look.total)}: ${look.slots.join(',')}${tryOnTag}${extrasTag}${revTag}${critTag})`;
     });
     parts.push(`looks=[${lookStrs.join('; ')}]`);
   }

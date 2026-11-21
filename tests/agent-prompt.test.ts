@@ -75,9 +75,9 @@ test('ALICE_SYSTEM_PROMPT mentions CALL STATE and CAMERA STATUS', () => {
   assert.match(ALICE_SYSTEM_PROMPT, /\bCAMERA STATUS\b/);
 });
 
-test('ALICE_SYSTEM_PROMPT word count is within 450 to 1100 words and avoids tables/emoji', () => {
+test('ALICE_SYSTEM_PROMPT word count is within 450 to 1150 words and avoids tables/emoji', () => {
   const words = countWords(ALICE_SYSTEM_PROMPT);
-  assert.ok(words >= 450 && words <= 1100, `expected word count between 450 and 1100, got ${words}`);
+  assert.ok(words >= 450 && words <= 1150, `expected word count between 450 and 1150, got ${words}`);
 
   assert.equal(ALICE_SYSTEM_PROMPT.includes('|---'), false, 'prompt must not contain markdown tables');
   assert.equal(/\p{Extended_Pictographic}/u.test(ALICE_SYSTEM_PROMPT), false, 'prompt must not contain emoji');
@@ -187,6 +187,10 @@ test('ALICE_SYSTEM_PROMPT encodes polish4 rules: single build, immediate bag con
 
   // 5. Budget and bag $10,000 cap.
   assert.match(ALICE_SYSTEM_PROMPT, /cap budgets and bags over \$10,000/i);
+
+  // 6. Three-beat reveal guidance (studio shot, on-location shot, short video).
+  assert.match(ALICE_SYSTEM_PROMPT, /up to three beats.*studio shot.*on-location shot.*short video/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /react to each in one line only when a tool result or note says it landed/i);
 });
 
 test('ALICE_SYSTEM_PROMPT encodes polish6 voice: NY stylist attitude, slang limits, delivery, opinions, budgets, and body/appearance boundary', () => {
