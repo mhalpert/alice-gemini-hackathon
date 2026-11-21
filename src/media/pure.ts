@@ -50,6 +50,14 @@ export function tryonFileName(id: string): string {
   return `tryon-${id}.jpg`;
 }
 
+export function sceneFileName(id: string): string {
+  return `scene-${id}.jpg`;
+}
+
+export function videoFileName(id: string): string {
+  return `video-${id}.mp4`;
+}
+
 export function newTryonId(): string {
   return crypto.randomBytes(6).toString('hex');
 }
@@ -993,4 +1001,136 @@ export async function runTryOnVerifyLoop<TImage>(
       }
     })();
   });
+}
+
+// ---------------------------------------------------------------------------
+// Try-on extras: setting builder & parallel scene + video orchestrator (pure)
+// ---------------------------------------------------------------------------
+
+export interface BuildSettingInput {
+  occasion: string;
+  where?: string;
+  when?: string;
+  weather?: string;
+}
+
+export function buildSetting(opts: BuildSettingInput): string {
+  const occasion = (opts.occasion ?? '').trim() || 'a stylish outing';
+  const where = (opts.where ?? '').trim();
+  const rawWhen = (opts.when ?? '').trim();
+  const weather = (opts.weather ?? '').trim();
+
+  const parts: string[] = [occasion];
+
+  if (where) {
+    parts.push(/^in\s+/i.test(where) ? where : `in ${where}`);
+  }
+
+  if (weather && rawWhen) {
+    const cleanWhen = rawWhen.replace(/^on\s+(?:a\s+|an\s+)?/i, '').trim();
+    const article = /^[aeiou]/i.test(weather) ? 'an' : 'a';
+    parts.push(`on ${article} ${weather} ${cleanWhen}`);
+  } else if (rawWhen) {
+    const hasPrep = /^(on|at|in|during|this|next|today|tonight|tomorrow)\b/i.test(rawWhen);
+    parts.push(hasPrep ? rawWhen : `on ${rawWhen}`);
+  } else if (weather) {
+    parts.push(`in ${weather} weather`);
+  }
+
+  let sentence = parts.join(' ').replace(/\s+/g, ' ').trim();
+  const lower = sentence.toLowerCase();
+
+  if (lower.includes('rooftop') && !lower.includes('lights') && !lower.includes('skyline')) {
+    const isNight = /evening|night|dinner|sunset|cocktail|tonight/i.test(lower);
+    sentence += isNight ? ', city lights behind' : ', open city skyline behind';
+  } else if (lower.includes('beach') && !lower.includes('ocean') && !lower.includes('shore')) {
+    sentence += ', soft ocean light and shoreline behind';
+  }
+
+  return sentence;
+}
+
+export interface TryOnExtraRender {
+  url: string;
+  path: string;
+  ms: number;
+  id: string;
+}
+
+export interface TryOnExtraRenderEvent {
+  kind: 'scene' | 'video';
+  ok: boolean;
+  url?: string;
+  ms: number;
+}
+
+export interface TryOnExtrasResult {
+  scene: { url: string; path: string; ms: number } | null;
+  video: { url: string; path: string; ms: number } | null;
+  setting: string;
+}
+
+export interface RunTryOnExtrasDeps {
+  setting: string;
+  sceneEnabled: boolean;
+  videoEnabled: boolean;
+  runScene: () => Promise<{ url: string; path: string; ms: number } | null>;
+  runVideo: () => Promise<{ url: string; path: string; ms: number } | null>;
+  onRender?: (r: TryOnExtraRenderEvent) => void;
+  now?: () => number;
+}
+
+export async function runTryOnExtrasLoop(deps: RunTryOnExtrasDeps): Promise<TryOnExtrasResult> {
+  const now = deps.now ?? (() => Date.now());
+
+  const notify = (ev: TryOnExtraRenderEvent): void => {
+    try {
+      deps.onRender?.(ev);
+    } catch {
+      // Never let a callback error break extras
+    }
+  };
+
+  const scenePromise: Promise<{ url: string; path: string; ms: number } | null> = deps.sceneEnabled
+    ? (async () => {
+        const t0 = now();
+        try {
+          const res = await deps.runScene();
+          const ms = res?.ms ?? Math.max(0, now() - t0);
+          notify({
+            kind: 'scene',
+            ok: Boolean(res),
+            ...(res ? { url: res.url } : {}),
+            ms,
+          });
+          return res ? { url: res.url, path: res.path, ms: res.ms } : null;
+        } catch {
+          notify({ kind: 'scene', ok: false, ms: Math.max(0, now() - t0) });
+          return null;
+        }
+      })()
+    : Promise.resolve(null);
+
+  const videoPromise: Promise<{ url: string; path: string; ms: number } | null> = deps.videoEnabled
+    ? (async () => {
+        const t0 = now();
+        try {
+          const res = await deps.runVideo();
+          const ms = res?.ms ?? Math.max(0, now() - t0);
+          notify({
+            kind: 'video',
+            ok: Boolean(res),
+            ...(res ? { url: res.url } : {}),
+            ms,
+          });
+          return res ? { url: res.url, path: res.path, ms: res.ms } : null;
+        } catch {
+          notify({ kind: 'video', ok: false, ms: Math.max(0, now() - t0) });
+          return null;
+        }
+      })()
+    : Promise.resolve(null);
+
+  const [scene, video] = await Promise.all([scenePromise, videoPromise]);
+  return { scene, video, setting: deps.setting };
 }
