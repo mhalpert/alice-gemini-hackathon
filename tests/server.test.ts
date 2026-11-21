@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { hasOpenSsl, makeCert } from '../scripts/make-cert.mjs';
+import { getCallLogPath } from '../src/calllog.ts';
 import {
   createAliceHandler,
   createAliceHttpsServer,
@@ -385,12 +386,13 @@ describe('Alice server', () => {
     }
   });
 
-  it('writes one call-log token line per room without leaking token or passcode', async () => {
+  it('writes token and refusal events to server log without writing to the room log or leaking secrets', async () => {
     const dedicatedLogDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alice-calllog-test-'));
     const savedLogDir = process.env.ALICE_LOG_DIR;
     process.env.ALICE_LOG_DIR = dedicatedLogDir;
 
     const secretPasscode = 'super-secret-pass-999';
+    const wrongPasscode = 'wrong-secret-pass-000';
     env.LIVEKIT_API_KEY = 'devkey';
     env.LIVEKIT_API_SECRET = 'x'.repeat(40);
     env.LIVEKIT_URL = 'wss://example.livekit.cloud';
@@ -398,6 +400,28 @@ describe('Alice server', () => {
     delete env.ALICE_AGENT_NAME;
 
     try {
+      // Refusal 1: missing passcode
+      const missingRes = await fetch(`${baseUrl}/api/token`, { method: 'POST' });
+      assert.equal(missingRes.status, 401);
+
+      // Refusal 2: wrong passcode
+      const badRes = await fetch(`${baseUrl}/api/token`, {
+        method: 'POST',
+        headers: { 'x-alice-passcode': wrongPasscode },
+      });
+      assert.equal(badRes.status, 401);
+
+      // Refusal 3: LiveKit not configured
+      const savedUrl = env.LIVEKIT_URL;
+      delete env.LIVEKIT_URL;
+      const unconfRes = await fetch(`${baseUrl}/api/token`, {
+        method: 'POST',
+        headers: { 'x-alice-passcode': secretPasscode },
+      });
+      assert.equal(unconfRes.status, 503);
+      env.LIVEKIT_URL = savedUrl;
+
+      // Success: valid token issued
       const res = await fetch(`${baseUrl}/api/token`, {
         method: 'POST',
         headers: {
@@ -411,24 +435,39 @@ describe('Alice server', () => {
       const room = String(data.room);
       const token = String(data.token);
 
-      const logFile = path.join(dedicatedLogDir, `${room}.jsonl`);
-      assert.ok(fs.existsSync(logFile), `expected call log file at ${logFile}`);
+      // Room log must NOT be created or written to by the server
+      const roomLogFile = path.join(dedicatedLogDir, `${room}.jsonl`);
+      assert.equal(fs.existsSync(roomLogFile), false, 'server must not write to the room call log');
 
-      const lines = fs
-        .readFileSync(logFile, 'utf8')
+      // Server log (calllog('_server', ...) -> getCallLogPath('_server')) receives refusals and token
+      const serverLogFile = getCallLogPath('_server');
+      assert.ok(fs.existsSync(serverLogFile), `expected server log file at ${serverLogFile}`);
+
+      const rawLog = fs.readFileSync(serverLogFile, 'utf8');
+      assert.ok(!rawLog.includes(token), 'server log must never contain the JWT token');
+      assert.ok(!rawLog.includes(secretPasscode), 'server log must never contain the passcode');
+      assert.ok(!rawLog.includes(wrongPasscode), 'server log must never contain supplied passcode');
+
+      const records = rawLog
         .split('\n')
-        .filter((line) => line.trim().length > 0);
-      assert.equal(lines.length, 1, 'expected exactly one call-log line for the room');
-      assert.ok(!lines[0].includes(token), 'call log must never contain the JWT token');
-      assert.ok(!lines[0].includes(secretPasscode), 'call log must never contain the passcode');
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      assert.equal(records.length, 4);
 
-      const record = JSON.parse(lines[0]) as Record<string, unknown>;
-      assert.equal(record.ev, 'token');
-      assert.equal(record.identity, data.identity);
-      assert.equal(record.agent, data.agent);
-      assert.equal(typeof record.t, 'string');
-      assert.equal(typeof record.ms, 'number');
-      assert.equal(typeof record.pid, 'number');
+      assert.equal(records[0].ev, 'token_refused');
+      assert.equal(records[0].reason, 'passcode_required');
+      assert.equal(records[1].ev, 'token_refused');
+      assert.equal(records[1].reason, 'bad_passcode');
+      assert.equal(records[2].ev, 'token_refused');
+      assert.equal(records[2].reason, 'livekit_not_configured');
+
+      assert.equal(records[3].ev, 'token');
+      assert.equal(records[3].room, room);
+      assert.equal(records[3].identity, data.identity);
+      assert.equal(records[3].agent, data.agent);
+      assert.equal(typeof records[3].t, 'string');
+      assert.equal(typeof records[3].ms, 'number');
+      assert.equal(typeof records[3].pid, 'number');
     } finally {
       delete env.ALICE_PASSCODE;
       if (savedLogDir === undefined) {
@@ -437,6 +476,41 @@ describe('Alice server', () => {
         process.env.ALICE_LOG_DIR = savedLogDir;
       }
       fs.rmSync(dedicatedLogDir, { recursive: true, force: true });
+    }
+
+    // Verify slow_down refusal is logged to '_server'
+    const rlEvents: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+    const rlLogServer = createAliceServer({
+      publicDir,
+      tryonDir,
+      env: {
+        LIVEKIT_API_KEY: 'devkey',
+        LIVEKIT_API_SECRET: 'x'.repeat(40),
+        LIVEKIT_URL: 'wss://example.livekit.cloud',
+      },
+      calllog: (r, ev, d) => {
+        rlEvents.push({ room: r, ev, data: d });
+      },
+    });
+    await new Promise<void>((resolve) => {
+      rlLogServer.listen(0, '127.0.0.1', () => resolve());
+    });
+    try {
+      const rlPort = (rlLogServer.address() as AddressInfo).port;
+      for (let i = 0; i < 20; i += 1) {
+        const res = await fetch(`http://127.0.0.1:${rlPort}/api/token`, { method: 'POST' });
+        assert.equal(res.status, 200);
+      }
+      const blocked = await fetch(`http://127.0.0.1:${rlPort}/api/token`, { method: 'POST' });
+      assert.equal(blocked.status, 429);
+      const last = rlEvents[rlEvents.length - 1];
+      assert.equal(last.room, '_server');
+      assert.equal(last.ev, 'token_refused');
+      assert.deepEqual(last.data, { reason: 'slow_down' });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        rlLogServer.close((err) => (err ? reject(err) : resolve()));
+      });
     }
 
     // Verify calllog failure never affects /api/token response.
@@ -659,8 +733,14 @@ describe('Alice server', () => {
       assert.equal(httpsData.agent, httpData.agent);
       assert.equal(httpsData.expires_in_s, httpData.expires_in_s);
       assert.equal(loggedEvents.length, 2);
+      assert.equal(loggedEvents[0].room, '_server');
       assert.equal(loggedEvents[0].ev, 'token');
+      assert.equal(loggedEvents[1].room, '_server');
       assert.equal(loggedEvents[1].ev, 'token');
+      assert.deepEqual(
+        loggedEvents.map((e) => e.data?.room).sort(),
+        [httpData.room, httpsData.room].sort(),
+      );
     } finally {
       await Promise.all([
         httpSrv
