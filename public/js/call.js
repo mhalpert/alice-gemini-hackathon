@@ -280,30 +280,53 @@ export function mountCall(root, { handlers = {} } = {}) {
     }
   }
 
-  async function sendTypedText() {
-    if (!room || sendingText) return;
-    const text = el.typeInput.value.trim();
-    if (!text) return;
+  async function sendChatText(rawText, { fromTypebox = false } = {}) {
+    if (!room) return false;
+    if (fromTypebox && sendingText) return false;
+    const text = String(rawText ?? '').trim();
+    if (!text) return false;
     const activeRoom = room;
-    sendingText = true;
-    el.typeSend.disabled = true;
+    if (fromTypebox) {
+      sendingText = true;
+      el.typeSend.disabled = true;
+    }
     try {
       await activeRoom.localParticipant.sendText(text, { topic: 'lk.chat' });
-      if (room !== activeRoom) return;
+      if (room !== activeRoom) return false;
       showCaption('you', text);
-      el.typeInput.value = '';
-      el.typeInput.focus();
+      if (fromTypebox) {
+        el.typeInput.value = '';
+        el.typeInput.focus();
+      }
+      return true;
     } catch (err) {
       console.warn('[call] sendText failed', err);
-      el.typebox.classList.remove('is-unsent');
-      void el.typebox.offsetWidth;
-      el.typebox.classList.add('is-unsent');
-      clearTimeout(unsentTimer);
-      unsentTimer = setTimeout(() => el.typebox.classList.remove('is-unsent'), 600);
+      if (fromTypebox) {
+        el.typebox.classList.remove('is-unsent');
+        void el.typebox.offsetWidth;
+        el.typebox.classList.add('is-unsent');
+        clearTimeout(unsentTimer);
+        unsentTimer = setTimeout(() => el.typebox.classList.remove('is-unsent'), 600);
+      }
+      return false;
     } finally {
-      sendingText = false;
-      el.typeSend.disabled = false;
+      if (fromTypebox) {
+        sendingText = false;
+        el.typeSend.disabled = false;
+      }
     }
+  }
+
+  async function sendTypedText() {
+    return sendChatText(el.typeInput.value, { fromTypebox: true });
+  }
+
+  function sendText(text) {
+    return sendChatText(text, { fromTypebox: false });
+  }
+
+  function isLive() {
+    return Boolean(room) && body.classList.contains('call-live');
   }
 
   el.controlsToggle.addEventListener('click', () => {
@@ -569,5 +592,5 @@ export function mountCall(root, { handlers = {} } = {}) {
   el.passcode.addEventListener('keydown', (event) => { if (event.key === 'Enter') start(); });
   setState('idle');
 
-  return { start, end, say, preview };
+  return { start, end, say, preview, isLive, sendText };
 }
