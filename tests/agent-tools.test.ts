@@ -177,3 +177,45 @@ test('stableStringify produces identical output regardless of object key order',
     stableStringify({ a: { x: 0, y: 1 }, b: 2 }),
   );
 });
+
+test('show_on_me reports snapshot availability and age from optional getSnapshot dependency', async () => {
+  let now = 10_000;
+  let snap: { jpeg: Buffer; width: number; height: number; at: number } | null = {
+    jpeg: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+    width: 640,
+    height: 480,
+    at: 7_000,
+  };
+
+  const tools = createAgentTools({
+    room: 'snap-room',
+    log: () => {},
+    now: () => now,
+    slowDelayMs: 0,
+    getSnapshot: () => snap,
+  });
+
+  const fakeOpts = { toolCallId: 'call-snap-1', ctx: {} as never, abortSignal: new AbortController().signal };
+  const withSnap = await tools.show_on_me.execute({ outfit: 1 }, fakeOpts);
+  assert.match(withSnap, /\(snapshot: yes, 3 s old\)/);
+
+  snap = null;
+  now += 20_000;
+  const withoutSnap = await tools.show_on_me.execute(
+    { outfit: 2 },
+    { ...fakeOpts, toolCallId: 'call-snap-2' },
+  );
+  assert.match(withoutSnap, /\(snapshot: no\)/);
+
+  // Also works when getSnapshot is omitted entirely.
+  const toolsNoGetter = createAgentTools({
+    room: 'snap-room-none',
+    log: () => {},
+    slowDelayMs: 0,
+  });
+  const omittedResult = await toolsNoGetter.show_on_me.execute(
+    { outfit: 3 },
+    { ...fakeOpts, toolCallId: 'call-snap-3' },
+  );
+  assert.match(omittedResult, /\(snapshot: no\)/);
+});
