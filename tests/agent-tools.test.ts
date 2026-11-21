@@ -620,8 +620,9 @@ test('show_on_me reveals ready try-on, waits for rendering try-on, times out at 
 
   resolveLook1({ url: 'https://media.local/on-me-1.jpg', path: '', ms: 200, id: 'ok1' });
   const show1Res = await show1Promise;
-  assert.match(show1Res, /revealed on screen/i);
-  assert.match(show1Res, /no camera snapshot/i);
+  assert.match(show1Res, /revealed on screen on a model/i);
+  assert.match(show1Res, /turning the camera on lets you show it on them/i);
+  assert.match(show1Res, /never say you cannot overlay it/i);
   assert.deepEqual(state.get().revealsDone, [1]);
   assert.ok(
     calls.some(
@@ -641,7 +642,7 @@ test('show_on_me reveals ready try-on, waits for rendering try-on, times out at 
   const show2Res = await show2Promise;
   assert.match(show2Res, /fitting room is jammed/i);
   assert.match(show2Res, /flat-lay/i);
-  assert.match(show2Res, /no camera snapshot/i);
+  assert.match(show2Res, /camera is off/i);
 });
 
 test('swap_piece updates state, sends updateOutfit, restarts try-on & collage, and logs swap', async () => {
@@ -871,10 +872,10 @@ test('add_to_bag enforces heard-sizes NOT DONE check, remembers sizes across cal
   // Next call supplies ONLY shoes -> merges with remembered top=M and succeeds!
   const added = await tools.add_to_bag.execute({ sizes: { shoes: '10' } }, fakeToolOpts('bag2'));
   assert.equal(storeAddCalls, 1);
-  assert.match(added, /Bag is ready on screen/i);
+  assert.match(added, /^Added 2 pieces, total \$105/);
   assert.match(added, /Everlane:.*Merino Knit Polo - Espresso \(size M\)/);
-  assert.match(added, /Size 10 is sold out/);
-  assert.match(added, /\$105/);
+  assert.match(added, /Not added \(1\):.*Minimal Leather Sneaker - White.*Size 10 is sold out/);
+  assert.match(added, /Checkout link is on the page \(Everlane\)/);
 
   const bagCall = calls.find((c) => c.action === 'bagReady');
   assert.ok(bagCall);
@@ -1147,7 +1148,8 @@ test('add_to_bag honors store NOT DONE missing-size response without sending bag
   );
   assert.equal(storeAddCalls, 2);
   assert.equal(secondRes.startsWith('NOT DONE:'), false);
-  assert.match(secondRes, /Bag is ready on screen/i);
+  assert.match(secondRes, /^Added 2 pieces, total \$105/);
+  assert.match(secondRes, /Checkout link is on the page \(Everlane\)/);
   assert.ok(state.get().bag, 'flow state must record bag once a real cart exists');
 
   const bagCall = calls.find((c) => c.action === 'bagReady');
@@ -1401,4 +1403,310 @@ test('real media layer shapes: /tryon URLs only (never file paths), slow 25s try
   // show_product must not invoke store.productImages a second time when it is the same function.
   await tools.show_product.execute({ slot: 'top' }, fakeToolOpts('sp-dedupe'));
   assert.equal(sharedProductImagesCalls, 1);
+});
+
+test('add_to_bag result leads with added count and total, then not-added pieces with reasons, then checkout links on the page', async () => {
+  const { page } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-bag-order', log: () => {} });
+
+  const fivePieceOutfit: Outfit = {
+    number: 1,
+    name: 'Full Night Out',
+    difference: 'Complete five-piece evening look.',
+    story: 'Sharp head to toe.',
+    pieces: [
+      { slot: 'top', why: 'Clean base.', item: makeItem({ id: 'p1', variant_id: 'v1', title: 'Satin Shirt', price: 40, store: 'Fashion Nova', store_domain: 'fn.myshopify.com', sizes: ['S', 'M'] }) },
+      { slot: 'bottom', why: 'Tailored drape.', item: makeItem({ id: 'p2', variant_id: 'v2', title: 'Wide-Leg Trouser', price: 50, store: 'Fashion Nova', store_domain: 'fn.myshopify.com', sizes: ['S', 'M'] }) },
+      { slot: 'layer', why: 'Evening structure.', item: makeItem({ id: 'p3', variant_id: 'v3', title: 'Cropped Blazer', price: 65, store: 'Fashion Nova', store_domain: 'fn.myshopify.com', sizes: ['S', 'M'] }) },
+      { slot: 'shoes', why: 'Adds height.', item: makeItem({ id: 'p4', variant_id: 'v4', title: 'Strappy Sandal', price: 45, store: 'Fashion Nova', store_domain: 'fn.myshopify.com', sizes: ['8', '9'] }) },
+      { slot: 'bag', why: 'Finishes the look.', item: makeItem({ id: 'p5', variant_id: 'v5', title: 'Mini Clutch', price: 30, store: 'Fashion Nova', store_domain: 'fn.myshopify.com', sizes: [] }) },
+    ],
+    total: 230,
+  };
+
+  const tools = createAgentTools({
+    room: 'r-bag-order',
+    log: () => {},
+    page,
+    state,
+    deps: makeFakeDeps({
+      async buildOutfits(_brief, opts) {
+        opts?.onOutfit?.(fivePieceOutfit, 0);
+        return { outfits: [fivePieceOutfit], source: 'live', timing: { first_outfit_ms: 50, total_ms: 50 }, problems: [] };
+      },
+      async addToBag(): Promise<BagOut> {
+        return {
+          carts: [
+            {
+              store: 'Fashion Nova',
+              store_domain: 'fn.myshopify.com',
+              cart_id: 'cart-fn-1',
+              continue_url: 'https://fashionnova.com/cart/abc',
+              total_usd: 155,
+              added: [
+                { variant_id: 'v1', title: 'Satin Shirt', size: 'M' },
+                { variant_id: 'v2', title: 'Wide-Leg Trouser', size: 'M' },
+                { variant_id: 'v3', title: 'Cropped Blazer', size: 'M' },
+              ],
+              not_added: [
+                { variant_id: 'v4', title: 'Strappy Sandal', reason: 'Size 8 is out of stock.' },
+                { variant_id: 'v5', title: 'Mini Clutch', reason: 'Size could not be selected.' },
+              ],
+              ms: 60,
+            },
+          ],
+          summary: '3 added, 2 not added.',
+          total_usd: 155,
+        };
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'women' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute({ occasion: 'dinner', budget_usd: 250 }, fakeToolOpts('b1'));
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+
+  const res = await tools.add_to_bag.execute(
+    { sizes: { top: 'M', bottom: 'M', shoes: '8' } },
+    fakeToolOpts('bag-ord-1'),
+  );
+
+  const addedIdx = res.indexOf('Added 3 pieces, total $155');
+  const notAddedIdx = res.indexOf('Not added (2):');
+  const sandalIdx = res.indexOf('Strappy Sandal at Fashion Nova (Size 8 is out of stock)');
+  const clutchIdx = res.indexOf('Mini Clutch at Fashion Nova (Size could not be selected)');
+  const linkIdx = res.indexOf('Checkout link is on the page (Fashion Nova)');
+
+  assert.equal(addedIdx, 0, `expected result to lead with added count and total, got: ${res}`);
+  assert.ok(notAddedIdx > addedIdx, 'not-added section must come after added count and total');
+  assert.ok(sandalIdx > notAddedIdx && clutchIdx > notAddedIdx, 'each not-added piece and reason must be listed');
+  assert.ok(linkIdx > clutchIdx, 'checkout link location must follow the not-added pieces');
+  assert.match(res, /never say the bag is processing/i);
+  assert.match(res, /never pitch a different look/i);
+  assert.match(res, /offer to swap those pieces or try another size/i);
+});
+
+test('show_on_me distinguishes camera-off stand-in model render from camera-on render', async () => {
+  const { page } = createFakePage();
+  const stateOff = createCallStateStore({ roomName: 'r-cam-off', log: () => {} });
+  const toolsOff = createAgentTools({
+    room: 'r-cam-off',
+    log: () => {},
+    getSnapshot: () => null,
+    page,
+    state: stateOff,
+    deps: makeFakeDeps(),
+  });
+
+  await toolsOff.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  await toolsOff.build_outfits.execute({ occasion: 'date', budget_usd: 200 }, fakeToolOpts('b1'));
+  await flushMicrotasks();
+  await toolsOff.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+
+  const resOff = await toolsOff.show_on_me.execute({}, fakeToolOpts('s-off'));
+  assert.match(resOff, /on screen on a model/i);
+  assert.match(resOff, /turning the camera on lets you show it on them/i);
+  assert.match(resOff, /never say you cannot overlay it/i);
+
+  // With a camera snapshot present, show_on_me reveals on the shopper without model-stand-in wording.
+  const stateOn = createCallStateStore({ roomName: 'r-cam-on', log: () => {} });
+  const snap: CameraSnapshot = {
+    jpeg: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+    width: 640,
+    height: 480,
+    at: 1_000,
+  };
+  const toolsOn = createAgentTools({
+    room: 'r-cam-on',
+    log: () => {},
+    getSnapshot: () => snap,
+    page,
+    state: stateOn,
+    deps: makeFakeDeps(),
+  });
+
+  await toolsOn.set_department.execute({ department: 'men' }, fakeToolOpts('d2'));
+  await toolsOn.build_outfits.execute({ occasion: 'date', budget_usd: 200 }, fakeToolOpts('b2'));
+  await flushMicrotasks();
+  await toolsOn.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p2'));
+
+  const resOn = await toolsOn.show_on_me.execute({}, fakeToolOpts('s-on'));
+  assert.match(resOn, /revealed on screen/i);
+  assert.doesNotMatch(resOn, /on a model/i);
+  assert.doesNotMatch(resOn, /camera is off/i);
+});
+
+test('build_outfits looks up weather when where and when are given, injects brief.weather, logs weather event, and skips otherwise', async () => {
+  const logs: RecordedLog[] = [];
+  const clock = createFakeClock(50_000);
+  const { page } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-weather', log: () => {} });
+
+  const capturedBriefs: Brief[] = [];
+  let capturedSwapBrief: Brief | null = null;
+  const weatherCalls: Array<{ where: string; when?: string }> = [];
+  const forecastLine = 'Saturday in Chicago: about 52°F in the evening, light rain, 60% chance of rain; high 58, low 46.';
+
+  const tools = createAgentTools({
+    room: 'r-weather',
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+    page,
+    state,
+    deps: makeFakeDeps({
+      async loadWeatherModule() {
+        return {
+          async forecast(where, when) {
+            weatherCalls.push({ where, when });
+            await clock.advance(120);
+            return { ok: true, line: forecastLine, ms: 120 };
+          },
+        };
+      },
+      async buildOutfits(brief, opts) {
+        capturedBriefs.push(structuredClone(brief));
+        return makeFakeDeps().buildOutfits!(brief, opts);
+      },
+      async swapPiece(outfit, slot, request, brief, opts) {
+        capturedSwapBrief = structuredClone(brief);
+        return makeFakeDeps().swapPiece!(outfit, slot, request, brief, opts);
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+
+  // 1) Only `where` without `when` -> skips weather lookup.
+  await tools.build_outfits.execute(
+    { occasion: 'dinner', budget_usd: 200, where: 'Chicago' },
+    fakeToolOpts('b-only-where'),
+  );
+  assert.equal(weatherCalls.length, 0);
+  assert.equal(capturedBriefs[0]!.weather, undefined);
+  assert.equal(logs.filter((l) => l.ev === 'weather').length, 0);
+
+  // 2) Both `where` and `when` -> looks up weather, sets brief.weather, logs event, returns weather line.
+  const res = await tools.build_outfits.execute(
+    { occasion: 'rooftop party', budget_usd: 250, where: 'Chicago', when: 'Saturday' },
+    fakeToolOpts('b-weather'),
+  );
+  assert.deepEqual(weatherCalls, [{ where: 'Chicago', when: 'Saturday' }]);
+  assert.equal(capturedBriefs[1]!.weather, forecastLine);
+  assert.match(res, /Weather.*Saturday in Chicago: about 52°F/);
+
+  const weatherLogs = logs.filter((l) => l.ev === 'weather');
+  assert.equal(weatherLogs.length, 1);
+  assert.deepEqual(weatherLogs[0]!.data, {
+    where: 'Chicago',
+    when: 'Saturday',
+    line: forecastLine,
+    ms: 120,
+  });
+
+  // Subsequent swap_piece receives the brief with weather preserved.
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+  await tools.swap_piece.execute({ slot: 'shoes', request: 'waterproof boots' }, fakeToolOpts('sw1'));
+  assert.equal(capturedSwapBrief!.weather, forecastLine);
+});
+
+test('build_outfits caps weather lookup at 2.5s and never fails when weather import or forecast errors', async () => {
+  // 1) Hanging forecast times out at 2500ms without delaying buildOutfits beyond that.
+  const logsTimeout: RecordedLog[] = [];
+  const clock = createFakeClock(100_000);
+  const { page } = createFakePage();
+  const stateTimeout = createCallStateStore({ roomName: 'r-w-timeout', log: () => {} });
+  let timeoutBrief: Brief | null = null;
+  let resolveHungForecast!: (v: { ok: boolean; line: string; ms: number }) => void;
+  const hungForecast = new Promise<{ ok: boolean; line: string; ms: number }>((r) => {
+    resolveHungForecast = r;
+  });
+
+  const toolsTimeout = createAgentTools({
+    room: 'r-w-timeout',
+    log: (room, ev, data) => logsTimeout.push({ room, ev, data }),
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+    page,
+    state: stateTimeout,
+    deps: makeFakeDeps({
+      async loadWeatherModule() {
+        return {
+          async forecast() {
+            return hungForecast;
+          },
+        };
+      },
+      async buildOutfits(brief, opts) {
+        timeoutBrief = structuredClone(brief);
+        return makeFakeDeps().buildOutfits!(brief, opts);
+      },
+    }),
+  });
+
+  await toolsTimeout.set_department.execute({ department: 'women' }, fakeToolOpts('d1'));
+  const buildPromise = toolsTimeout.build_outfits.execute(
+    { occasion: 'wedding', budget_usd: 300, where: 'Miami', when: 'tomorrow' },
+    fakeToolOpts('b-timeout'),
+  );
+  await flushMicrotasks();
+  assert.equal(timeoutBrief, null, 'buildOutfits waits while within 2.5s weather cap');
+
+  await clock.advance(2_499);
+  assert.equal(timeoutBrief, null, 'weather cap must not fire before 2500ms');
+
+  await clock.advance(1);
+  const timeoutRes = await buildPromise;
+  assert.match(timeoutRes, /Built 2 looks and they are now on screen/i);
+  assert.equal(timeoutBrief!.weather, undefined);
+
+  const timeoutLog = logsTimeout.find((l) => l.ev === 'weather');
+  assert.ok(timeoutLog);
+  assert.equal(timeoutLog!.data?.where, 'Miami');
+  assert.equal(timeoutLog!.data?.when, 'tomorrow');
+  assert.equal(timeoutLog!.data?.ms, 2_500);
+  assert.match(String(timeoutLog!.data?.error), /timeout/i);
+
+  // Resolving the hung promise later must not throw or log a second weather event.
+  resolveHungForecast({ ok: true, line: 'late line', ms: 5000 });
+  await flushMicrotasks();
+  assert.equal(logsTimeout.filter((l) => l.ev === 'weather').length, 1);
+
+  // 2) Dynamic import failure never breaks build_outfits and logs error.
+  const logsImportErr: RecordedLog[] = [];
+  const stateErr = createCallStateStore({ roomName: 'r-w-err', log: () => {} });
+  let errBrief: Brief | null = null;
+
+  const toolsImportErr = createAgentTools({
+    room: 'r-w-err',
+    log: (room, ev, data) => logsImportErr.push({ room, ev, data }),
+    page,
+    state: stateErr,
+    deps: makeFakeDeps({
+      async loadWeatherModule() {
+        throw new Error('weather module failed to load');
+      },
+      async buildOutfits(brief, opts) {
+        errBrief = structuredClone(brief);
+        return makeFakeDeps().buildOutfits!(brief, opts);
+      },
+    }),
+  });
+
+  await toolsImportErr.set_department.execute({ department: 'women' }, fakeToolOpts('d2'));
+  const errRes = await toolsImportErr.build_outfits.execute(
+    { occasion: 'brunch', budget_usd: 150, where: 'Austin', when: 'Sunday' },
+    fakeToolOpts('b-err'),
+  );
+  assert.match(errRes, /Built 2 looks and they are now on screen/i);
+  assert.equal(errBrief!.weather, undefined);
+
+  const errLog = logsImportErr.find((l) => l.ev === 'weather');
+  assert.ok(errLog);
+  assert.equal(errLog!.data?.where, 'Austin');
+  assert.equal(errLog!.data?.when, 'Sunday');
+  assert.equal(typeof errLog!.data?.ms, 'number');
+  assert.match(String(errLog!.data?.error), /weather module failed to load/);
 });

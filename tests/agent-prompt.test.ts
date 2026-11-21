@@ -54,4 +54,31 @@ test('ALICE_SYSTEM_PROMPT word count is within 450 to 1100 words and avoids tabl
 
   assert.equal(ALICE_SYSTEM_PROMPT.includes('|---'), false, 'prompt must not contain markdown tables');
   assert.equal(/\p{Extended_Pictographic}/u.test(ALICE_SYSTEM_PROMPT), false, 'prompt must not contain emoji');
+  assert.equal(/(^|\n)#{1,6}\s/.test(ALICE_SYSTEM_PROMPT), false, 'prompt must not contain markdown headings');
+  assert.equal(ALICE_SYSTEM_PROMPT.includes('**'), false, 'prompt must not contain markdown bold');
+  assert.equal(ALICE_SYSTEM_PROMPT.includes('`'), false, 'prompt must not contain markdown backticks');
+});
+
+test('ALICE_SYSTEM_PROMPT encodes waiting, bag, camera-off try-on, and weather guidance', () => {
+  // 1. Waiting on outfits: one short line, at most one useful style question, then stay quiet.
+  assert.match(ALICE_SYSTEM_PROMPT, /pulling looks together/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /at most one useful style question/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /stay quiet until/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /no small talk|never fill silence with small talk/i);
+  assert.doesNotMatch(ALICE_SYSTEM_PROMPT, /keep talking while it runs/i);
+  assert.doesNotMatch(ALICE_SYSTEM_PROMPT, /keep the conversation moving/i);
+
+  // 2. After add_to_bag: plain bag facts, never say processing, never pitch another look.
+  assert.match(ALICE_SYSTEM_PROMPT, /state plainly what is in the bag and the total/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /each piece that was not added with its reason/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never say the bag is processing/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never pitch a different look/i);
+
+  // 3. show_on_me with camera off: on screen on a model, turning camera on shows it on them.
+  assert.match(ALICE_SYSTEM_PROMPT, /on screen on a model/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /turning the camera on lets you show it on them/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never that you cannot overlay it/i);
+
+  // 4. Weather: mention in one short clause when known.
+  assert.match(ALICE_SYSTEM_PROMPT, /mention the weather in one short clause when it is known/i);
 });
