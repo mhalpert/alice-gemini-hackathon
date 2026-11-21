@@ -426,6 +426,16 @@ export function mountCall(root, { handlers = {} } = {}) {
       body: JSON.stringify(passcode ? { passcode } : {}),
     });
     if (res.status === 401 || res.status === 403) return { needsPasscode: true };
+    // 429: the hourly call limit is reached, or this visitor tried too many passcodes
+    if (res.status === 429) {
+      let reason = '';
+      try {
+        reason = String((await res.json()).error || '');
+      } catch {
+        // no readable body: treat it as busy
+      }
+      return { busy: true, reason };
+    }
     if (!res.ok) throw new Error(`token endpoint answered ${res.status}`);
     const json = await res.json();
     return { token: json.token ?? json.participantToken, url: json.url ?? json.serverUrl ?? json.livekit_url };
@@ -441,6 +451,14 @@ export function mountCall(root, { handlers = {} } = {}) {
         el.passcode.hidden = false;
         el.passcode.focus();
         el.status.textContent = el.passcode.value ? 'That passcode did not work.' : 'Enter the passcode to start.';
+        setState('idle');
+        return;
+      }
+      if (grant.busy) {
+        el.status.textContent =
+          grant.reason === 'passcode_locked'
+            ? 'Too many tries. Give it a minute, then try again.'
+            : 'Alice is with another shopper. Try again in a minute.';
         setState('idle');
         return;
       }
