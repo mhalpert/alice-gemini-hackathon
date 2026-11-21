@@ -41,6 +41,11 @@ export interface PlaceOrderOptions {
   room?: string;
 }
 
+export interface PlacedStoreItems {
+  variantTitles: Map<string, string>;
+  productTitles: Map<string, string>;
+}
+
 export interface PurchaseDeps {
   mcp?: ShopMcpClient;
   auth?: AuthManager;
@@ -54,6 +59,8 @@ export interface PurchaseDeps {
   reconcileDelaysMs?: number[];
   sentCartIds?: Set<string>;
   sentCheckoutIds?: Set<string>;
+  unclearStores?: Set<string>;
+  placedItemsByStore?: Map<string, PlacedStoreItems>;
 }
 
 export interface PurchaseClient {
@@ -65,6 +72,8 @@ export interface PurchaseClient {
     rawInstrumentCount: number;
     sentCarts: number;
     sentCheckouts: number;
+    unclearStores: number;
+    placedStores: number;
     sessionSpentCents: number;
   };
 }
@@ -84,6 +93,137 @@ const ALREADY_SENT_NOTE = "This store's order was already sent. Check your Shop 
 // Process-wide sets for the default purchase client; intentionally outlive signOut() and endCall().
 const PROCESS_SENT_CART_IDS = new Set<string>();
 const PROCESS_SENT_CHECKOUT_IDS = new Set<string>();
+const PROCESS_UNCLEAR_STORES = new Set<string>();
+const PROCESS_PLACED_ITEMS = new Map<string, PlacedStoreItems>();
+
+const DEFINITE_REFUSAL_STATUSES = new Set([
+  'failed',
+  'declined',
+  'canceled',
+  'cancelled',
+  'rejected',
+  'expired',
+  'incomplete',
+  'requires_escalation',
+]);
+
+function normalizeStoreDomain(domain: string | undefined | null): string {
+  return typeof domain === 'string' ? domain.trim().toLowerCase() : '';
+}
+
+function buildStoreUnclearNote(storeName: string): string {
+  return `A payment for this store may still be processing. Check your Shop app or email before ordering from ${storeName} again.`;
+}
+
+function buildAlreadyOrderedNote(title: string): string {
+  return `You already ordered ${title} in this call.`;
+}
+
+function nonEmptyStr(val: unknown): string | null {
+  if (typeof val !== 'string') return null;
+  const trimmed = val.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+interface LineIdRef {
+  variant_id: string | null;
+  product_id: string | null;
+  title: string;
+}
+
+function extractCartLineRefs(cart: CartResult): LineIdRef[] {
+  const added = Array.isArray(cart?.added) ? cart.added : [];
+  const refs: LineIdRef[] = [];
+  for (const line of added as any[]) {
+    const variant_id = nonEmptyStr(line?.variant_id);
+    const product_id = nonEmptyStr(line?.item_id) ?? nonEmptyStr(line?.product_id);
+    const title = nonEmptyStr(line?.title) ?? variant_id ?? product_id ?? 'this item';
+    if (variant_id || product_id) {
+      refs.push({ variant_id, product_id, title });
+    }
+  }
+  return refs;
+}
+
+function extractCheckoutLineRefs(checkout: any, fallbackRefs: readonly LineIdRef[]): LineIdRef[] {
+  const lines = Array.isArray(checkout?.line_items) ? checkout.line_items : [];
+  const byVariant = new Map<string, LineIdRef>();
+  for (const r of fallbackRefs) {
+    if (r.variant_id && !byVariant.has(r.variant_id)) {
+      byVariant.set(r.variant_id, r);
+    }
+  }
+  const refs: LineIdRef[] = [];
+  for (const l of lines) {
+    const variant_id = nonEmptyStr(l?.item?.id) ?? nonEmptyStr(l?.variant_id);
+    const fallback = variant_id ? byVariant.get(variant_id) : undefined;
+    const product_id =
+      nonEmptyStr(l?.item?.product_id) ??
+      nonEmptyStr(l?.product_id) ??
+      nonEmptyStr(l?.item?.item_id) ??
+      fallback?.product_id ??
+      null;
+    const title =
+      nonEmptyStr(l?.item?.title) ?? fallback?.title ?? variant_id ?? product_id ?? 'this item';
+    if (variant_id || product_id) {
+      refs.push({ variant_id, product_id, title });
+    }
+  }
+  return refs;
+}
+
+function mergeLineRefs(a: readonly LineIdRef[], b: readonly LineIdRef[]): LineIdRef[] {
+  const out: LineIdRef[] = [...a];
+  const seen = new Set(a.map((r) => `${r.variant_id ?? ''}|${r.product_id ?? ''}`));
+  for (const r of b) {
+    const key = `${r.variant_id ?? ''}|${r.product_id ?? ''}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(r);
+    }
+  }
+  return out;
+}
+
+function recordPlacedItems(
+  placedItemsByStore: Map<string, PlacedStoreItems>,
+  storeKey: string,
+  refs: readonly LineIdRef[],
+): void {
+  if (!storeKey || refs.length === 0) return;
+  let entry = placedItemsByStore.get(storeKey);
+  if (!entry) {
+    entry = { variantTitles: new Map(), productTitles: new Map() };
+    placedItemsByStore.set(storeKey, entry);
+  }
+  for (const ref of refs) {
+    if (ref.variant_id && !entry.variantTitles.has(ref.variant_id)) {
+      entry.variantTitles.set(ref.variant_id, ref.title);
+    }
+    if (ref.product_id && !entry.productTitles.has(ref.product_id)) {
+      entry.productTitles.set(ref.product_id, ref.title);
+    }
+  }
+}
+
+function findAlreadyOrderedTitle(
+  placedItemsByStore: Map<string, PlacedStoreItems>,
+  storeKey: string,
+  refs: readonly LineIdRef[],
+): string | null {
+  if (!storeKey) return null;
+  const entry = placedItemsByStore.get(storeKey);
+  if (!entry) return null;
+  for (const ref of refs) {
+    if (ref.variant_id && entry.variantTitles.has(ref.variant_id)) {
+      return ref.title || entry.variantTitles.get(ref.variant_id) || 'this item';
+    }
+    if (ref.product_id && entry.productTitles.has(ref.product_id)) {
+      return ref.title || entry.productTitles.get(ref.product_id) || 'this item';
+    }
+  }
+  return null;
+}
 
 export function deriveCheckoutIdempotencyUuid(
   idempotencyKey: string,
@@ -104,8 +244,10 @@ export function deriveCheckoutIdempotencyUuid(
 interface ReviewedStoreRecord {
   store: string;
   store_domain: string;
+  store_domain_key: string;
   cart_id: string | null;
   items: BagLine[];
+  line_refs: LineIdRef[];
   total: number;
   reviewed_total_cents: number;
   reviewed_items_key: string;
@@ -113,6 +255,8 @@ interface ReviewedStoreRecord {
   payment_label: string;
   ready: boolean;
   already_sent: boolean;
+  store_unclear: boolean;
+  already_ordered_title: string | null;
   note?: string;
   checkout_id: string | null;
   cart_continue_url: string | null;
@@ -562,6 +706,20 @@ function extractOrderNumber(checkout: any): string | undefined {
   return undefined;
 }
 
+function hasOrderProof(doc: any): boolean {
+  if (!doc || typeof doc !== 'object') return false;
+  if (extractOrderNumber(doc)) return true;
+  if (doc.order && typeof doc.order === 'object' && Object.keys(doc.order).length > 0) return true;
+  return false;
+}
+
+function isDefiniteRefusalDoc(doc: any): boolean {
+  if (!doc || typeof doc !== 'object') return false;
+  if (hasOrderProof(doc)) return false;
+  const status = typeof doc.status === 'string' ? doc.status.trim().toLowerCase() : '';
+  return DEFINITE_REFUSAL_STATUSES.has(status);
+}
+
 function toHandoffOrderReview(
   record: ReviewedOrderRecord,
   note: string,
@@ -577,10 +735,16 @@ function toHandoffOrderReview(
       payment_label: s.payment_label,
       ready: false,
       status,
-      ...(includeLinks && !s.already_sent && (s.cart_continue_url || s.checkout_continue_url)
+      ...(includeLinks && !s.already_sent && !s.store_unclear && (s.cart_continue_url || s.checkout_continue_url)
         ? { continue_url: s.cart_continue_url ?? s.checkout_continue_url ?? undefined }
         : {}),
-      note: s.already_sent ? ALREADY_SENT_NOTE : note,
+      note: s.already_sent
+        ? ALREADY_SENT_NOTE
+        : s.store_unclear
+          ? buildStoreUnclearNote(s.store)
+          : s.already_ordered_title
+            ? buildAlreadyOrderedNote(s.already_ordered_title)
+            : note,
     })),
     total: record.total,
     ...(record.address_label ? { address_label: record.address_label } : {}),
@@ -632,9 +796,11 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
   const randomId = deps?.randomId ?? (() => crypto.randomUUID());
   const reconcileDelaysMs = deps?.reconcileDelaysMs ?? DEFAULT_RECONCILE_DELAYS_MS;
 
-  // Sent cart/checkout sets survive signOut() and endCall() (H1, H2, M2).
+  // Sent cart/checkout sets, unclear stores, and placed items survive signOut() and endCall() (H1, H2, M2, R1, R2).
   const sentCartIds = deps?.sentCartIds ?? new Set<string>();
   const sentCheckoutIds = deps?.sentCheckoutIds ?? new Set<string>();
+  const unclearStores = deps?.unclearStores ?? new Set<string>();
+  const placedItemsByStore = deps?.placedItemsByStore ?? new Map<string, PlacedStoreItems>();
 
   // Pending reviews hold raw instruments temporarily and are purged on place, supersede, expiry, or signOut (L3).
   const reviewedOrders = new Map<string, ReviewedOrderRecord>();
@@ -792,13 +958,19 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
       }
     }
 
-    // If every cart with a cart_id has already had complete_checkout sent, skip all MCP calls (H1/H2).
-    const anyUnsentCart = carts.some(
-      (c) => typeof c?.cart_id === 'string' && c.cart_id.trim() && !sentCartIds.has(c.cart_id.trim()),
-    );
+    // Skip all MCP calls if every cart is already blocked (sent cart, unclear store, or already-ordered item).
+    const anyActionableCart = carts.some((c) => {
+      const cid = typeof c?.cart_id === 'string' ? c.cart_id.trim() : '';
+      if (!cid || sentCartIds.has(cid)) return false;
+      const storeKey = normalizeStoreDomain(c?.store_domain);
+      if (storeKey && unclearStores.has(storeKey)) return false;
+      const cartRefs = extractCartLineRefs(c);
+      if (storeKey && findAlreadyOrderedTitle(placedItemsByStore, storeKey, cartRefs)) return false;
+      return true;
+    });
 
     let account: any = null;
-    if (anyUnsentCart) {
+    if (anyActionableCart) {
       try {
         account = await mcp.call(
           'get_account',
@@ -837,7 +1009,9 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
 
     for (const cart of carts) {
       const bagItems = cartAddedToBagLines(cart);
+      const cartLineRefs = extractCartLineRefs(cart);
       const bagItemsKey = buildBagVariantQtyKey(cart);
+      const storeDomainKey = normalizeStoreDomain(cart.store_domain);
       const fallbackTotal =
         typeof cart.total_usd === 'number' && Number.isFinite(cart.total_usd)
           ? roundUsd(cart.total_usd)
@@ -849,8 +1023,10 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
         storeRecords.push({
           store: cart.store,
           store_domain: cart.store_domain,
+          store_domain_key: storeDomainKey,
           cart_id: cartId,
           items: bagItems,
+          line_refs: cartLineRefs,
           total: fallbackTotal,
           reviewed_total_cents: Math.round(fallbackTotal * 100),
           reviewed_items_key: '',
@@ -858,9 +1034,70 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           payment_label: '',
           ready: false,
           already_sent: true,
+          store_unclear: false,
+          already_ordered_title: null,
           note: ALREADY_SENT_NOTE,
           checkout_id: null,
           cart_continue_url: null,
+          checkout_continue_url: null,
+          raw_instrument: null,
+        });
+        continue;
+      }
+
+      // R1: store has an UNKNOWN payment outcome in this call -> refuse ANY cart for this store with NO link.
+      if (storeDomainKey && unclearStores.has(storeDomainKey)) {
+        storeRecords.push({
+          store: cart.store,
+          store_domain: cart.store_domain,
+          store_domain_key: storeDomainKey,
+          cart_id: cartId,
+          items: bagItems,
+          line_refs: cartLineRefs,
+          total: fallbackTotal,
+          reviewed_total_cents: Math.round(fallbackTotal * 100),
+          reviewed_items_key: '',
+          reviewed_price_items_key: '',
+          payment_label: '',
+          ready: false,
+          already_sent: false,
+          store_unclear: true,
+          already_ordered_title: null,
+          note: buildStoreUnclearNote(cart.store),
+          checkout_id: null,
+          cart_continue_url: null,
+          checkout_continue_url: null,
+          raw_instrument: null,
+        });
+        continue;
+      }
+
+      // R2: cart contains a variant or product already placed at this store in this call -> hand off with store link.
+      const alreadyOrderedTitle = findAlreadyOrderedTitle(
+        placedItemsByStore,
+        storeDomainKey,
+        cartLineRefs,
+      );
+      if (alreadyOrderedTitle) {
+        storeRecords.push({
+          store: cart.store,
+          store_domain: cart.store_domain,
+          store_domain_key: storeDomainKey,
+          cart_id: cartId,
+          items: bagItems,
+          line_refs: cartLineRefs,
+          total: fallbackTotal,
+          reviewed_total_cents: Math.round(fallbackTotal * 100),
+          reviewed_items_key: '',
+          reviewed_price_items_key: '',
+          payment_label: '',
+          ready: false,
+          already_sent: false,
+          store_unclear: false,
+          already_ordered_title: alreadyOrderedTitle,
+          note: buildAlreadyOrderedNote(alreadyOrderedTitle),
+          checkout_id: null,
+          cart_continue_url: cart.continue_url ?? null,
           checkout_continue_url: null,
           raw_instrument: null,
         });
@@ -871,8 +1108,10 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
         storeRecords.push({
           store: cart.store,
           store_domain: cart.store_domain,
+          store_domain_key: storeDomainKey,
           cart_id: null,
           items: bagItems,
+          line_refs: cartLineRefs,
           total: fallbackTotal,
           reviewed_total_cents: Math.round(fallbackTotal * 100),
           reviewed_items_key: '',
@@ -880,6 +1119,8 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           payment_label: '',
           ready: false,
           already_sent: false,
+          store_unclear: false,
+          already_ordered_title: null,
           note: 'No cart ID available; finish on the store page.',
           checkout_id: null,
           cart_continue_url: cart.continue_url ?? null,
@@ -911,8 +1152,10 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           storeRecords.push({
             store: cart.store,
             store_domain: cart.store_domain,
+            store_domain_key: storeDomainKey,
             cart_id: cartId,
             items: bagItems,
+            line_refs: cartLineRefs,
             total: fallbackTotal,
             reviewed_total_cents: Math.round(fallbackTotal * 100),
             reviewed_items_key: '',
@@ -920,6 +1163,8 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
             payment_label: '',
             ready: false,
             already_sent: false,
+            store_unclear: false,
+            already_ordered_title: null,
             note: 'Could not open store checkout; finish on the store page.',
             checkout_id: null,
             cart_continue_url: cart.continue_url ?? null,
@@ -934,8 +1179,10 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           storeRecords.push({
             store: cart.store,
             store_domain: cart.store_domain,
+            store_domain_key: storeDomainKey,
             cart_id: cartId,
             items: bagItems,
+            line_refs: cartLineRefs,
             total: fallbackTotal,
             reviewed_total_cents: Math.round(fallbackTotal * 100),
             reviewed_items_key: '',
@@ -943,6 +1190,8 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
             payment_label: '',
             ready: false,
             already_sent: true,
+            store_unclear: false,
+            already_ordered_title: null,
             note: ALREADY_SENT_NOTE,
             checkout_id: checkoutId,
             cart_continue_url: null,
@@ -1020,7 +1269,18 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           totalCheck.finalTotalCents !== null &&
           totalCheck.currencyIsUsd;
 
+        const mergedLineRefs = mergeLineRefs(
+          cartLineRefs,
+          extractCheckoutLineRefs(checkout, cartLineRefs),
+        );
+        const checkoutAlreadyOrderedTitle = findAlreadyOrderedTitle(
+          placedItemsByStore,
+          storeDomainKey,
+          mergedLineRefs,
+        );
+
         const ready =
+          !checkoutAlreadyOrderedTitle &&
           isReadyStatus &&
           itemsNonEmpty &&
           itemsMatchBag &&
@@ -1030,7 +1290,9 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
 
         let note: string | undefined;
         if (!ready) {
-          if (!isReadyStatus) {
+          if (checkoutAlreadyOrderedTitle) {
+            note = buildAlreadyOrderedNote(checkoutAlreadyOrderedTitle);
+          } else if (!isReadyStatus) {
             if (!defaultAddress && checkout?.status === 'incomplete') {
               note = 'No default saved shipping address; finish on the store page.';
             } else if (checkout?.status === 'requires_escalation') {
@@ -1058,8 +1320,10 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
         storeRecords.push({
           store: cart.store,
           store_domain: cart.store_domain,
+          store_domain_key: storeDomainKey,
           cart_id: cartId,
           items: checkoutItems.length > 0 ? checkoutItems : bagItems,
+          line_refs: mergedLineRefs,
           total: totalUsd,
           reviewed_total_cents: totalCheck.finalTotalCents ?? displayCents,
           reviewed_items_key: checkoutItemsKey,
@@ -1067,6 +1331,8 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           payment_label: paymentPick.paymentLabel,
           ready,
           already_sent: false,
+          store_unclear: false,
+          already_ordered_title: checkoutAlreadyOrderedTitle,
           ...(note ? { note: safeMessage(note) } : {}),
           checkout_id: checkoutId,
           cart_continue_url: cart.continue_url ?? null,
@@ -1081,8 +1347,10 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
         storeRecords.push({
           store: cart.store,
           store_domain: cart.store_domain,
+          store_domain_key: storeDomainKey,
           cart_id: cartId,
           items: bagItems,
+          line_refs: cartLineRefs,
           total: fallbackTotal,
           reviewed_total_cents: Math.round(fallbackTotal * 100),
           reviewed_items_key: '',
@@ -1090,6 +1358,8 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           payment_label: '',
           ready: false,
           already_sent: false,
+          store_unclear: false,
+          already_ordered_title: null,
           note: 'Could not prepare checkout; finish on the store page.',
           checkout_id: null,
           cart_continue_url: cart.continue_url ?? null,
@@ -1121,7 +1391,7 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
       payment_label: s.payment_label,
       ready: s.ready,
       status: s.ready ? 'review' : 'handoff',
-      ...(!s.already_sent && (s.checkout_continue_url || s.cart_continue_url)
+      ...(!s.already_sent && !s.store_unclear && (s.checkout_continue_url || s.cart_continue_url)
         ? { continue_url: s.checkout_continue_url ?? s.cart_continue_url ?? undefined }
         : {}),
       ...(s.note ? { note: s.note } : {}),
@@ -1316,6 +1586,43 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           continue;
         }
 
+        // R1: refuse any cart for a store with an UNKNOWN payment outcome before any store call (no link).
+        if (s.store_unclear || (s.store_domain_key && unclearStores.has(s.store_domain_key))) {
+          logEvent('order_refused', { order_id: orderId, reason: 'store_unclear' });
+          finalStores.push({
+            store: s.store,
+            items: s.items,
+            total: s.total,
+            payment_label: s.payment_label,
+            ready: false,
+            status: 'handoff',
+            note: buildStoreUnclearNote(s.store),
+          });
+          loggedStores.push({ store: s.store, status: 'handoff' });
+          continue;
+        }
+
+        // R2: refuse any cart containing a variant or product already placed at this store in this call (keep store link).
+        const preAlreadyOrderedTitle =
+          s.already_ordered_title ??
+          findAlreadyOrderedTitle(placedItemsByStore, s.store_domain_key, s.line_refs);
+        if (preAlreadyOrderedTitle) {
+          logEvent('order_refused', { order_id: orderId, reason: 'already_ordered' });
+          const storeLink = s.cart_continue_url ?? s.checkout_continue_url ?? undefined;
+          finalStores.push({
+            store: s.store,
+            items: s.items,
+            total: s.total,
+            payment_label: s.payment_label,
+            ready: false,
+            status: 'handoff',
+            ...(storeLink ? { continue_url: storeLink } : {}),
+            note: buildAlreadyOrderedNote(preAlreadyOrderedTitle),
+          });
+          loggedStores.push({ store: s.store, status: 'handoff' });
+          continue;
+        }
+
         if (!s.ready || !s.checkout_id || !s.raw_instrument) {
           finalStores.push({
             store: s.store,
@@ -1438,10 +1745,69 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           continue;
         }
 
-        // Mark cart_id & checkout_id as SENT and count against session spend BEFORE dispatching
-        // complete_checkout (H1, H2, M5) — even if the outcome is unclear/unknown.
+        // Synchronous race-closing re-checks right before dispatching complete_checkout.
+        if (
+          (s.cart_id !== null && sentCartIds.has(s.cart_id)) ||
+          sentCheckoutIds.has(s.checkout_id)
+        ) {
+          logEvent('order_refused', { order_id: orderId, reason: 'already_sent' });
+          finalStores.push({
+            store: s.store,
+            items: s.items,
+            total: s.total,
+            payment_label: s.payment_label,
+            ready: false,
+            status: 'handoff',
+            note: ALREADY_SENT_NOTE,
+          });
+          loggedStores.push({ store: s.store, status: 'handoff' });
+          continue;
+        }
+        if (s.store_domain_key && unclearStores.has(s.store_domain_key)) {
+          logEvent('order_refused', { order_id: orderId, reason: 'store_unclear' });
+          finalStores.push({
+            store: s.store,
+            items: s.items,
+            total: s.total,
+            payment_label: s.payment_label,
+            ready: false,
+            status: 'handoff',
+            note: buildStoreUnclearNote(s.store),
+          });
+          loggedStores.push({ store: s.store, status: 'handoff' });
+          continue;
+        }
+        const liveRefs = mergeLineRefs(
+          s.line_refs,
+          extractCheckoutLineRefs(liveCheckout, s.line_refs),
+        );
+        const liveAlreadyOrderedTitle = findAlreadyOrderedTitle(
+          placedItemsByStore,
+          s.store_domain_key,
+          liveRefs,
+        );
+        if (liveAlreadyOrderedTitle) {
+          logEvent('order_refused', { order_id: orderId, reason: 'already_ordered' });
+          const storeLink = s.cart_continue_url ?? liveUrl;
+          finalStores.push({
+            store: s.store,
+            items: s.items,
+            total: s.total,
+            payment_label: s.payment_label,
+            ready: false,
+            status: 'handoff',
+            ...(storeLink ? { continue_url: storeLink } : {}),
+            note: buildAlreadyOrderedNote(liveAlreadyOrderedTitle),
+          });
+          loggedStores.push({ store: s.store, status: 'handoff' });
+          continue;
+        }
+
+        // Mark cart_id, checkout_id, and store (fail-closed while in flight) as SENT and count
+        // against session spend BEFORE dispatching complete_checkout (H1, H2, M5, R1).
         if (s.cart_id) sentCartIds.add(s.cart_id);
         sentCheckoutIds.add(s.checkout_id);
+        if (s.store_domain_key) unclearStores.add(s.store_domain_key);
         sessionSpentCents += s.reviewed_total_cents;
 
         // Complete checkout EXACTLY ONCE with a deterministic UUID idempotency key.
@@ -1464,8 +1830,14 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           completeErr = true;
         }
 
-        // H3: status === 'completed' alone means placed; order_number is optional.
+        // H3 & R2: status === 'completed' alone means placed; clear in-flight unclear mark and record bought items.
         if (!completeErr && completeRes?.status === 'completed') {
+          if (s.store_domain_key) unclearStores.delete(s.store_domain_key);
+          recordPlacedItems(
+            placedItemsByStore,
+            s.store_domain_key,
+            mergeLineRefs(liveRefs, extractCheckoutLineRefs(completeRes, liveRefs)),
+          );
           const directOrderNum = extractOrderNumber(completeRes);
           const placedUrl =
             (typeof completeRes?.continue_url === 'string' && completeRes.continue_url) ||
@@ -1488,9 +1860,34 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
           continue;
         }
 
+        // Definite refusal from the store (clear failed/declined/canceled/incomplete status, no order):
+        // clear in-flight unclear mark so a new cart for this store remains retryable.
+        if (!completeErr && isDefiniteRefusalDoc(completeRes)) {
+          if (s.store_domain_key) unclearStores.delete(s.store_domain_key);
+          const refusalUrl =
+            (typeof completeRes?.continue_url === 'string' && completeRes.continue_url) ||
+            liveUrl;
+          const refusalNote =
+            extractCheckoutNote(completeRes) ||
+            'Order was declined by the store; finish on the store page.';
+          finalStores.push({
+            store: s.store,
+            items: s.items,
+            total: s.total,
+            payment_label: s.payment_label,
+            ready: false,
+            status: 'failed',
+            ...(refusalUrl ? { continue_url: refusalUrl } : {}),
+            note: safeMessage(refusalNote),
+          });
+          loggedStores.push({ store: s.store, status: 'failed' });
+          continue;
+        }
+
         // L4: unclear outcome after complete_checkout was SENT:
         // poll get_checkout up to 5 times (~15s); NEVER call complete_checkout again.
         let confirmedCheckout: any = null;
+        let definiteRefusalCheckout: any = null;
         for (const delayMs of reconcileDelaysMs) {
           await sleep(delayMs);
           try {
@@ -1503,12 +1900,22 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
               confirmedCheckout = polled;
               break;
             }
+            if (isDefiniteRefusalDoc(polled)) {
+              definiteRefusalCheckout = polled;
+              break;
+            }
           } catch {
             // Read failure: continue polling remaining attempts
           }
         }
 
         if (confirmedCheckout) {
+          if (s.store_domain_key) unclearStores.delete(s.store_domain_key);
+          recordPlacedItems(
+            placedItemsByStore,
+            s.store_domain_key,
+            mergeLineRefs(liveRefs, extractCheckoutLineRefs(confirmedCheckout, liveRefs)),
+          );
           const checkedOrderNum = extractOrderNumber(confirmedCheckout);
           const confirmedUrl =
             (typeof confirmedCheckout?.continue_url === 'string' &&
@@ -1530,8 +1937,29 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
             status: 'placed',
             ...(checkedOrderNum ? { order_number: checkedOrderNum } : {}),
           });
+        } else if (definiteRefusalCheckout) {
+          if (s.store_domain_key) unclearStores.delete(s.store_domain_key);
+          const refusalUrl =
+            (typeof definiteRefusalCheckout?.continue_url === 'string' &&
+              definiteRefusalCheckout.continue_url) ||
+            liveUrl;
+          const refusalNote =
+            extractCheckoutNote(definiteRefusalCheckout) ||
+            'Order was declined by the store; finish on the store page.';
+          finalStores.push({
+            store: s.store,
+            items: s.items,
+            total: s.total,
+            payment_label: s.payment_label,
+            ready: false,
+            status: 'failed',
+            ...(refusalUrl ? { continue_url: refusalUrl } : {}),
+            note: safeMessage(refusalNote),
+          });
+          loggedStores.push({ store: s.store, status: 'failed' });
         } else {
-          // Unknown outcome after complete_checkout was sent: omit continue_url so we never invite double payment.
+          // R1: Unknown outcome after complete_checkout was sent -> store stays in unclearStores;
+          // omit continue_url so we never invite double payment.
           finalStores.push({
             store: s.store,
             items: s.items,
@@ -1592,6 +2020,8 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
         rawInstrumentCount,
         sentCarts: sentCartIds.size,
         sentCheckouts: sentCheckoutIds.size,
+        unclearStores: unclearStores.size,
+        placedStores: placedItemsByStore.size,
         sessionSpentCents,
       };
     },
@@ -1601,6 +2031,8 @@ export function createPurchaseClient(deps?: PurchaseDeps): PurchaseClient {
 const defaultPurchase = createPurchaseClient({
   sentCartIds: PROCESS_SENT_CART_IDS,
   sentCheckoutIds: PROCESS_SENT_CHECKOUT_IDS,
+  unclearStores: PROCESS_UNCLEAR_STORES,
+  placedItemsByStore: PROCESS_PLACED_ITEMS,
 });
 
 export const prepareOrder = defaultPurchase.prepareOrder;
