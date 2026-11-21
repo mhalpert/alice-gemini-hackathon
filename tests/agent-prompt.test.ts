@@ -187,6 +187,10 @@ test('ALICE_SYSTEM_PROMPT encodes polish4 rules: single build, immediate bag con
 
   // 5. Budget and bag $10,000 cap.
   assert.match(ALICE_SYSTEM_PROMPT, /cap budgets and bags over \$10,000/i);
+
+  // 6. Three-beat reveal guidance (studio shot, on-location shot, short video).
+  assert.match(ALICE_SYSTEM_PROMPT, /up to three beats.*studio shot.*on-location shot.*short video/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /react to each in one line only when a tool result or note says it landed/i);
 });
 
 test('ALICE_SYSTEM_PROMPT encodes polish6 voice: NY stylist attitude, slang limits, delivery, opinions, budgets, and body/appearance boundary', () => {

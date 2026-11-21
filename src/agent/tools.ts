@@ -7,7 +7,7 @@ import { calllog } from '../calllog.ts';
 import * as defaultMediaModule from '../media/index.ts';
 import type { SearchOpts } from '../store/catalog.ts';
 import type { BagLineAdded, BagLineNotAdded } from '../store/index.ts';
-import { tryOn as defaultTryOn } from '../tryon.ts';
+import * as defaultTryOnModule from '../tryon.ts';
 import type {
   BagLine,
   BagLink,
@@ -30,6 +30,7 @@ import {
   createBitPicker,
   formatWorkingNoteWithBit,
 } from './bits.ts';
+import type { TryOnExtraKind } from './extras.ts';
 import { DEFAULT_FILLER_INITIAL_DELAY_MS } from './filler.ts';
 import type { PageSender } from './page.ts';
 import {
@@ -59,6 +60,8 @@ export const MAX_BUDGET_USD = 10_000;
 export const DEFAULT_TRYON_WAIT_MS = 45_000;
 export const DEFAULT_HIGHLIGHT_WALK_MS = 2_200;
 export const DEFAULT_WEATHER_TIMEOUT_MS = 2_500;
+export const DEFAULT_SCENE_REVEAL_DELAY_MS = 6_000;
+export const DEFAULT_VIDEO_REVEAL_DELAY_MS = 8_000;
 
 export const SLOW_TOOL_NOTES: Readonly<Record<string, string>> = {
   build_outfits: 'Pulling three killer outfits together now.',
@@ -120,6 +123,52 @@ export interface WeatherModuleLike {
   forecast?: (where: string, when?: string) => Promise<WeatherResultLike>;
 }
 
+export interface TryOnExtraRenderEvent {
+  kind: TryOnExtraKind;
+  ok: boolean;
+  url?: string;
+  ms: number;
+}
+
+export interface TryOnExtrasOptions {
+  occasion: string;
+  where?: string;
+  when?: string;
+  weather?: string;
+  onRender?: (r: TryOnExtraRenderEvent) => void;
+}
+
+export interface TryOnExtrasResult {
+  scene: { url: string; path: string; ms: number } | null;
+  video: { url: string; path: string; ms: number } | null;
+  setting: string;
+}
+
+export type TryOnExtrasFn = (
+  studio: { path: string },
+  outfit: Outfit,
+  opts: TryOnExtrasOptions,
+) => Promise<TryOnExtrasResult>;
+
+export interface TryOnModuleLike {
+  tryOn?: (
+    personJpeg: Buffer | null,
+    outfit: Outfit,
+    opts?: { label?: string },
+  ) => Promise<{ url: string; path: string; ms: number; id: string }>;
+  tryOnExtras?: TryOnExtrasFn;
+}
+
+/**
+ * Guarded dynamic lookup of the optional `tryOnExtras` export on `src/tryon.ts`.
+ * Returns undefined when the backend has not exported it yet.
+ */
+export function resolveTryOnExtras(mod: unknown = defaultTryOnModule): TryOnExtrasFn | undefined {
+  if (!mod || typeof mod !== 'object') return undefined;
+  const candidate = (mod as TryOnModuleLike).tryOnExtras;
+  return typeof candidate === 'function' ? candidate : undefined;
+}
+
 export interface ToolDeps {
   buildOutfits?: (brief: Brief, opts?: BuildOptions) => Promise<BuildResult>;
   swapPiece?: (
@@ -136,6 +185,7 @@ export interface ToolDeps {
     outfit: Outfit,
     opts?: { label?: string },
   ) => Promise<{ url: string; path: string; ms: number; id: string }>;
+  tryOnExtras?: TryOnExtrasFn | null;
   searchProducts?: (
     query: string,
     gender: Gender,
@@ -162,6 +212,8 @@ export interface ToolRuntimeOptions {
   walkIntervalMs?: number;
   weatherTimeoutMs?: number;
   workingNoteDelayMs?: number;
+  sceneRevealDelayMs?: number;
+  videoRevealDelayMs?: number;
   bitPicker?: BitPicker;
   sendWorkingNote?: (params: WorkingNoteParams) => boolean | void;
   onToolStart?: (params: { name: string; callId: string }) => void;
@@ -169,6 +221,7 @@ export interface ToolRuntimeOptions {
   onSlowToolStart?: (params: { name: string; callId: string; baseNote: string }) => void;
   onSlowToolEnd?: (params: { name: string; callId: string }) => void;
   onToolResult?: (params: { name: string; callId: string; text: string }) => void;
+  onExtraLanded?: (params: { outfit: number; kind: TryOnExtraKind; setting: string }) => void;
   getShopperTurns?: () => readonly string[];
   getSnapshot?: () => CameraSnapshot | null;
   page?: PageSender;
@@ -566,7 +619,17 @@ const slotSchema = z
 interface TryOnJob {
   version: number;
   hadSnapshot: boolean;
+  studioPath: string | null;
   promise: Promise<void>;
+}
+
+function deriveFallbackSetting(occasion: string, where?: string): string {
+  const occ = occasion.trim();
+  const loc = where?.trim() ?? '';
+  if (loc && occ && !occ.toLowerCase().includes(loc.toLowerCase())) {
+    return `${loc} ${occ}`;
+  }
+  return occ || loc;
 }
 
 const NOOP_PAGE_SENDER: PageSender = {
@@ -748,6 +811,14 @@ export function createAgentTools(options: ToolRuntimeOptions) {
   const tryOnTimeoutMs = options.tryOnTimeoutMs ?? DEFAULT_TRYON_WAIT_MS;
   const walkIntervalMs = options.walkIntervalMs ?? DEFAULT_HIGHLIGHT_WALK_MS;
   const weatherTimeoutMs = options.weatherTimeoutMs ?? DEFAULT_WEATHER_TIMEOUT_MS;
+  const sceneRevealDelayMs = Math.max(
+    0,
+    options.sceneRevealDelayMs ?? DEFAULT_SCENE_REVEAL_DELAY_MS,
+  );
+  const videoRevealDelayMs = Math.max(
+    0,
+    options.videoRevealDelayMs ?? DEFAULT_VIDEO_REVEAL_DELAY_MS,
+  );
   const workingNoteDelayMs = Math.max(
     0,
     options.workingNoteDelayMs ?? DEFAULT_FILLER_INITIAL_DELAY_MS,
@@ -775,13 +846,23 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       : typeof defaultMediaModule.productImages === 'function'
         ? defaultMediaModule.productImages
         : undefined;
-  const tryOnFn = options.deps?.tryOn ?? defaultTryOn;
+  const tryOnFn = options.deps?.tryOn ?? defaultTryOnModule.tryOn;
+  const tryOnExtrasFn: TryOnExtrasFn | undefined =
+    options.deps && 'tryOnExtras' in options.deps
+      ? (options.deps.tryOnExtras ?? undefined)
+      : resolveTryOnExtras(defaultTryOnModule);
   const loadStoreModuleFn = options.deps?.loadStoreModule ?? defaultLoadStoreModule;
   const loadWeatherModuleFn = options.deps?.loadWeatherModule ?? defaultLoadWeatherModule;
 
   const outfitsByNumber = new Map<number, Outfit>();
   const mediaVersionByLook = new Map<number, number>();
   const tryOnJobs = new Map<number, TryOnJob>();
+  const pickedLookVersions = new Set<string>();
+  const extrasStartedVersions = new Set<string>();
+  const extrasHandledKinds = new Map<string, Set<TryOnExtraKind>>();
+  const extrasRevealedKinds = new Map<string, Set<TryOnExtraKind>>();
+  const extrasSettingByVersion = new Map<string, string>();
+  const extraRevealTimers = new Set<TimerLike>();
   const baggedResults = new Map<string, string>();
   const baggedLookTotals = new Map<string, number>();
   let buildGen = 0;
@@ -871,11 +952,30 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     };
   }
 
+  function cancelExtraRevealTimers(): void {
+    for (const handle of extraRevealTimers) {
+      clearTimeoutFn(handle);
+      activeTimers.delete(handle);
+    }
+    extraRevealTimers.clear();
+  }
+
+  function scheduleExtraRevealTimer(fn: () => void, ms: number): TimerLike {
+    let handle!: TimerLike;
+    handle = scheduleTimer(() => {
+      extraRevealTimers.delete(handle);
+      fn();
+    }, ms);
+    extraRevealTimers.add(handle);
+    return handle;
+  }
+
   if (options.signal) {
     options.signal.addEventListener(
       'abort',
       () => {
         cancelWalk();
+        cancelExtraRevealTimers();
         for (const handle of activeTimers) {
           clearTimeoutFn(handle);
         }
@@ -883,6 +983,22 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       },
       { once: true },
     );
+  }
+
+  function lookVersionKey(lookNumber: number, version: number): string {
+    return `${lookNumber}:${version}`;
+  }
+
+  function getOrCreateKindSet(
+    map: Map<string, Set<TryOnExtraKind>>,
+    key: string,
+  ): Set<TryOnExtraKind> {
+    let set = map.get(key);
+    if (!set) {
+      set = new Set<TryOnExtraKind>();
+      map.set(key, set);
+    }
+    return set;
   }
 
   function nextLookMediaVersion(lookNumber: number): number {
@@ -895,6 +1011,124 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     return mediaVersionByLook.get(lookNumber) === version && !options.signal?.aborted;
   }
 
+  function maybeStartExtrasForLook(lookNumber: number): void {
+    if (!tryOnExtrasFn || options.signal?.aborted) return;
+
+    const outfit = outfitsByNumber.get(lookNumber);
+    const job = tryOnJobs.get(lookNumber);
+    if (!outfit || !job || !job.studioPath) return;
+    if (!isCurrentMediaVersion(lookNumber, job.version)) return;
+
+    const key = lookVersionKey(lookNumber, job.version);
+    if (!pickedLookVersions.has(key) && stateStore.get().pickedLook !== lookNumber) return;
+    if (extrasStartedVersions.has(key)) return;
+    extrasStartedVersions.add(key);
+
+    const st = stateStore.get();
+    const occasion = st.occasion ?? '';
+    const where = st.where ?? undefined;
+    const when = st.when ?? undefined;
+    const weather = st.weather ?? lastBriefWeather ?? undefined;
+    const fallbackSetting = deriveFallbackSetting(occasion, where);
+
+    logFn(options.room, 'tryon_extras_start', { outfit: lookNumber });
+
+    const handleRender = async (
+      r: TryOnExtraRenderEvent,
+      explicitSetting?: string,
+    ): Promise<void> => {
+      if (!isCurrentMediaVersion(lookNumber, job.version)) return;
+      if (r.kind !== 'scene' && r.kind !== 'video') return;
+
+      const handled = getOrCreateKindSet(extrasHandledKinds, key);
+      if (handled.has(r.kind)) return;
+      handled.add(r.kind);
+
+      const cleanUrl = r.ok ? sanitizePageMediaUrl(r.url) : null;
+      const ok = Boolean(r.ok && cleanUrl);
+      const ms = typeof r.ms === 'number' && Number.isFinite(r.ms) ? r.ms : 0;
+
+      logFn(options.room, 'tryon_extra', {
+        outfit: lookNumber,
+        kind: r.kind,
+        ok,
+        ms,
+      });
+
+      if (!ok || !cleanUrl) return;
+
+      stateStore.dispatch({
+        type: 'set_tryon_extra',
+        look: lookNumber,
+        kind: r.kind,
+        url: cleanUrl,
+      });
+      await page.send('tryOnReady', { outfit: lookNumber, url: cleanUrl, kind: r.kind });
+      if (!isCurrentMediaVersion(lookNumber, job.version)) return;
+
+      // Before the studio reveal has happened: only send tryOnReady and stay silent.
+      if (!stateStore.get().revealsDone.includes(lookNumber)) return;
+
+      const revealed = getOrCreateKindSet(extrasRevealedKinds, key);
+      if (revealed.has(r.kind)) return;
+      revealed.add(r.kind);
+
+      await page.send('reveal', { outfit: lookNumber, kind: r.kind });
+      if (!isCurrentMediaVersion(lookNumber, job.version)) return;
+
+      const extraSetting =
+        explicitSetting?.trim() ||
+        (typeof (r as { setting?: unknown }).setting === 'string'
+          ? (r as { setting: string }).setting.trim()
+          : '') ||
+        extrasSettingByVersion.get(key) ||
+        fallbackSetting;
+
+      options.onExtraLanded?.({
+        outfit: lookNumber,
+        kind: r.kind,
+        setting: extraSetting,
+      });
+    };
+
+    const extrasOpts: TryOnExtrasOptions = {
+      occasion,
+      ...(where ? { where } : {}),
+      ...(when ? { when } : {}),
+      ...(weather ? { weather } : {}),
+      onRender: (r) => {
+        void handleRender(r);
+      },
+    };
+
+    try {
+      void Promise.resolve(tryOnExtrasFn({ path: job.studioPath }, outfit, extrasOpts))
+        .then((res) => {
+          if (!isCurrentMediaVersion(lookNumber, job.version)) return;
+          const setting = typeof res?.setting === 'string' ? res.setting.trim() : '';
+          if (setting) {
+            extrasSettingByVersion.set(key, setting);
+          }
+          const handled = extrasHandledKinds.get(key);
+          if (res?.scene?.url && !handled?.has('scene')) {
+            void handleRender(
+              { kind: 'scene', ok: true, url: res.scene.url, ms: res.scene.ms },
+              setting,
+            );
+          }
+          if (res?.video?.url && !handled?.has('video')) {
+            void handleRender(
+              { kind: 'video', ok: true, url: res.video.url, ms: res.video.ms },
+              setting,
+            );
+          }
+        })
+        .catch(() => {});
+    } catch {
+      // tryOnExtras is guaranteed never to throw, but guard defensively.
+    }
+  }
+
   function startTryOnForLook(outfit: Outfit, version: number): TryOnJob {
     const lookNumber = outfit.number ?? 1;
     const snap = options.getSnapshot?.() ?? null;
@@ -904,14 +1138,24 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     stateStore.dispatch({ type: 'set_tryon', look: lookNumber, status: 'rendering' });
     void page.send('tryOnStatus', { outfit: lookNumber, status: 'rendering' });
 
-    const promise = (async () => {
+    const job: TryOnJob = {
+      version,
+      hadSnapshot,
+      studioPath: null,
+      promise: Promise.resolve(),
+    };
+
+    job.promise = (async () => {
       try {
         const res = await tryOnFn(snap?.jpeg ?? null, outfit, { label: `look-${lookNumber}` });
         const ms = Math.max(0, Math.round(nowFn() - started));
         if (!isCurrentMediaVersion(lookNumber, version)) return;
 
         const url = sanitizePageMediaUrl(res?.url);
+        const studioPath =
+          typeof res?.path === 'string' && res.path.trim().length > 0 ? res.path.trim() : null;
         if (url) {
+          job.studioPath = studioPath;
           stateStore.dispatch({ type: 'set_tryon', look: lookNumber, status: 'ready', url });
           await page.send('tryOnReady', { outfit: lookNumber, url });
           logFn(options.room, 'tryon', {
@@ -921,6 +1165,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             url,
             had_snapshot: hadSnapshot,
           });
+          maybeStartExtrasForLook(lookNumber);
         } else {
           const error = 'try-on returned invalid or empty image url';
           stateStore.dispatch({ type: 'set_tryon', look: lookNumber, status: 'failed', error });
@@ -950,7 +1195,6 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       }
     })();
 
-    const job: TryOnJob = { version, hadSnapshot, promise };
     tryOnJobs.set(lookNumber, job);
     return job;
   }
@@ -1255,6 +1499,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           stateStore.dispatch({
             type: 'set_brief',
             occasion,
+            where: cleanWhere || null,
+            when: cleanWhen || null,
+            weather: weatherLine ?? null,
             budgetAsked: true,
             budgetGiven: effectiveBudget,
             ownPiece: own_piece ?? null,
@@ -1289,8 +1536,14 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             const numbered: Outfit = { ...rawOutfit, number: lookNumber };
             const replace = shownOutfits.length === 0;
             if (replace) {
+              cancelExtraRevealTimers();
               outfitsByNumber.clear();
               tryOnJobs.clear();
+              pickedLookVersions.clear();
+              extrasStartedVersions.clear();
+              extrasHandledKinds.clear();
+              extrasRevealedKinds.clear();
+              extrasSettingByVersion.clear();
             }
             outfitsByNumber.set(lookNumber, numbered);
             shownOutfits.push(numbered);
@@ -1435,6 +1688,11 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         }
 
         stateStore.dispatch({ type: 'pick_look', look: lookNumber });
+        const pickedVer = mediaVersionByLook.get(lookNumber);
+        if (pickedVer !== undefined) {
+          pickedLookVersions.add(lookVersionKey(lookNumber, pickedVer));
+        }
+        maybeStartExtrasForLook(lookNumber);
         wrapper.invalidate('pick_outfit');
         const reply = await page.send('highlight', { outfit: lookNumber, piece: null });
         startHighlightWalk(outfit);
@@ -1513,12 +1771,67 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         if (tryOnInfo?.status === 'ready' && tryOnInfo.url) {
           const reply = await page.send('reveal', { outfit: lookNum, url: tryOnInfo.url });
           if (reply.ok) {
+            cancelExtraRevealTimers();
             stateStore.dispatch({ type: 'mark_revealed', look: lookNum });
+
+            const currentVer = mediaVersionByLook.get(lookNum);
+            const verKey = currentVer !== undefined ? lookVersionKey(lookNum, currentVer) : null;
+            const alreadyRevealed = verKey ? extrasRevealedKinds.get(verKey) : undefined;
+            const extrasNow = stateStore.get().tryOnExtras[lookNum];
+            const sceneReady = Boolean(extrasNow?.scene && !alreadyRevealed?.has('scene'));
+            const videoReady = Boolean(extrasNow?.video && !alreadyRevealed?.has('video'));
+
+            let extrasNote = '';
+            if (sceneReady && videoReady) {
+              extrasNote =
+                ' Also ready: an on-location still and a short video of them in this look; after reacting to the studio shot, tell them you are bringing up the on-location shot.';
+            } else if (sceneReady) {
+              extrasNote =
+                ' Also ready: an on-location still of them in this look; after reacting to the studio shot, tell them you are bringing up the on-location shot.';
+            } else if (videoReady) {
+              extrasNote =
+                ' Also ready: a short video of them in this look; after reacting to the studio shot, tell them you are bringing up the video.';
+            }
+
+            if (currentVer !== undefined && verKey && (sceneReady || videoReady)) {
+              if (sceneReady) {
+                scheduleExtraRevealTimer(() => {
+                  if (!isCurrentMediaVersion(lookNum, currentVer)) return;
+                  const revealed = getOrCreateKindSet(extrasRevealedKinds, verKey);
+                  if (!revealed.has('scene')) {
+                    revealed.add('scene');
+                    void page.send('reveal', { outfit: lookNum, kind: 'scene' });
+                  }
+                  if (
+                    stateStore.get().tryOnExtras[lookNum]?.video &&
+                    !revealed.has('video')
+                  ) {
+                    scheduleExtraRevealTimer(() => {
+                      if (!isCurrentMediaVersion(lookNum, currentVer)) return;
+                      if (!revealed.has('video')) {
+                        revealed.add('video');
+                        void page.send('reveal', { outfit: lookNum, kind: 'video' });
+                      }
+                    }, videoRevealDelayMs);
+                  }
+                }, sceneRevealDelayMs);
+              } else if (videoReady) {
+                scheduleExtraRevealTimer(() => {
+                  if (!isCurrentMediaVersion(lookNum, currentVer)) return;
+                  const revealed = getOrCreateKindSet(extrasRevealedKinds, verKey);
+                  if (!revealed.has('video')) {
+                    revealed.add('video');
+                    void page.send('reveal', { outfit: lookNum, kind: 'video' });
+                  }
+                }, sceneRevealDelayMs);
+              }
+            }
+
             const sizeNextStep = buildShowOnMeSizeNextStep(outfit, stateStore.get().sizes);
             if (renderedOnModel) {
-              return `Look ${lookNum} (${outfit.name}) is now revealed on screen on a model because the camera is off. Say the look is on screen on a model and that turning the camera on lets you show it on them; never say you cannot overlay it. ${sizeNextStep}`;
+              return `Look ${lookNum} (${outfit.name}) is now revealed on screen on a model because the camera is off. Say the look is on screen on a model and that turning the camera on lets you show it on them; never say you cannot overlay it. ${sizeNextStep}${extrasNote}`;
             }
-            return `Try-on for Look ${lookNum} (${outfit.name}) is now revealed on screen. ${sizeNextStep}`;
+            return `Try-on for Look ${lookNum} (${outfit.name}) is now revealed on screen. ${sizeNextStep}${extrasNote}`;
           }
           return renderedOnModel
             ? `Try-on for Look ${lookNum} (on a model because the camera is off) is ready, but the page did not confirm revealing it.`
@@ -1569,7 +1882,12 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             slot: targetSlot,
           });
 
+          cancelExtraRevealTimers();
           startBackgroundMediaForLook(updatedOutfit);
+          const swappedVer = mediaVersionByLook.get(lookNum);
+          if (swappedVer !== undefined && stateStore.get().pickedLook === lookNum) {
+            pickedLookVersions.add(lookVersionKey(lookNum, swappedVer));
+          }
           wrapper.invalidate('swap_piece');
 
           const newItem = swapResult.piece?.item;
