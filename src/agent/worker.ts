@@ -28,7 +28,9 @@ import {
   sendRealtimeContext,
 } from './context.ts';
 import { applyRealtimeSessionPatches, sendInterimToolNote } from './patches.ts';
+import { createPageSender } from './page.ts';
 import { ALICE_SYSTEM_PROMPT, GREETING_INSTRUCTIONS } from './prompt.ts';
+import { createCallStateStore } from './state.ts';
 import { createAgentTools } from './tools.ts';
 import { createVisionController } from './vision.ts';
 
@@ -191,6 +193,22 @@ export default defineAgent({
       },
     });
 
+    let shopperIdentity: string | null = null;
+    const toolAbort = new AbortController();
+
+    const page = createPageSender({
+      room: ctx.room,
+      roomName,
+      shopperIdentity: () => shopperIdentity,
+      log: calllog,
+    });
+
+    const callState = createCallStateStore({
+      roomName,
+      appContext,
+      log: calllog,
+    });
+
     const vision = config.vision
       ? createVisionController({
           roomName,
@@ -201,6 +219,9 @@ export default defineAgent({
 
     const tools = createAgentTools({
       room: roomName,
+      page,
+      state: callState,
+      signal: toolAbort.signal,
       sendWorkingNote: (params) => sendInterimToolNote(activeRealtimeSession, params),
       getSnapshot: () => vision?.latest() ?? null,
     });
@@ -251,6 +272,10 @@ export default defineAgent({
       calllog(roomName, 'false_interruption', { resumed: ev.resumed });
     });
 
+    session.on(voice.AgentSessionEventTypes.MetricsCollected, (ev) => {
+      calllog(roomName, 'metrics', { metrics: ev.metrics });
+    });
+
     session.on(voice.AgentSessionEventTypes.Error, (ev) => {
       const inner = ev.error as { error?: unknown; type?: string; recoverable?: boolean } | undefined;
       calllog(roomName, 'session_error', {
@@ -266,12 +291,14 @@ export default defineAgent({
         reason: ev.reason,
         ...(ev.error ? { error: ev.error } : {}),
       });
+      toolAbort.abort();
       void vision?.close().catch(() => {});
       appContext.dispose();
     });
 
     let cleanupCameraWatcher: (() => void) | undefined;
     ctx.addShutdownCallback(async () => {
+      toolAbort.abort();
       cleanupCameraWatcher?.();
       await vision?.close();
       appContext.dispose();
@@ -283,6 +310,15 @@ export default defineAgent({
     await ctx.connect();
 
     const shopper = await ctx.waitForParticipant();
+    shopperIdentity = shopper.identity;
+    if (
+      typeof shopper.name === 'string' &&
+      shopper.name.trim().length > 0 &&
+      !/^shopper$/i.test(shopper.name.trim()) &&
+      shopper.name.trim() !== shopper.identity
+    ) {
+      callState.dispatch({ type: 'set_shopper_name', name: shopper.name.trim() });
+    }
     calllog(roomName, 'shopper_joined', {
       identity: shopper.identity,
       attributes: shopper.attributes,
@@ -319,14 +355,13 @@ export default defineAgent({
       appContext,
       onStatusChange: (status) => {
         vision?.setCameraStatus(status);
+        callState.dispatch({ type: 'set_camera', camera: status });
       },
     });
     cleanupCameraWatcher = watcher.cleanup;
     vision?.attach(ctx.room, shopper);
 
-    appContext.sendCallState(
-      `call started; shopper=${shopper.identity}; camera=${watcher.initialStatus}; no outfits built yet`,
-    );
+    callState.pushSummary();
     appContext.flushNow();
 
     session.generateReply({
