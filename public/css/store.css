@@ -131,6 +131,9 @@ img {
 .panel-close-btn:focus-visible,
 .product-thumb:focus-visible,
 .boutique-dept-btn:focus-visible,
+.boutique-occasion-chip:focus-visible,
+.boutique-occasion-filter:focus-visible,
+.boutique-looks-empty-cta:focus-visible,
 .boutique-look-cta:focus-visible,
 .boutique-collage-cell:focus-visible,
 .header-search-input:focus-visible,
@@ -215,6 +218,10 @@ img {
 }
 
 .store-nav-list::-webkit-scrollbar {
+  display: none;
+}
+
+.store-nav-list li[hidden] {
   display: none;
 }
 
@@ -1947,9 +1954,100 @@ img {
 }
 
 /* Sections the nav jumps to stop clear of the sticky header */
+.boutique-occasions-section,
 .boutique-looks-section,
 .boutique-rail-section {
   scroll-margin-top: calc(var(--header-h) + 16px);
+}
+
+/* Boutique "Shop by occasion" picker */
+
+.boutique-occasions-section {
+  min-width: 0;
+  width: 100%;
+}
+
+.boutique-occasions-head {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px var(--space-4);
+}
+
+.boutique-occasion-filter {
+  flex: 0 1 220px;
+  width: 220px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 7px 12px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  font-size: 13px;
+  line-height: 1.3;
+  color: var(--ink);
+  transition: border-color 180ms ease;
+}
+
+.boutique-occasion-filter::placeholder {
+  color: var(--ink-subtle);
+}
+
+.boutique-occasion-filter:hover {
+  border-color: var(--ink-muted);
+}
+
+.boutique-occasion-filter:focus {
+  border-color: var(--ink);
+}
+
+.boutique-occasion-filter:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.boutique-occasions-strip {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x proximity;
+  -webkit-overflow-scrolling: touch;
+  padding: 4px 2px 10px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.boutique-occasion-chip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 15px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--ivory);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.25;
+  white-space: nowrap;
+  cursor: pointer;
+  scroll-snap-align: start;
+  transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease;
+}
+
+.boutique-occasion-chip:hover {
+  border-color: var(--ink);
+  background: var(--board);
+}
+
+.boutique-occasion-chip.is-active,
+.boutique-occasion-chip[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--ivory);
+  border-color: var(--ink);
 }
 
 /* Boutique "Looks by Alice" row */
@@ -2079,6 +2177,32 @@ img {
 }
 
 .boutique-look-cta:hover {
+  color: var(--ink);
+}
+
+.boutique-looks-empty {
+  margin: 0;
+  padding: 6px 0;
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--ink-muted);
+}
+
+.boutique-looks-empty-cta {
+  display: inline;
+  padding: 0;
+  margin-left: 4px;
+  border: none;
+  border-bottom: 1px solid currentColor;
+  background: none;
+  font: inherit;
+  font-weight: 500;
+  color: var(--accent);
+  cursor: pointer;
+  transition: color 180ms ease;
+}
+
+.boutique-looks-empty-cta:hover {
   color: var(--ink);
 }
 
@@ -2368,6 +2492,18 @@ body.has-boutique #call .call-start__status:empty {
     font-size: 14px;
   }
 
+  .boutique-occasions-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .boutique-occasion-filter {
+    flex: 1 1 auto;
+    width: 100%;
+    font-size: 14px;
+  }
+
   .boutique-looks-grid {
     display: flex;
     flex-wrap: nowrap;
@@ -2567,7 +2703,10 @@ body.has-boutique #call .call-start__status:empty {
   .panel-backdrop,
   .panel-sheet,
   .boutique-collage-img,
-  .product-img {
+  .product-img,
+  .boutique-occasion-chip,
+  .boutique-occasion-filter,
+  .boutique-looks-empty-cta {
     transition: none;
   }
 
