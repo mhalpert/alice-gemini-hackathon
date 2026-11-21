@@ -20,12 +20,14 @@
     "start:lan": "HOST=0.0.0.0 PORT=3443 ALICE_TLS_CERT=data/certs/alice.crt ALICE_TLS_KEY=data/certs/alice.key node server.ts"
   },
   "dependencies": {
+    "@google/genai": "3.6.1",
     "@livekit/agents": "1.10.1",
     "@livekit/agents-plugin-google": "1.10.1",
     "@livekit/rtc-node": "1.2.3",
     "jpeg-js": "0.4.4",
     "livekit-client": "2.25.0",
     "livekit-server-sdk": "2.20.1",
+    "sharp": "0.35.5",
     "zod": "4.6.7"
   }
 }
