@@ -36,7 +36,7 @@ export const DRESS_CODE = `DRESS CODE (hard rules; getting formality wrong is th
 - All four outfits sit at exactly the dressiness the occasion calls for. Never make one look "more casual" or "edgier" to create variety.
 - Black tie / black tie optional. Men: a dark suit or tuxedo jacket (layer) with its matching trousers (bottom), a white or black dress shirt, a solid dark silk tie (no prints, logos or novelty; the stores carry no bow ties), leather dress shoes, no patent in daytime. Women: a floor-length or elegant midi gown or a dressy jumpsuit, heels or dressy flats, an evening bag.
 - Job interviews are polished and conservative: closed-toe shoes only (no sandals, mules, open toes), nothing sheer, cropped, backless or lace, no graphic prints, no ripped denim, no flashy or iced-out jewelry. A bank is more formal than a creative agency.
-- Wedding guests never wear white, ivory, cream or anything bridal. Daytime or outdoor weddings: no patent leather, no tuxedos, breathable fabrics, block heels or flats rather than stilettos on grass.
+- Wedding guests: women never wear white, ivory, cream or anything bridal; men never wear a white or ivory suit or jacket, but a white dress shirt under a suit is classic and correct. Daytime or outdoor weddings: no patent leather, no tuxedos, breathable fabrics, block heels or flats rather than stilettos on grass.
 - Dress for the season and climate: hot weather means linen, cotton and light colours, never velvet, wool or heavy knits; fall and winter mean knits, layers, boots and a jacket or coat.
 - Belt and shoes share a colour family; leathers never clash.
 - Nothing that reads as lingerie (lace bralettes, sheer bodysuits, slip dresses that look like nightwear), except a sleek club look.
@@ -166,11 +166,14 @@ function fallbackQuery(slot: Slot, brief: Brief): string {
 // Hard dress-code fixes applied to every search, whichever model planned it.
 // Each returns the fixed query, or the same string when nothing applies.
 const ACCENT_SLOTS: Slot[] = ['shoes', 'bag', 'accessory', 'jewelry'];
-const GUARDS: { when: RegExp; why: string; fix: (q: string, slot: Slot) => string }[] = [
+const GUARDS: { when: RegExp; why: string; fix: (q: string, slot: Slot, brief: Brief) => string }[] = [
   {
     when: /wedding/i,
     why: 'no white at a wedding',
-    fix: (q, slot) => q.replace(/\b(white|off-white|ivory|cream|ecru|bridal|bride)\b/g, ACCENT_SLOTS.includes(slot) ? 'tan' : 'dusty blue'),
+    fix: (q, slot, brief) => {
+      if (brief.gender === 'men' && slot === 'top') return q.replace(/\b(bridal|bride)\b/g, 'dress');
+      return q.replace(/\b(white|off-white|ivory|cream|ecru|bridal|bride)\b/g, ACCENT_SLOTS.includes(slot) ? 'tan' : 'dusty blue');
+    },
   },
   {
     when: /interview/i,
@@ -189,7 +192,7 @@ function guardQuery(query: string, slot: Slot, brief: Brief, where: string, repa
   let q = query;
   for (const g of GUARDS) {
     if (!g.when.test(brief.occasion)) continue;
-    const fixed = g.fix(q, slot).replace(/\s+/g, ' ').trim();
+    const fixed = g.fix(q, slot, brief).replace(/\s+/g, ' ').trim();
     if (fixed !== q) { repairs.push(`${where}: ${g.why} ("${q}" -> "${fixed}")`); q = fixed; }
   }
   return q;

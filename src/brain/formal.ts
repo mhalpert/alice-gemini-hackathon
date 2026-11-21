@@ -6,7 +6,7 @@ import { searchMixed } from '../store/index.ts';
 import { colourOf } from './words.ts';
 
 export const MEN_BLACK_TIE_OCCASION =
-  /black tie|gala|tux|white tie|formal (dinner|event|ball)|charity (dinner|ball)|opera|award/i;
+  /black[- ]tie|gala|tux|white[- ]tie|(?<!semi[- ]|in)\bformal (dinner|event|ball|wedding)|cocktail attire wedding|evening wedding|charity (dinner|ball)|opera|award/i;
 
 export function isMenBlackTie(brief: Pick<Brief, 'gender' | 'occasion'>): boolean {
   return brief.gender === 'men' && MEN_BLACK_TIE_OCCASION.test(brief.occasion ?? '');

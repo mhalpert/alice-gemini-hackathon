@@ -182,6 +182,107 @@ function fitBudget(name: string, pieces: Piece[], ranked: Map<Slot, Item[]>, bri
   return out;
 }
 
+const SPEND_UP_ORDER: Slot[] = ['shoes', 'layer', 'bottom', 'top', 'bag', 'accessory'];
+
+export interface SpendUpOptions {
+  queries?: Map<Slot, string>;
+  problems?: string[];
+  name?: string;
+}
+
+// If the outfit total is under 60% of the budget, trade slots up to the highest-priced valid
+// candidate within budget and comparable score until the total reaches 70% of the budget.
+export function spendUp(
+  pieces: Piece[],
+  ranked: Map<Slot, Item[]>,
+  brief: Brief,
+  taken: Set<string>,
+  opts: SpendUpOptions = {},
+): Piece[] {
+  const out = [...pieces];
+  if (brief.budget_usd <= 0) return out;
+  let curTotal = total(out);
+  if (curTotal >= brief.budget_usd * 0.6) return out;
+
+  const stopAt = brief.budget_usd * 0.7;
+  const formal = isMenBlackTie(brief);
+
+  for (const slot of SPEND_UP_ORDER) {
+    if (curTotal >= stopAt) break;
+    const idx = out.findIndex((p) => p.slot === slot);
+    if (idx < 0) continue;
+
+    const cur = out[idx];
+    const query = opts.queries?.get(slot) ?? '';
+    const curScore = scoreItem(cur.item, query, slot);
+    const list = ranked.get(slot) ?? [];
+
+    let best: Item | null = null;
+    for (const cand of list) {
+      if (cand.price <= cur.item.price) continue;
+      if (round2(curTotal - cur.item.price + cand.price) > brief.budget_usd) continue;
+      if (taken.has(cand.id) || out.some((x) => x.item.id === cand.id)) continue;
+      if (wrongSlot(cand.title, slot)) continue;
+      if (breaksDressCode(cand, slot, brief)) continue;
+      if (formal && !formalFilter(cand, slot)) continue;
+      if (scoreItem(cand, query, slot) < curScore - 1) continue;
+      if (!best || cand.price > best.price) best = cand;
+    }
+
+    if (best) {
+      const oldPrice = cur.item.price;
+      out[idx] = { slot, why: whyFor(best, slot), item: best };
+      curTotal = total(out);
+      const prefix = opts.name ? `${opts.name}: ` : '';
+      opts.problems?.push(`${prefix}spent up: ${slot} $${oldPrice} -> $${best.price}`);
+    }
+  }
+
+  return out;
+}
+
+// Best-of-the-rest ordering: passing looks ALWAYS ahead of failing looks, then in-budget, then gate score.
+export function compareJudged(
+  a: { outfit: Pick<Outfit, 'total'>; gate: Pick<GateResult, 'pass' | 'score'> },
+  b: { outfit: Pick<Outfit, 'total'>; gate: Pick<GateResult, 'pass' | 'score'> },
+  budget: number,
+): number {
+  return (
+    Number(b.gate.pass) - Number(a.gate.pass) ||
+    Number(b.outfit.total <= budget) - Number(a.outfit.total <= budget) ||
+    b.gate.score - a.gate.score
+  );
+}
+
+// Emits remaining looks in gate-passing order; failing looks go last and only show if < maxShown passing looks exist.
+export function pickRest<
+  T extends { outfit: Pick<Outfit, 'name' | 'total'>; gate: Pick<GateResult, 'pass' | 'score' | 'fits' | 'cohesion'> },
+>(
+  judged: T[],
+  budget: number,
+  alreadyShown: number,
+  emitOne: (c: T) => boolean,
+  problems: string[],
+  maxShown = SHOWN,
+): number {
+  const sorted = [...judged].sort((a, b) => compareJudged(a, b, budget));
+  let shown = alreadyShown;
+  for (const c of sorted) {
+    if (shown >= maxShown) {
+      problems.push(`dropped "${c.outfit.name}" (gate ${c.gate.fits.toFixed(2)} / ${c.gate.cohesion.toFixed(1)})`);
+      continue;
+    }
+    if (c.outfit.total > budget) problems.push(`${c.outfit.name}: $${c.outfit.total} over budget`);
+    if (emitOne(c)) {
+      shown += 1;
+      if (!c.gate.pass) {
+        problems.push(`${c.outfit.name}: shown with failing gate (fits ${c.gate.fits.toFixed(2)} / cohesion ${c.gate.cohesion.toFixed(1)}; fewer than ${maxShown} passing looks)`);
+      }
+    }
+  }
+  return shown;
+}
+
 // No product in two looks: swap a taken piece for the next candidate in its slot.
 // For men's black tie, the accessory slot (the solid silk tie) is exempt so every look may share it.
 export function dedupe(
@@ -223,7 +324,7 @@ const ordered = (pieces: Piece[]) => [...pieces].sort((a, b) => SLOT_ORDER.index
 // Build
 // ---------------------------------------------------------------------------
 
-interface Candidate { outfit: Outfit; ranked: Map<Slot, Item[]>; gate: GateResult; picker: string }
+interface Candidate { outfit: Outfit; ranked: Map<Slot, Item[]>; queries: Map<Slot, string>; gate: GateResult; picker: string }
 
 export async function buildLive(brief: Brief, opts: LiveBuildOptions = {}): Promise<BuildResult> {
   const started = performance.now();
@@ -317,6 +418,7 @@ export async function buildLive(brief: Brief, opts: LiveBuildOptions = {}): Prom
     } else {
       pieces = fitBudget(name, pieces, c.ranked, brief, taken, problems);
     }
+    pieces = spendUp(pieces, c.ranked, brief, taken, { queries: c.queries, problems, name });
     const outfit: Outfit = { ...c.outfit, number: outfits.length + 1, pieces: ordered(pieces), total: total(pieces) };
     for (const p of pieces) if (!(formal && p.slot === 'accessory')) taken.add(p.item.id);
     outfits.push(outfit);
@@ -391,6 +493,8 @@ export async function buildLive(brief: Brief, opts: LiveBuildOptions = {}): Prom
     } else {
       pieces = fitBudget(name, pieces, ranked, brief, taken, problems);
     }
+    const queries = new Map<Slot, string>(idea.slots.map((s) => [s.slot, s.query]));
+    pieces = spendUp(pieces, ranked, brief, taken, { queries, problems, name });
     if (!complete(pieces)) { problems.push(`${name}: incomplete, skipped`); return; }
     const fixed = fixNameColours(name, pieces.map((p) => p.item.title));
     if (fixed !== name) { problems.push(`renamed "${name}" to "${fixed}": no piece has that colour`); name = fixed; }
@@ -398,21 +502,14 @@ export async function buildLive(brief: Brief, opts: LiveBuildOptions = {}): Prom
     const outfit: Outfit = { name, difference, story: story || storyFor(idea, pieces), pieces: ordered(pieces), total: total(pieces) };
     const gate = await gateOutfit(outfit, brief);
     if (gate.error) problems.push(`${name}: gate unavailable (${gate.error})`);
-    const c: Candidate = { outfit, ranked, gate, picker };
+    const c: Candidate = { outfit, ranked, queries, gate, picker };
     log(room, 'build_gate', { name, fits: +gate.fits.toFixed(2), cohesion: +gate.cohesion.toFixed(2), pass: gate.pass, gate_ms: gate.ms, picker });
     if (outfits.length === 0 && gate.pass && outfit.total <= brief.budget_usd && emit(c)) return;
     judged.push(c);
   }));
 
-  // Best of the rest: passing looks first, then by gate score; over-budget looks last.
-  judged.sort((a, b) =>
-    Number(b.outfit.total <= brief.budget_usd) - Number(a.outfit.total <= brief.budget_usd) ||
-    Number(b.gate.pass) - Number(a.gate.pass) || b.gate.score - a.gate.score);
-  for (const c of judged) {
-    if (outfits.length >= SHOWN) { problems.push(`dropped "${c.outfit.name}" (gate ${c.gate.fits.toFixed(2)} / ${c.gate.cohesion.toFixed(1)})`); continue; }
-    if (c.outfit.total > brief.budget_usd) problems.push(`${c.outfit.name}: $${c.outfit.total} over budget`);
-    emit(c);
-  }
+  // Best of the rest: passing looks first (never lead with a failing look), then in-budget, then gate score.
+  pickRest(judged, brief.budget_usd, outfits.length, emit, problems);
   if (outfits.length < SHOWN) problems.push(`only ${outfits.length} complete outfits`);
 
   const result: BuildResult = { outfits, source: 'live', timing: { first_outfit_ms: firstMs, total_ms: ms() }, problems };
