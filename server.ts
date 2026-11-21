@@ -16,14 +16,14 @@ import {
 import type { StorefrontResult } from './src/store/storefront.ts';
 import {
   buildProductPayload,
+  createStorefront,
   isValidShopifyGid,
-  storefront as defaultStorefront,
 } from './src/store/storefront.ts';
 
 export type CallLogFn = (room: string, ev: string, data?: Record<string, unknown>) => void;
 
 export interface AliceStoreDeps {
-  storefront?: (gender: Gender) => Promise<StorefrontResult>;
+  storefront?: (gender: Gender, opts?: { budgetMs?: number }) => Promise<StorefrontResult>;
   searchMixed?: (query: string, gender: Gender, opts?: SearchOpts) => Promise<SearchResult>;
   search?: (query: string, gender: Gender, opts?: SearchOpts) => Promise<SearchResult>;
   getProduct?: (id: string) => Promise<ProductDetail | null>;
@@ -62,7 +62,9 @@ const RATE_LIMIT_MAX = 20;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const BROWSE_RATE_LIMIT_MAX = 90;
 const BROWSE_RATE_LIMIT_WINDOW_MS = 60_000;
-const STOREFRONT_BUDGET_MS = 1400;
+const STOREFRONT_BUDGET_MS = 4000;
+const STOREFRONT_WAIT_MIN_MS = 500;
+const STOREFRONT_WAIT_MAX_MS = 6000;
 const PRODUCT_BUDGET_MS = 1300;
 const SEARCH_BUDGET_MS = 1300;
 const LOOKS_BUDGET_MS = 1400;
@@ -289,6 +291,13 @@ function parseLooksLimit(raw: string | null): number {
   return Math.min(12, Math.max(1, Math.floor(n)));
 }
 
+function parseStorefrontWaitMs(raw: string | null, defaultMs: number): number {
+  if (!raw || !raw.trim()) return defaultMs;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return defaultMs;
+  return Math.min(STOREFRONT_WAIT_MAX_MS, Math.max(STOREFRONT_WAIT_MIN_MS, Math.floor(n)));
+}
+
 function loadFixtureOutfits(
   publicRoot: string,
   department: Gender,
@@ -338,6 +347,23 @@ interface OccasionChoice {
   label: string;
 }
 
+interface SetsOccasionEntry extends OccasionChoice {
+  rawKey?: string;
+}
+
+function slugifyOccasion(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/['’]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function capitalizeFirst(text: string): string {
+  if (!text) return '';
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 function normalizeOccasionChoices(raw: unknown): OccasionChoice[] | null {
   if (!Array.isArray(raw)) return null;
   const out: OccasionChoice[] = [];
@@ -352,6 +378,59 @@ function normalizeOccasionChoices(raw: unknown): OccasionChoice[] | null {
     }
   }
   return out;
+}
+
+async function readLibraryOccasionsFromSets(
+  department: Gender,
+  env: Record<string, string | undefined>,
+): Promise<SetsOccasionEntry[]> {
+  const override = env.ALICE_LIBRARY_FILE;
+  const filePath =
+    override && override.trim().length > 0
+      ? path.resolve(override)
+      : path.join(import.meta.dirname, 'src', 'library', 'sets.json');
+
+  try {
+    const raw = await fs.promises.readFile(filePath, 'utf8');
+    const parsed = JSON.parse(raw) as {
+      sets?: Array<{ key?: unknown; gender?: unknown; occasion?: unknown; outfits?: unknown }>;
+    };
+    if (!Array.isArray(parsed?.sets)) return [];
+
+    const matching = parsed.sets.filter(
+      (s) =>
+        s &&
+        s.gender === department &&
+        typeof s.occasion === 'string' &&
+        s.occasion.trim().length > 0 &&
+        Array.isArray(s.outfits) &&
+        s.outfits.length > 0,
+    );
+
+    matching.sort((a, b) => {
+      const aDemo = a.key === 'rooftop-birthday' ? 0 : 1;
+      const bDemo = b.key === 'rooftop-birthday' ? 0 : 1;
+      return aDemo - bDemo;
+    });
+
+    const seen = new Set<string>();
+    const out: SetsOccasionEntry[] = [];
+    for (const s of matching) {
+      const text = (s.occasion as string).trim();
+      const key = slugifyOccasion(text);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        key,
+        occasion: text,
+        label: capitalizeFirst(text),
+        ...(typeof s.key === 'string' && s.key.trim() ? { rawKey: s.key.trim() } : {}),
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 function defaultLoadLibrary(): Promise<{
@@ -377,12 +456,11 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
   const getProductFn = opts.store?.getProduct ?? defaultGetProduct;
   const storefrontFn =
     opts.store?.storefront ??
-    ((gender: Gender) =>
-      defaultStorefront(gender, {
-        searchMixed: searchMixedFn,
-        search: searchFn,
-        budgetMs: storefrontBudgetMs,
-      }));
+    createStorefront({
+      search: searchFn,
+      budgetMs: storefrontBudgetMs,
+      env: opts.env,
+    });
 
   function logServerEvent(ev: string, data?: Record<string, unknown>): void {
     try {
@@ -650,18 +728,26 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
 
         const parsedUrl = new URL(rawUrl, 'http://localhost');
 
-        // GET /api/storefront?department=men|women
+        // GET /api/storefront?department=men|women&wait=<500..6000, default 4000>
         if (rawPathname === '/api/storefront') {
           const department = parseDepartment(parsedUrl.searchParams.get('department'));
+          const waitMs = parseStorefrontWaitMs(
+            parsedUrl.searchParams.get('wait'),
+            storefrontBudgetMs,
+          );
           const t0 = Date.now();
           let result: StorefrontResult;
           try {
-            const raced = await raceWithBudget(storefrontFn(department), storefrontBudgetMs + 50);
+            const raced = await raceWithBudget(
+              storefrontFn(department, { budgetMs: waitMs }),
+              waitMs + 50,
+            );
             if (raced.timedOut) {
               result = {
                 department,
                 sections: [],
                 ms: Math.max(0, Date.now() - t0),
+                storefront: { searches: 0, shared: false },
                 partial: true,
               };
             } else {
@@ -672,9 +758,10 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
               department,
               sections: [],
               ms: Math.max(0, Date.now() - t0),
+              storefront: { searches: 0, shared: false },
             };
           }
-          logExtra = `dept=${department} sections=${result.sections.length}${result.partial ? ' partial=true' : ''}`;
+          logExtra = `dept=${department} sections=${result.sections.length}${result.storefront ? ` searches=${result.storefront.searches} shared=${result.storefront.shared}` : ''}${result.partial ? ' partial=true' : ''}`;
           sendJson(res, 200, result, { 'Cache-Control': 'no-store' });
           return;
         }
@@ -753,6 +840,19 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
             return;
           }
           const occasion: string | null = trimmedOccasion.length > 0 ? trimmedOccasion : null;
+          let queryOccasion = occasion;
+          if (occasion !== null) {
+            const lower = occasion.toLowerCase();
+            const setsOccasions = await readLibraryOccasionsFromSets(department, env);
+            const matched = setsOccasions.find(
+              (entry) =>
+                entry.key === lower ||
+                (entry.rawKey !== undefined && entry.rawKey.toLowerCase() === lower),
+            );
+            if (matched) {
+              queryOccasion = matched.occasion;
+            }
+          }
 
           let libraryOutfits: Outfit[] | null = null;
           let libraryAnsweredEmpty = false;
@@ -764,7 +864,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
                   g: Gender,
                   o?: { limit?: number; occasion?: string },
                 ) => Promise<Outfit[]>;
-                const callOpts = occasion !== null ? { limit, occasion } : { limit };
+                const callOpts = queryOccasion !== null ? { limit, occasion: queryOccasion } : { limit };
                 const resOutfits = await fn(department, callOpts);
                 if (Array.isArray(resOutfits)) {
                   return resOutfits.slice(0, limit);
@@ -848,6 +948,21 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
               res,
               200,
               { department, occasions, source: 'library' },
+              { 'Cache-Control': 'no-store' },
+            );
+            return;
+          }
+
+          const setsEntries = await readLibraryOccasionsFromSets(department, env);
+          if (setsEntries.length > 0) {
+            const fallbackOccasions: OccasionChoice[] = setsEntries.map(
+              ({ key, occasion, label }) => ({ key, occasion, label }),
+            );
+            logExtra = `dept=${department} source=sets n=${fallbackOccasions.length}`;
+            sendJson(
+              res,
+              200,
+              { department, occasions: fallbackOccasions, source: 'sets' },
               { 'Cache-Control': 'no-store' },
             );
             return;
