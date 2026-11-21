@@ -1,7 +1,7 @@
 import { llm } from '@livekit/agents';
 import { z } from 'zod';
 import { buildOutfits as defaultBuildOutfits, swapPiece as defaultSwapPiece } from '../brain/index.ts';
-import type { BuildOptions, SwapOptions, SwapResult } from '../brain/index.ts';
+import type { BuildOptions, SwapOptions, SwapResult, SwapSizes } from '../brain/index.ts';
 import type { Critique } from '../brain/critic.ts';
 import { calllog } from '../calllog.ts';
 import * as defaultMediaModule from '../media/index.ts';
@@ -37,7 +37,10 @@ import type {
   TryOnExtraKind,
 } from './extras.ts';
 import { loadConfig } from './config.ts';
-import { DEFAULT_FILLER_INITIAL_DELAY_MS } from './filler.ts';
+import {
+  BUILD_OUTFITS_FILLER_DELAY_MS,
+  DEFAULT_FILLER_INITIAL_DELAY_MS,
+} from './filler.ts';
 import {
   type OrderController,
   type PlaceOrderFn,
@@ -76,11 +79,13 @@ export const DEFAULT_WEATHER_TIMEOUT_MS = 2_500;
 export const DEFAULT_RACK_QUERY_TIMEOUT_MS = 3_500;
 export const MAX_RACK_ITEMS = 12;
 
+export const FAST_BUILD_RESULT_PREFIX =
+  'The looks are ALREADY on screen. Do not say you are pulling or building anything and do not say they are finally in: present them now.';
+
 export const SLOW_TOOL_NOTES: Readonly<Record<string, string>> = {
   build_outfits: 'Pulling three killer outfits together now.',
   show_on_me: 'Spinning up the try-on reveal now.',
   swap_piece: 'Hunting down a sharper replacement piece now.',
-  add_to_bag: 'Tossing the look into the bag now.',
   remove_from_bag: 'Updating your bag now.',
   search_products: 'Digging through the racks for pieces now.',
 };
@@ -325,7 +330,12 @@ export interface ToolRuntimeOptions {
   sendWorkingNote?: (params: WorkingNoteParams) => boolean | void;
   onToolStart?: (params: { name: string; callId: string }) => void;
   onToolEnd?: (params: { name: string; callId: string }) => void;
-  onSlowToolStart?: (params: { name: string; callId: string; baseNote: string }) => void;
+  onSlowToolStart?: (params: {
+    name: string;
+    callId: string;
+    baseNote: string;
+    initialDelayMs?: number;
+  }) => void;
   onSlowToolEnd?: (params: { name: string; callId: string }) => void;
   onToolResult?: (params: { name: string; callId: string; text: string }) => void;
   getShopperTurns?: () => readonly string[];
@@ -910,8 +920,22 @@ function resolveShowOnMeSizeState(
   return { missing, knownSummary };
 }
 
-function buildShowOnMeSizeNextStep(outfit: Outfit, rememberedSizes: Record<string, string>): string {
+function buildShowOnMeSizeNextStep(
+  outfit: Outfit,
+  rememberedSizes: Record<string, string>,
+  express = false,
+): string {
   const { missing, knownSummary } = resolveShowOnMeSizeState(outfit, rememberedSizes);
+
+  if (express) {
+    if (missing.length === 0) {
+      return knownSummary
+        ? `Express mode: react in ONE short line (<=14 words) and call add_to_bag at once with ${knownSummary}.`
+        : 'Express mode: react in ONE short line (<=14 words) and call add_to_bag at once.';
+    }
+    const missingPhrase = formatMissingSizesPhrase(missing);
+    return `Express mode: react in ONE short line and ask only for their ${missingPhrase} in one short question (<=14 words).`;
+  }
 
   if (missing.length === 0) {
     if (knownSummary) {
@@ -934,8 +958,19 @@ function buildShowOnMeSizeNextStep(outfit: Outfit, rememberedSizes: Record<strin
 export function buildShowOnMeSizesOnlyInstruction(
   outfit: Outfit,
   rememberedSizes: Record<string, string>,
+  express = false,
 ): string {
   const { missing, knownSummary } = resolveShowOnMeSizeState(outfit, rememberedSizes);
+
+  if (express) {
+    if (missing.length === 0) {
+      return knownSummary
+        ? `Express mode: you already have ${knownSummary}; call add_to_bag at once with no extra talk.`
+        : 'Express mode: call add_to_bag at once with no extra talk.';
+    }
+    const missingPhrase = formatMissingSizesPhrase(missing);
+    return `Express mode: in ONE short sentence (<=14 words), ask only for their ${missingPhrase} to bag it.`;
+  }
 
   if (missing.length === 0) {
     if (knownSummary) {
@@ -1303,13 +1338,34 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
   let slowWorkSeq = 0;
 
-  function beginSlowWork(name: string, callId: string): () => void {
+  function beginSlowWork(
+    name: string,
+    callId: string,
+    slowOpts?: { initialDelayMs?: number },
+  ): () => void {
     const baseNote = SLOW_TOOL_NOTES[name];
     if (!baseNote) return () => {};
+    if (stateStore.get().express) return () => {};
+
+    const delayMs =
+      slowOpts?.initialDelayMs !== undefined
+        ? Math.max(0, slowOpts.initialDelayMs)
+        : options.workingNoteDelayMs !== undefined
+          ? workingNoteDelayMs
+          : name === 'build_outfits'
+            ? BUILD_OUTFITS_FILLER_DELAY_MS
+            : workingNoteDelayMs;
 
     if (options.onSlowToolStart) {
       let ended = false;
-      options.onSlowToolStart({ name, callId, baseNote });
+      options.onSlowToolStart({
+        name,
+        callId,
+        baseNote,
+        ...(slowOpts?.initialDelayMs !== undefined || name === 'build_outfits'
+          ? { initialDelayMs: delayMs }
+          : {}),
+      });
       return () => {
         if (ended) return;
         ended = true;
@@ -1325,7 +1381,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     let done = false;
     let noteTimer: TimerLike | null = scheduleTimer(() => {
       noteTimer = null;
-      if (done || options.signal?.aborted) return;
+      if (done || options.signal?.aborted || stateStore.get().express) return;
       const bit = bitPicker.pick(waitKey);
       const note = bit ? formatWorkingNoteWithBit(baseNote, bit) : baseNote;
       const sent = Boolean(options.sendWorkingNote?.({ callId, name, note }));
@@ -1346,7 +1402,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           via: 'working_note',
         });
       }
-    }, workingNoteDelayMs);
+    }, delayMs);
 
     return () => {
       if (done) return;
@@ -2037,6 +2093,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           budget: effectiveBudget,
         };
         const isCurrentBuild = () => myGen === buildGen && !options.signal?.aborted;
+        const buildCallStarted = nowFn();
         const finishSlowWork = beginSlowWork('build_outfits', toolCallId);
 
         try {
@@ -2129,6 +2186,10 @@ export function createAgentTools(options: ToolRuntimeOptions) {
                 subtitle,
               }),
             );
+            if (replace) {
+              // At least one look is now on screen; cancel any queued build_outfits filler immediately.
+              finishSlowWork();
+            }
 
             startBackgroundMediaForLook(numbered);
             const ver = mediaVersionByLook.get(lookNumber);
@@ -2174,12 +2235,14 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           }
 
           const pageReplies = await Promise.all(pageShowPromises);
+          finishSlowWork();
           if (!isCurrentBuild()) {
             return `Previous build for ${occasion} was superseded by a newer brief.`;
           }
 
           const pageConfirmed =
             pageReplies.length > 0 && pageReplies.every((reply) => reply.ok === true);
+          const buildElapsedMs = Math.max(0, nowFn() - buildCallStarted);
 
           logFn(options.room, 'build_done', {
             source: result.source,
@@ -2193,6 +2256,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           );
 
           const headerLines: string[] = [];
+          if (pageConfirmed && buildElapsedMs < BUILD_OUTFITS_FILLER_DELAY_MS) {
+            headerLines.push(FAST_BUILD_RESULT_PREFIX);
+          }
           if (budgetCapped) {
             headerLines.push(
               `Budget was above $${MAX_BUDGET_USD} and was capped at $${MAX_BUDGET_USD}; drop one raised-eyebrow New York joke about the cap.`,
@@ -2205,6 +2271,11 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           } else {
             headerLines.push(
               `Built ${sorted.length} looks, but the page did not confirm displaying them yet.`,
+            );
+          }
+          if (stateStore.get().express) {
+            headerLines.push(
+              'Express mode: name only your top pick in one sentence (at most 14 words) and call pick_outfit yourself without asking.',
             );
           }
           if (weatherLine) {
@@ -2288,13 +2359,17 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         const lookIdea = outfit.story?.trim() || outfit.difference?.trim() || outfit.name;
         const swapNote = formatCritiqueSwapNote(st.critiques[lookNumber]);
 
+        const pickGuidance = st.express
+          ? 'Express mode: call show_on_me as soon as the try-on is ready without asking, no extra talk.'
+          : "Give one line naming the look's idea, then make the one or two hero pieces sound special with that real detail in a sentence each—do not list the other pieces (they are on screen)—then ask about seeing it on them. Total about ten seconds. Never invent materials. If it is the weaker look, push back once before backing their choice.";
+
         return [
           `${statusLine} ${tryOnText}`,
           `Look idea: ${lookIdea}`,
           ...heroLines,
           ...(otherLine ? [otherLine] : []),
           ...(swapNote ? [swapNote] : []),
-          "Give one line naming the look's idea, then make the one or two hero pieces sound special with that real detail in a sentence each—do not list the other pieces (they are on screen)—then ask about seeing it on them. Total about ten seconds. Never invent materials. If it is the weaker look, push back once before backing their choice.",
+          pickGuidance,
         ].join('\n');
       }),
     }),
@@ -2379,6 +2454,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
                 buildShowOnMeSizesOnlyInstruction(
                   outfitsByNumber.get(lookNum) ?? outfit,
                   stateStore.get().sizes,
+                  stateStore.get().express,
                 ),
             });
 
@@ -2389,7 +2465,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
               return `Try-on for Look ${lookNum} (${outfit.name}) is now revealed on screen. React to the studio shot in ONE short line with loud New York friend energy, and do not ask for sizes yet—more views of this look are coming right up.`;
             }
 
-            const sizeNextStep = buildShowOnMeSizeNextStep(outfit, stNow.sizes);
+            const sizeNextStep = buildShowOnMeSizeNextStep(outfit, stNow.sizes, stNow.express);
             if (renderedOnModel) {
               return `Look ${lookNum} (${outfit.name}) is now revealed on screen on a model because the camera is off. Say the look is on screen on a model and that turning the camera on lets you show it on them; never say you cannot overlay it. ${sizeNextStep}`;
             }
@@ -2473,8 +2549,17 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             updatedOutfit = { ...outfit, number: lookNum, pieces, total: recomputedTotal };
             newItem = pickedItem;
           } else {
+            const knownSizes = stateStore.get().sizes;
+            const swapSizes: SwapSizes = {};
+            const topSize =
+              knownSizes.top?.trim() || knownSizes.dress?.trim() || knownSizes.layer?.trim();
+            if (topSize) swapSizes.top = topSize;
+            if (knownSizes.bottom?.trim()) swapSizes.bottom = knownSizes.bottom.trim();
+            if (knownSizes.shoes?.trim()) swapSizes.shoes = knownSizes.shoes.trim();
+            const hasSwapSizes = Object.keys(swapSizes).length > 0;
             const swapResult = await swapPieceFn(outfit, targetSlot, cleanRequest, currentBrief(), {
               room: options.room,
+              ...(hasSwapSizes ? { sizes: swapSizes } : {}),
             });
             updatedOutfit = { ...swapResult.outfit, number: lookNum };
             newItem = swapResult.piece?.item;
@@ -2673,6 +2758,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         async ({ style, queries, department }) => {
           if (rackCalled) {
             return 'Rack already shown.';
+          }
+          if (stateStore.get().express) {
+            return 'Express mode is on: skipped the rack. Ask only for missing details (occasion, budget, sizes) in one short sentence or build right away.';
           }
           rackCalled = true;
 
@@ -3068,7 +3156,6 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           key: bagLookKey,
           amount: estimatedLookTotal,
         });
-        const finishSlowWork = beginSlowWork('add_to_bag', toolCallId);
         try {
           let addToBagFn = options.deps?.addToBag;
         let usedMock = false;
@@ -3412,7 +3499,6 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         return resultText;
         } finally {
           pendingBagReservations.delete(reservationId);
-          finishSlowWork();
         }
       }),
     }),

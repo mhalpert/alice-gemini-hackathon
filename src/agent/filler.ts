@@ -9,6 +9,7 @@ import {
 } from './bits.ts';
 
 export const DEFAULT_FILLER_INITIAL_DELAY_MS = 2_000;
+export const BUILD_OUTFITS_FILLER_DELAY_MS = 4_000;
 export const DEFAULT_FILLER_FOLLOWUP_DELAY_MS = 4_000;
 
 export type FillerLogFn = (room: string, ev: string, data?: Record<string, unknown>) => void;
@@ -23,6 +24,7 @@ export interface SlowToolStartEvent {
   name: string;
   callId: string;
   baseNote: string;
+  initialDelayMs?: number;
 }
 
 export interface ToolFillerOptions {
@@ -35,6 +37,7 @@ export interface ToolFillerOptions {
   maxBitsPerWait?: number;
   initialAgentState?: AgentStateValue;
   initialUserState?: string;
+  isSuppressed?: () => boolean;
   log?: FillerLogFn;
   now?: () => number;
   setTimeoutFn?: (fn: () => void, ms: number) => TimerHandle;
@@ -43,9 +46,11 @@ export interface ToolFillerOptions {
 
 export interface ToolFiller {
   onToolStart(ev: SlowToolStartEvent): void;
-  onToolEnd(callId: string): void;
+  onToolEnd(callId: string, toolName?: string): void;
+  onToolResult(ev: { callId: string; name?: string }): void;
   onAgentStateChanged(nextState: AgentStateValue): void;
   onUserStateChanged(nextState: string): void;
+  cancelAll(): void;
   dispose(): void;
   readonly isRunning: boolean;
   readonly activeCount: number;
@@ -57,6 +62,7 @@ interface ActiveWait {
   tool: string;
   baseNote: string;
   startedAt: number;
+  initialDelayMs: number;
   bitsSent: number;
   workingNoteSent: boolean;
   sawSpeech: boolean;
@@ -108,7 +114,7 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
   }
 
   function computeDelayMs(wait: ActiveWait): number {
-    const remainingInitial = Math.max(0, wait.startedAt + initialDelayMs - nowFn());
+    const remainingInitial = Math.max(0, wait.startedAt + wait.initialDelayMs - nowFn());
     if (wait.bitsSent === 0 && !wait.sawSpeech) {
       return remainingInitial;
     }
@@ -117,6 +123,7 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
 
   function deliverBit(wait: ActiveWait): void {
     if (disposed || !activeWaits.has(wait.key)) return;
+    if (options.isSuppressed?.()) return;
     if (isAnyoneSpeaking()) return;
     if (wait.bitsSent >= maxBitsPerWait) return;
 
@@ -187,6 +194,7 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
   function scheduleNext(): void {
     cancelTimer();
     if (disposed) return;
+    if (options.isSuppressed?.()) return;
 
     const wait = currentWait();
     if (!wait) return;
@@ -197,10 +205,59 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
     timer = setTimeoutFn(() => {
       timer = null;
       if (disposed || !activeWaits.has(wait.key)) return;
+      if (options.isSuppressed?.()) return;
       if (isAnyoneSpeaking()) return;
       deliverBit(wait);
     }, delay);
     timer.unref?.();
+  }
+
+  function resolveInitialDelayMs(ev: SlowToolStartEvent): number {
+    if (ev.initialDelayMs !== undefined) {
+      return Math.max(0, ev.initialDelayMs);
+    }
+    if (options.initialDelayMs !== undefined) {
+      return initialDelayMs;
+    }
+    if (ev.name === 'build_outfits') {
+      return BUILD_OUTFITS_FILLER_DELAY_MS;
+    }
+    return initialDelayMs;
+  }
+
+  function cancelWaitByIdOrTool(callId: string, toolName?: string): void {
+    if (callId && activeWaits.has(callId)) {
+      activeWaits.delete(callId);
+      bitPicker.clearWait(callId);
+    } else if (toolName) {
+      let removed = false;
+      for (const [key, wait] of activeWaits.entries()) {
+        if (wait.tool === toolName) {
+          activeWaits.delete(key);
+          bitPicker.clearWait(key);
+          removed = true;
+        }
+      }
+      if (!removed && !callId && activeWaits.size > 0) {
+        const latest = currentWait();
+        if (latest) {
+          activeWaits.delete(latest.key);
+          bitPicker.clearWait(latest.key);
+        }
+      }
+    } else if (!callId && activeWaits.size > 0) {
+      const latest = currentWait();
+      if (latest) {
+        activeWaits.delete(latest.key);
+        bitPicker.clearWait(latest.key);
+      }
+    }
+
+    if (activeWaits.size === 0) {
+      cancelTimer();
+    } else {
+      scheduleNext();
+    }
   }
 
   return {
@@ -214,6 +271,7 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
 
     onToolStart(ev: SlowToolStartEvent): void {
       if (disposed) return;
+      if (options.isSuppressed?.()) return;
       const key = ev.callId || `__slow_${++syntheticIdCounter}`;
       const wait: ActiveWait = {
         key,
@@ -221,6 +279,7 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
         tool: ev.name,
         baseNote: ev.baseNote,
         startedAt: nowFn(),
+        initialDelayMs: resolveInitialDelayMs(ev),
         bitsSent: 0,
         workingNoteSent: false,
         sawSpeech: isAnyoneSpeaking(),
@@ -229,24 +288,22 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
       scheduleNext();
     },
 
-    onToolEnd(callId: string): void {
+    onToolEnd(callId: string, toolName?: string): void {
       if (disposed) return;
-      if (callId && activeWaits.has(callId)) {
-        activeWaits.delete(callId);
-        bitPicker.clearWait(callId);
-      } else if (!callId && activeWaits.size > 0) {
-        const latest = currentWait();
-        if (latest) {
-          activeWaits.delete(latest.key);
-          bitPicker.clearWait(latest.key);
-        }
-      }
+      cancelWaitByIdOrTool(callId, toolName);
+    },
 
-      if (activeWaits.size === 0) {
-        cancelTimer();
-      } else {
-        scheduleNext();
+    onToolResult(ev: { callId: string; name?: string }): void {
+      if (disposed) return;
+      cancelWaitByIdOrTool(ev.callId, ev.name);
+    },
+
+    cancelAll(): void {
+      cancelTimer();
+      for (const key of activeWaits.keys()) {
+        bitPicker.clearWait(key);
       }
+      activeWaits.clear();
     },
 
     onAgentStateChanged(nextState: AgentStateValue): void {

@@ -1,6 +1,19 @@
 import { calllog } from '../calllog.ts';
 import type { BagLink, BagStore, Gender, Outfit, TryOnState } from '../types.ts';
 import type { CameraStatusValue } from './context.ts';
+import {
+  EXPRESS_OFF_INSTRUCTION,
+  EXPRESS_ON_INSTRUCTION,
+  isHurryPhrase,
+  isSlowDownPhrase,
+} from './express.ts';
+
+export {
+  EXPRESS_OFF_INSTRUCTION,
+  EXPRESS_ON_INSTRUCTION,
+  isHurryPhrase,
+  isSlowDownPhrase,
+};
 
 export type StateLogFn = (room: string, ev: string, data?: Record<string, unknown>) => void;
 
@@ -74,6 +87,7 @@ export interface CallState {
   bag: BagState | null;
   orderReview: OrderReviewState | null;
   secondOutfitOffered: boolean;
+  express: boolean;
   camera: CameraStatusValue;
   facts: string[];
   usedBitIds: string[];
@@ -104,6 +118,7 @@ export type CallStateAction =
   | { type: 'set_bag'; bag: BagState }
   | { type: 'set_order_review'; review: OrderReviewState | null }
   | { type: 'set_second_outfit_offered'; offered: boolean }
+  | { type: 'set_express'; express: boolean }
   | { type: 'set_camera'; camera: CameraStatusValue }
   | { type: 'add_fact'; fact: string }
   | { type: 'record_bit_used'; bitId: string };
@@ -130,6 +145,7 @@ export function createInitialCallState(overrides: Partial<CallState> = {}): Call
     bag: null,
     orderReview: null,
     secondOutfitOffered: false,
+    express: false,
     camera: 'off',
     facts: [],
     usedBitIds: [],
@@ -610,6 +626,14 @@ export function reduceCallState(
       };
     }
 
+    case 'set_express': {
+      if (state.express === action.express) return { state, changed };
+      return {
+        state: { ...state, express: action.express },
+        changed: ['express'],
+      };
+    }
+
     case 'set_camera': {
       if (state.camera === action.camera) return { state, changed };
       return {
@@ -763,6 +787,10 @@ export function summarize(state: CallState): string {
     parts.push('second_outfit_offered=yes');
   }
 
+  if (state.express) {
+    parts.push('express=on');
+  }
+
   if (state.facts.length > 0) {
     parts.push(`notes=[${state.facts.join(' | ')}]`);
   }
@@ -776,11 +804,13 @@ export function stripCallStatePrefix(summary: string): string {
 
 export interface CallStateAppContextLike {
   sendCallState(summary: string): void;
+  send?(kind: string, text: string): void;
 }
 
 export interface CallStateStoreOptions {
   roomName: string;
   appContext?: CallStateAppContextLike;
+  onExpressChange?: (express: boolean) => void;
   log?: StateLogFn;
   initial?: Partial<CallState>;
 }
@@ -818,6 +848,20 @@ export function createCallStateStore(options: CallStateStoreOptions): CallStateS
     return changed;
   }
 
+  function checkExpressTransition(clean: string): void {
+    if (!current.express && isHurryPhrase(clean)) {
+      dispatch({ type: 'set_express', express: true });
+      logFn(options.roomName, 'express_on', { text: clean });
+      options.appContext?.send?.('express_mode', EXPRESS_ON_INSTRUCTION);
+      options.onExpressChange?.(true);
+    } else if (current.express && isSlowDownPhrase(clean)) {
+      dispatch({ type: 'set_express', express: false });
+      logFn(options.roomName, 'express_off', { text: clean });
+      options.appContext?.send?.('express_mode', EXPRESS_OFF_INSTRUCTION);
+      options.onExpressChange?.(false);
+    }
+  }
+
   function recordShopperTurn(text: string, itemId?: string | null): void {
     const clean = typeof text === 'string' ? text.trim().replace(/\s+/g, ' ') : '';
     if (!clean) return;
@@ -828,6 +872,7 @@ export function createCallStateStore(options: CallStateStoreOptions): CallStateS
       if (existing) {
         if (clean.length > existing.text.length) {
           existing.text = clean;
+          checkExpressTransition(clean);
         }
         return;
       }
@@ -845,6 +890,7 @@ export function createCallStateStore(options: CallStateStoreOptions): CallStateS
     if (recentShopperTurns.length > MAX_SHOPPER_TURNS) {
       recentShopperTurns.splice(0, recentShopperTurns.length - MAX_SHOPPER_TURNS);
     }
+    checkExpressTransition(clean);
   }
 
   function getRecentShopperTurns(): readonly string[] {

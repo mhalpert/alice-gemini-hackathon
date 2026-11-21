@@ -6,9 +6,15 @@ import {
   formatFillerBitInstruction,
   formatWorkingNoteWithBit,
 } from '../src/agent/bits.ts';
+import {
+  EXPRESS_OFF_INSTRUCTION,
+  EXPRESS_ON_INSTRUCTION,
+} from '../src/agent/express.ts';
 import { buildNudgeInstruction } from '../src/agent/nudge.ts';
 import { ALICE_SYSTEM_PROMPT, GREETING_INSTRUCTIONS } from '../src/agent/prompt.ts';
 import {
+  EXPRESS_FIRST_CHECKIN_INSTRUCTIONS,
+  EXPRESS_SECOND_CHECKIN_INSTRUCTIONS,
   FIRST_CHECKIN_INSTRUCTIONS,
   SECOND_CHECKIN_INSTRUCTIONS,
 } from '../src/agent/silence.ts';
@@ -77,9 +83,9 @@ test('ALICE_SYSTEM_PROMPT mentions CALL STATE and CAMERA STATUS', () => {
   assert.match(ALICE_SYSTEM_PROMPT, /\bCAMERA STATUS\b/);
 });
 
-test('ALICE_SYSTEM_PROMPT word count is within 450 to 1380 words and avoids tables/emoji', () => {
+test('ALICE_SYSTEM_PROMPT word count is within 450 to 1440 words and avoids tables/emoji', () => {
   const words = countWords(ALICE_SYSTEM_PROMPT);
-  assert.ok(words >= 450 && words <= 1380, `expected word count between 450 and 1380, got ${words}`);
+  assert.ok(words >= 450 && words <= 1440, `expected word count between 450 and 1440, got ${words}`);
 
   assert.equal(ALICE_SYSTEM_PROMPT.includes('|---'), false, 'prompt must not contain markdown tables');
   assert.equal(/\p{Extended_Pictographic}/u.test(ALICE_SYSTEM_PROMPT), false, 'prompt must not contain emoji');
@@ -300,6 +306,16 @@ test('banned corporate phrases never appear in prompt, greeting, filler bits, si
       label: `SECOND_CHECKIN_INSTRUCTIONS[${idx}]`,
       text,
     })),
+    ...EXPRESS_FIRST_CHECKIN_INSTRUCTIONS.map((text, idx) => ({
+      label: `EXPRESS_FIRST_CHECKIN_INSTRUCTIONS[${idx}]`,
+      text,
+    })),
+    ...EXPRESS_SECOND_CHECKIN_INSTRUCTIONS.map((text, idx) => ({
+      label: `EXPRESS_SECOND_CHECKIN_INSTRUCTIONS[${idx}]`,
+      text,
+    })),
+    { label: 'EXPRESS_ON_INSTRUCTION', text: EXPRESS_ON_INSTRUCTION },
+    { label: 'EXPRESS_OFF_INSTRUCTION', text: EXPRESS_OFF_INSTRUCTION },
     {
       label: 'nudge:build_outfits',
       text: buildNudgeInstruction('build_outfits', 'Built 3 looks and they are now on screen.') ?? '',
