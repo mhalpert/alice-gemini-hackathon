@@ -18,7 +18,7 @@ export interface VadConfig {
   prefixPaddingMs: number | undefined;
 }
 
-export const DEFAULT_PURCHASE_MAX_USD = 150;
+export const DEFAULT_PURCHASE_MAX_USD = 10_000;
 
 export interface AgentConfig {
   googleApiKey: string | undefined;

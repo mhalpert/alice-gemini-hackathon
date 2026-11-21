@@ -382,11 +382,11 @@ async function setupHarness(opts?: {
   };
 }
 
-test('loadConfig defaults ALICE_PURCHASE to false and ALICE_PURCHASE_MAX_USD to 150', () => {
+test('loadConfig defaults ALICE_PURCHASE to false and ALICE_PURCHASE_MAX_USD to 10,000', () => {
   const defaults = loadConfig({});
   assert.equal(defaults.purchase, false);
   assert.equal(defaults.purchaseMaxUsd, DEFAULT_PURCHASE_MAX_USD);
-  assert.equal(defaults.purchaseMaxUsd, 150);
+  assert.equal(defaults.purchaseMaxUsd, 10_000);
 
   assert.equal(loadConfig({ ALICE_PURCHASE: 'on' }).purchase, true);
   assert.equal(loadConfig({ ALICE_PURCHASE: '  ON  ' }).purchase, true);
@@ -396,9 +396,9 @@ test('loadConfig defaults ALICE_PURCHASE to false and ALICE_PURCHASE_MAX_USD to 
 
   assert.equal(loadConfig({ ALICE_PURCHASE_MAX_USD: '600' }).purchaseMaxUsd, 600);
   assert.equal(loadConfig({ ALICE_PURCHASE_MAX_USD: '249.50' }).purchaseMaxUsd, 249.5);
-  assert.equal(loadConfig({ ALICE_PURCHASE_MAX_USD: '0' }).purchaseMaxUsd, 150);
-  assert.equal(loadConfig({ ALICE_PURCHASE_MAX_USD: '-50' }).purchaseMaxUsd, 150);
-  assert.equal(loadConfig({ ALICE_PURCHASE_MAX_USD: 'abc' }).purchaseMaxUsd, 150);
+  assert.equal(loadConfig({ ALICE_PURCHASE_MAX_USD: '0' }).purchaseMaxUsd, 10_000);
+  assert.equal(loadConfig({ ALICE_PURCHASE_MAX_USD: '-50' }).purchaseMaxUsd, 10_000);
+  assert.equal(loadConfig({ ALICE_PURCHASE_MAX_USD: 'abc' }).purchaseMaxUsd, 10_000);
 });
 
 test('review_order and place_order are NOT registered when switch is off or store functions are missing', () => {
@@ -1062,7 +1062,7 @@ test('a newer review_order supersedes an older one and blocks place_order for th
   }
 });
 
-test('each place_order gate blocks on its own and calls nothing, including default 150 cap and 10,000 ceiling', async () => {
+test('each place_order gate blocks on its own and calls nothing, including a set cap and 10,000 ceiling', async () => {
   // 1) No review.
   {
     const h = await setupHarness();
@@ -1200,6 +1200,7 @@ test('each place_order gate blocks on its own and calls nothing, including defau
   // 6a) Over default ALICE_PURCHASE_MAX_USD (150) — even when bag total was $140, checkout $150.01 blocks!
   {
     const h = await setupHarness({
+      purchaseMaxUsd: 150,
       review: makeOrderReview({ total: 150.01 }),
     });
     await h.bagLook();
@@ -1217,6 +1218,7 @@ test('each place_order gate blocks on its own and calls nothing, including defau
   // 6b) Exactly at default cap ($150) is allowed.
   {
     const h = await setupHarness({
+      purchaseMaxUsd: 150,
       review: makeOrderReview({ total: 150 }),
     });
     await h.bagLook();
@@ -1533,12 +1535,12 @@ test('no log line ever carries payment labels or address labels across review, b
   );
 });
 
-test('createAgentTools respects ALICE_PURCHASE and default ALICE_PURCHASE_MAX_USD (150) from process.env when not overridden', async () => {
+test('createAgentTools respects ALICE_PURCHASE and ALICE_PURCHASE_MAX_USD from process.env when not overridden', async () => {
   const prevSwitch = process.env.ALICE_PURCHASE;
   const prevMax = process.env.ALICE_PURCHASE_MAX_USD;
   try {
     process.env.ALICE_PURCHASE = 'on';
-    delete process.env.ALICE_PURCHASE_MAX_USD;
+    process.env.ALICE_PURCHASE_MAX_USD = '150';
     const fakePrepare: PrepareOrderFn = async () => makeOrderReview({ total: 151 });
     const fakePlace: PlaceOrderFn = async (orderId) => makePlacedReview(orderId, []);
     const logs: RecordedLog[] = [];
