@@ -24,6 +24,7 @@
     "bag:matrix": "node scripts/bag-matrix.ts",
     "cost": "node scripts/cost.ts",
     "media:check": "node scripts/media-check.ts",
+    "capsule:check": "node scripts/capsule-check.ts",
     "inspector:check": "node scripts/inspector-check.ts",
     "extras:check": "node scripts/extras-check.ts",
     "rehearsal": "node --env-file-if-exists=.env.local scripts/backend-rehearsal.ts",
