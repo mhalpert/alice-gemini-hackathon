@@ -157,3 +157,46 @@ export function breaksDressCode(item: { title: string; description?: string }, s
   }
   return false;
 }
+
+const slotWords = (slot: string): string[] => (TYPES[slot] ?? []).flatMap(([, m]) => m);
+const SHOE_EXTRA_WORDS = ['shoe', 'shoes'];
+const SHOE_OWN_EXTRA_WORDS = ['shoe', 'shoes', 'lace up', 'lace-up'];
+const SHOE_WORDS = [...slotWords('shoes'), ...SHOE_EXTRA_WORDS];
+const NON_OXFORD_SHOE_WORDS = SHOE_WORDS.filter((w) => w !== 'oxford');
+const TOP_WORDS = slotWords('top');
+const BOTTOM_WORDS = slotWords('bottom');
+const LAYER_WORDS = slotWords('layer');
+const DRESS_WORDS = slotWords('dress');
+const CLOTHING_WORDS = [...TOP_WORDS, ...BOTTOM_WORDS, ...LAYER_WORDS, ...DRESS_WORDS];
+const BAG_WORDS = slotWords('bag');
+const ACCESSORY_OWN_WORDS = [
+  ...new Set([...slotWords('accessory'), 'hat', 'cap', 'beanie', 'belt', 'tie', 'watch', 'sunglasses', 'scarf']),
+];
+const NON_TIE_ACCESSORY_WORDS = ACCESSORY_OWN_WORDS.filter((w) => w !== 'tie');
+const NON_CLOTHING_SLOTS = new Set(['shoes', 'accessory', 'bag', 'jewelry']);
+
+function isOxfordTop(title: string): boolean {
+  return titleHas(title, ['oxford']) && titleHas(title, ['shirt', 'shirts', 'blouse', 'top', 'polo']);
+}
+
+function hasShoeType(title: string): boolean {
+  return titleHas(title, NON_OXFORD_SHOE_WORDS) || (titleHas(title, ['oxford']) && !isOxfordTop(title));
+}
+
+function namesOwnSlot(title: string, slot: string): boolean {
+  if (slot === 'shoes') return hasShoeType(title) || titleHas(title, SHOE_OWN_EXTRA_WORDS);
+  if (slot === 'accessory') {
+    return titleHas(title, NON_TIE_ACCESSORY_WORDS) || (titleHas(title, ['tie']) && !NOT_A_TIE.test(title));
+  }
+  return titleHas(title, slotWords(slot));
+}
+
+// Guards each slot against product types that belong in a different slot group.
+export function wrongSlot(title: string, slot: string): boolean {
+  if (namesOwnSlot(title, slot)) return false;
+  if (slot !== 'shoes' && hasShoeType(title)) return true;
+  if (slot !== 'bag' && titleHas(title, BAG_WORDS)) return true;
+  if (NON_CLOTHING_SLOTS.has(slot) && titleHas(title, CLOTHING_WORDS)) return true;
+  if (slot === 'bottom' && (titleHas(title, TOP_WORDS) || titleHas(title, LAYER_WORDS))) return true;
+  return false;
+}
