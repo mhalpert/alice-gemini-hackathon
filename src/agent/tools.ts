@@ -24,6 +24,13 @@ export interface WorkingNoteParams {
   note: string;
 }
 
+export interface CameraSnapshot {
+  jpeg: Buffer;
+  width: number;
+  height: number;
+  at: number;
+}
+
 export interface ToolRuntimeOptions {
   room: string;
   log?: ToolLogFn;
@@ -32,6 +39,7 @@ export interface ToolRuntimeOptions {
   slowDelayMs?: number;
   duplicateWindowMs?: number;
   sendWorkingNote?: (params: WorkingNoteParams) => boolean | void;
+  getSnapshot?: () => CameraSnapshot | null;
   fixtureUrl?: URL | string;
 }
 
@@ -180,6 +188,7 @@ const slotSchema = z
  */
 export function createAgentTools(options: ToolRuntimeOptions) {
   const wrapper = createToolWrapper(options);
+  const nowFn = options.now ?? (() => Date.now());
   const sleepFn =
     options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const slowDelayMs = options.slowDelayMs ?? DEFAULT_SLOW_STUB_DELAY_MS;
@@ -235,7 +244,12 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       }),
       execute: wrapper.wrap('show_on_me', async ({ outfit }) => {
         await waitSlow();
-        return `Try-on for look ${outfit} is ready and shown on screen.`;
+        const snap = options.getSnapshot?.() ?? null;
+        if (snap) {
+          const ageSec = Math.max(0, Math.round((nowFn() - snap.at) / 1000));
+          return `Try-on for look ${outfit} is ready and shown on screen (snapshot: yes, ${ageSec} s old).`;
+        }
+        return `Try-on for look ${outfit} is ready and shown on screen (snapshot: no).`;
       }),
     }),
 

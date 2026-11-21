@@ -30,23 +30,28 @@ import {
 import { applyRealtimeSessionPatches, sendInterimToolNote } from './patches.ts';
 import { ALICE_SYSTEM_PROMPT, GREETING_INSTRUCTIONS } from './prompt.ts';
 import { createAgentTools } from './tools.ts';
+import { createVisionController } from './vision.ts';
 
 const { Behavior, FunctionResponseScheduling } = google.realtime;
 
-function attachCameraStatusWatcher(params: {
+export function attachCameraStatusWatcher(params: {
   roomName: string;
   room: JobContext['room'];
   shopper: RemoteParticipant;
   appContext: AppContextSender;
+  onStatusChange?: (status: CameraStatusValue, source: string) => void;
+  log?: (room: string, ev: string, data?: Record<string, unknown>) => void;
 }): { initialStatus: CameraStatusValue; cleanup: () => void } {
-  const { roomName, room, shopper, appContext } = params;
+  const { roomName, room, shopper, appContext, onStatusChange } = params;
+  const logFn = params.log ?? calllog;
   let lastStatus: CameraStatusValue | null = null;
 
   const emitIfChanged = (next: CameraStatusValue, source: string) => {
     if (next === lastStatus) return;
     lastStatus = next;
-    calllog(roomName, 'camera', { status: next, source });
+    logFn(roomName, 'camera', { status: next, source });
     appContext.sendCameraStatus(next);
+    onStatusChange?.(next, source);
   };
 
   const onAttributesChanged = (
@@ -186,9 +191,18 @@ export default defineAgent({
       },
     });
 
+    const vision = config.vision
+      ? createVisionController({
+          roomName,
+          intervalMs: config.visionFrameMs,
+          getRealtimeSession: () => activeRealtimeSession,
+        })
+      : null;
+
     const tools = createAgentTools({
       room: roomName,
       sendWorkingNote: (params) => sendInterimToolNote(activeRealtimeSession, params),
+      getSnapshot: () => vision?.latest() ?? null,
     });
 
     const agent = new voice.Agent({
@@ -252,12 +266,14 @@ export default defineAgent({
         reason: ev.reason,
         ...(ev.error ? { error: ev.error } : {}),
       });
+      void vision?.close().catch(() => {});
       appContext.dispose();
     });
 
     let cleanupCameraWatcher: (() => void) | undefined;
     ctx.addShutdownCallback(async () => {
       cleanupCameraWatcher?.();
+      await vision?.close();
       appContext.dispose();
       ctx.room.off(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
       ctx.room.off(RoomEvent.Disconnected, onRoomDisconnected);
@@ -301,8 +317,12 @@ export default defineAgent({
       room: ctx.room,
       shopper,
       appContext,
+      onStatusChange: (status) => {
+        vision?.setCameraStatus(status);
+      },
     });
     cleanupCameraWatcher = watcher.cleanup;
+    vision?.attach(ctx.room, shopper);
 
     appContext.sendCallState(
       `call started; shopper=${shopper.identity}; camera=${watcher.initialStatus}; no outfits built yet`,
