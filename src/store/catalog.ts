@@ -5,6 +5,11 @@ import { shopMcp } from './shopmcp.ts';
 import { savedStore, savedKey } from './saved.ts';
 import { ALL_SITES, storeNameForDomain } from './stores.ts';
 import { logEvent } from './log.ts';
+import {
+  detectShoeLabelSystem,
+  matchSizeDetail,
+  parseWaistInseam,
+} from './sizing.ts';
 
 export const CONTEXT = { currency: 'USD', address_country: 'US' } as const;
 
@@ -59,15 +64,18 @@ export interface SizeVariantResult {
   ok: boolean;
   variant_id: string | null;
   size: string | null;
+  length?: string | null;
   available: boolean;
   sizes_available: string[];
   nearest: string | null;
   reason?: string;
+  note?: string;
 }
 
 export interface SizeVariantOpts {
   gender?: Gender;
   inseam?: string;
+  slot?: string;
 }
 
 export interface CatalogClient {
@@ -817,9 +825,54 @@ function matchCompanionSizeValue(
       }
 
       const initialAvailable = sizeOption.values.filter((v) => v.available).map((v) => v.label);
-      const matched = matchSizeLabel(size, sizeOption.values);
+      const allOptionLabels = sizeOption.values.map((v) => v.label);
+
+      // Parse waist+inseam if shopper passed combined input like "30x34" or "30 waist, 34 inseam"
+      const parsedWxL = parseWaistInseam(size);
+      const effectiveInseam = opts?.inseam ?? parsedWxL?.inseamStr;
+
+      // Detect whether this product option represents shoes (by slot, option name, or EU shoe range)
+      const inferredSlot =
+        opts?.slot ??
+        (/shoe/i.test(sizeOption.name) ||
+        (detectShoeLabelSystem(allOptionLabels) === 'EU' && !/waist/i.test(sizeOption.name))
+          ? 'shoes'
+          : /waist/i.test(sizeOption.name)
+            ? 'bottom'
+            : undefined);
+
+      let matched = matchSizeLabel(size, sizeOption.values);
+      let matchNote: string | undefined;
+      let matchSoldOutReason: string | undefined;
+      let matchNearest: string | null = null;
+
       if (!matched) {
-        const offered = sizeOption.values.map((v) => v.label).join(', ');
+        const detailMatch = matchSizeDetail(size, allOptionLabels, {
+          slot: inferredSlot,
+          gender: opts?.gender,
+          available: initialAvailable,
+        });
+        matchNote = detailMatch.note;
+        matchSoldOutReason = detailMatch.soldOutReason;
+        matchNearest = detailMatch.nearest ?? null;
+        if (detailMatch.label) {
+          matched = sizeOption.values.find((v) => v.label === detailMatch.label);
+        }
+      }
+
+      if (!matched) {
+        if (matchSoldOutReason) {
+          return {
+            ok: false,
+            variant_id: null,
+            size: null,
+            available: false,
+            sizes_available: initialAvailable,
+            nearest: matchNearest,
+            reason: matchSoldOutReason,
+          };
+        }
+        const offered = sizeOption.values.map((v) => v.label.trim()).join(', ');
         return {
           ok: false,
           variant_id: null,
@@ -831,70 +884,159 @@ function matchCompanionSizeValue(
         };
       }
 
+      if (!matched.available || !matched.exists) {
+        const nearest = findNearestAvailableSize(matched.label, sizeOption.values);
+        const availText = initialAvailable.map((l) => l.trim()).join(', ');
+        const reason = availText
+          ? `${matched.label.trim()} is sold out (sizes left: ${availText})`
+          : `${matched.label.trim()} is sold out`;
+        return {
+          ok: false,
+          variant_id: null,
+          size: matched.label,
+          available: false,
+          sizes_available: initialAvailable,
+          nearest,
+          reason,
+        };
+      }
+
       // Detect secondary length/inseam option (e.g., separate "Length" or "Inseam")
       // or a companion size option only when it actually has available values and is part of selected.
       const baseSelections =
         initial.selected.length > 0 ? initial.selected : initial.variant.options;
-      const selectedNames = new Set(baseSelections.map((s) => s.name.toLowerCase()));
+      const selectedNames = new Set(baseSelections.map((s) => s.name.trim().toLowerCase()));
 
       const lengthOption = initial.options.find(
         (o) =>
-          o.name.toLowerCase() !== sizeOption.name.toLowerCase() &&
+          o.name.trim().toLowerCase() !== sizeOption.name.trim().toLowerCase() &&
           /length|inseam/i.test(o.name) &&
           o.values.some((v) => v.available),
       );
       const matchedLength = lengthOption
-        ? pickBestLengthLabel(lengthOption.values, opts?.gender, opts?.inseam)
+        ? pickBestLengthLabel(lengthOption.values, opts?.gender, effectiveInseam)
         : undefined;
+
+      // Check if shopper wanted a specific inseam that isn't offered in lengthOption
+      let inseamNote: string | undefined;
+      if (effectiveInseam && lengthOption && matchedLength) {
+        const reqLenNum = extractFirstNumber(effectiveInseam);
+        const gotLenNum = extractFirstNumber(matchedLength.label);
+        const exactText =
+          matchedLength.label.trim().toUpperCase() === effectiveInseam.trim().toUpperCase();
+        if (!exactText && (reqLenNum === null || gotLenNum === null || reqLenNum !== gotLenNum)) {
+          inseamNote = `${effectiveInseam.trim()} inseam isn't offered; used ${matchedLength.label.trim()}`;
+        }
+      }
+
+      // Fast path: if the requested size (and wanted inseam, if any) is already selected on an
+      // available initial variant, return it directly without an extra round-trip.
+      const initialSizeSel = baseSelections.find(
+        (s) => s.name.trim().toLowerCase() === sizeOption.name.trim().toLowerCase(),
+      );
+      const initialLenSel = lengthOption
+        ? baseSelections.find(
+            (s) => s.name.trim().toLowerCase() === lengthOption.name.trim().toLowerCase(),
+          )
+        : undefined;
+      const lengthAlreadyMatches =
+        !effectiveInseam ||
+        !lengthOption ||
+        !matchedLength ||
+        (initialLenSel &&
+          initialLenSel.label.trim().toUpperCase() === matchedLength.label.trim().toUpperCase());
+
+      if (
+        lengthAlreadyMatches &&
+        initial.variant.available &&
+        initialSizeSel &&
+        initialSizeSel.label.trim().toUpperCase() === matched.label.trim().toUpperCase()
+      ) {
+        const combinedNote = [matchNote, inseamNote].filter(Boolean).join('; ') || undefined;
+        return {
+          ok: true,
+          variant_id: initial.variant.id,
+          size: matched.label,
+          ...(initialLenSel ? { length: initialLenSel.label } : {}),
+          available: true,
+          sizes_available: initialAvailable,
+          nearest: null,
+          ...(combinedNote ? { note: combinedNote } : {}),
+        };
+      }
+
+      const canonicalOptionLabel = (optName: string, rawLabel: string): string => {
+        const opt = initial.options.find(
+          (o) => o.name.trim().toLowerCase() === optName.trim().toLowerCase(),
+        );
+        if (!opt) return rawLabel;
+        const exact = opt.values.find((v) => v.label === rawLabel);
+        if (exact) return exact.label;
+        const trimmedMatch = opt.values.find(
+          (v) => v.label.trim().toUpperCase() === rawLabel.trim().toUpperCase(),
+        );
+        return trimmedMatch ? trimmedMatch.label : rawLabel;
+      };
 
       const companionSizeOption = initial.options.find(
         (o) =>
-          o.name.toLowerCase() !== sizeOption.name.toLowerCase() &&
-          (!lengthOption || o.name.toLowerCase() !== lengthOption.name.toLowerCase()) &&
+          o.name.trim().toLowerCase() !== sizeOption.name.trim().toLowerCase() &&
+          (!lengthOption || o.name.trim().toLowerCase() !== lengthOption.name.trim().toLowerCase()) &&
           /size/i.test(o.name) &&
-          selectedNames.has(o.name.toLowerCase()) &&
+          selectedNames.has(o.name.trim().toLowerCase()) &&
           o.values.some((v) => v.available),
       );
       const matchedCompanion = companionSizeOption
         ? matchCompanionSizeValue(matched.label, companionSizeOption.values)
         : undefined;
 
-      const desiredByName = new Map<string, ProductSelection>();
-      desiredByName.set(sizeOption.name.toLowerCase(), {
-        name: sizeOption.name,
-        label: matched.label,
-      });
-      if (lengthOption && matchedLength) {
-        desiredByName.set(lengthOption.name.toLowerCase(), {
-          name: lengthOption.name,
-          label: matchedLength.label,
+      const buildNextSelections = (overrideLength?: ProductSelection): ProductSelection[] => {
+        const desiredByName = new Map<string, ProductSelection>();
+        desiredByName.set(sizeOption.name.trim().toLowerCase(), {
+          name: sizeOption.name,
+          label: matched!.label,
         });
-      }
-      if (companionSizeOption && matchedCompanion && matchedCompanion.available) {
-        desiredByName.set(companionSizeOption.name.toLowerCase(), {
-          name: companionSizeOption.name,
-          label: matchedCompanion.label,
-        });
-      }
+        if (overrideLength) {
+          desiredByName.set(overrideLength.name.trim().toLowerCase(), overrideLength);
+        } else if (lengthOption && matchedLength) {
+          desiredByName.set(lengthOption.name.trim().toLowerCase(), {
+            name: lengthOption.name,
+            label: matchedLength.label,
+          });
+        }
+        if (companionSizeOption && matchedCompanion && matchedCompanion.available) {
+          desiredByName.set(companionSizeOption.name.trim().toLowerCase(), {
+            name: companionSizeOption.name,
+            label: matchedCompanion.label,
+          });
+        }
 
-      const applied = new Set<string>();
-      const nextSelections: ProductSelection[] = baseSelections.map((sel) => {
-        const key = sel.name.toLowerCase();
-        const desired = desiredByName.get(key);
-        if (desired) {
-          applied.add(key);
-          return desired;
+        // Preserve non-size options (e.g. Color "Olive ") first so Shop MCP relaxes size/length before color
+        const applied = new Set<string>();
+        const nonSize: ProductSelection[] = [];
+        const sizeLike: ProductSelection[] = [];
+        for (const sel of baseSelections) {
+          const key = sel.name.trim().toLowerCase();
+          const desired = desiredByName.get(key);
+          if (desired) {
+            applied.add(key);
+            sizeLike.push(desired);
+          } else {
+            nonSize.push({ name: sel.name, label: canonicalOptionLabel(sel.name, sel.label) });
+          }
         }
-        return { name: sel.name, label: sel.label };
-      });
-      for (const [key, desired] of desiredByName.entries()) {
-        if (!applied.has(key)) {
-          nextSelections.push(desired);
+        for (const [key, desired] of desiredByName.entries()) {
+          if (!applied.has(key)) {
+            sizeLike.push(desired);
+          }
         }
-      }
+        return [...nonSize, ...sizeLike];
+      };
+
+      const nextSelections = buildNextSelections();
 
       // Pass the PRODUCT id (initial.id), NOT variantId, so selected options take effect.
-      const updated = await getProduct(initial.id, nextSelections);
+      let updated = await getProduct(initial.id, nextSelections);
       if (!updated) {
         return {
           ok: false,
@@ -907,20 +1049,67 @@ function matchCompanionSizeValue(
         };
       }
 
+      const hasKeptSize = (detail: ProductDetail): boolean => {
+        const kept = detail.selected.find(
+          (s) => s.name.trim().toLowerCase() === sizeOption.name.trim().toLowerCase(),
+        );
+        return Boolean(
+          kept && kept.label.trim().toUpperCase() === matched!.label.trim().toUpperCase(),
+        );
+      };
+
+      // If switching to preferred/requested length caused the server to drop the size (or variant
+      // unavailable in that length), retry once with the nearest alternative available length.
+      if ((!hasKeptSize(updated) || !updated.variant.available) && lengthOption && matchedLength) {
+        const altLengths = lengthOption.values
+          .filter(
+            (v) =>
+              v.available &&
+              v.label.trim().toUpperCase() !== matchedLength.label.trim().toUpperCase(),
+          )
+          .sort((a, b) => {
+            const target = effectiveInseam
+              ? (extractFirstNumber(effectiveInseam) ?? (opts?.gender === 'women' ? 30 : 32))
+              : opts?.gender === 'women'
+                ? 30
+                : 32;
+            const da = Math.abs((extractFirstNumber(a.label) ?? target) - target);
+            const db = Math.abs((extractFirstNumber(b.label) ?? target) - target);
+            return da - db;
+          });
+        const fallbackLen =
+          altLengths[0] ??
+          (initialLenSel &&
+          initialLenSel.label.trim().toUpperCase() !== matchedLength.label.trim().toUpperCase()
+            ? { label: canonicalOptionLabel(lengthOption.name, initialLenSel.label) }
+            : undefined);
+
+        if (fallbackLen) {
+          const retry = await getProduct(
+            initial.id,
+            buildNextSelections({
+              name: lengthOption.name,
+              label: fallbackLen.label,
+            }),
+          );
+          if (retry && hasKeptSize(retry) && retry.variant.available) {
+            updated = retry;
+            if (effectiveInseam) {
+              inseamNote = `${effectiveInseam.trim()} inseam isn't offered; used ${fallbackLen.label.trim()}`;
+            }
+          }
+        }
+      }
+
       const updatedSizeOption =
-        updated.options.find((o) => o.name.toLowerCase() === sizeOption.name.toLowerCase()) ??
-        sizeOption;
+        updated.options.find(
+          (o) => o.name.trim().toLowerCase() === sizeOption.name.trim().toLowerCase(),
+        ) ?? sizeOption;
       const sizesAvailable = updatedSizeOption.values
         .filter((v) => v.available)
         .map((v) => v.label);
 
-      const keptSelection = updated.selected.find(
-        (s) => s.name.toLowerCase() === sizeOption.name.toLowerCase(),
-      );
-      if (
-        !keptSelection ||
-        keptSelection.label.trim().toUpperCase() !== matched.label.trim().toUpperCase()
-      ) {
+      if (!hasKeptSize(updated)) {
         return {
           ok: false,
           variant_id: null,
@@ -948,13 +1137,29 @@ function matchCompanionSizeValue(
         };
       }
 
+      const finalLenSel = lengthOption
+        ? updated.selected.find(
+            (s) => s.name.trim().toLowerCase() === lengthOption.name.trim().toLowerCase(),
+          )
+        : undefined;
+      if (effectiveInseam && finalLenSel && !inseamNote) {
+        const reqLenNum = extractFirstNumber(effectiveInseam);
+        const gotLenNum = extractFirstNumber(finalLenSel.label);
+        if (reqLenNum !== null && gotLenNum !== null && reqLenNum !== gotLenNum) {
+          inseamNote = `${effectiveInseam.trim()} inseam isn't offered; used ${finalLenSel.label.trim()}`;
+        }
+      }
+
+      const combinedNote = [matchNote, inseamNote].filter(Boolean).join('; ') || undefined;
       return {
         ok: true,
         variant_id: updated.variant.id,
         size: matched.label,
+        ...(finalLenSel ? { length: finalLenSel.label } : {}),
         available: true,
         sizes_available: sizesAvailable,
         nearest: null,
+        ...(combinedNote ? { note: combinedNote } : {}),
       };
     } catch {
       return {

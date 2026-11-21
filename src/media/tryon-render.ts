@@ -23,11 +23,30 @@ export interface TryOnResult {
 
 const RATE_LIMIT_DELAYS_MS = [1500, 4000];
 const NORMAL_RETRY_DELAY_MS = 500;
+const ATTEMPT_TIMEOUT_MS = 45_000;
 const testShopperInFlight = new Map<Gender, Promise<Buffer>>();
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
+  });
+}
+
+function withAttemptTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
   });
 }
 
@@ -51,14 +70,18 @@ async function generateImageWithRetry(
   while (true) {
     const attemptStart = Date.now();
     try {
-      const response = await getGenAI().models.generateContent({
-        model,
-        contents: [{ role: 'user', parts }],
-        config: {
-          responseModalities: ['IMAGE'],
-          imageConfig: { aspectRatio: '3:4' },
-        },
-      });
+      const response = await withAttemptTimeout(
+        getGenAI().models.generateContent({
+          model,
+          contents: [{ role: 'user', parts }],
+          config: {
+            responseModalities: ['IMAGE'],
+            imageConfig: { aspectRatio: '3:4' },
+          },
+        }),
+        ATTEMPT_TIMEOUT_MS,
+        job,
+      );
       const attemptMs = Date.now() - attemptStart;
 
       const part = response.candidates?.[0]?.content?.parts?.find(

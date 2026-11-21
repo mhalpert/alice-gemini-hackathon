@@ -286,6 +286,29 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
     }
   }
 
+function summarizeErrorForLog(message: string): string {
+  const trimmed = message.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed) as { messages?: Array<{ code?: string; content?: string; message?: string }> };
+      if (Array.isArray(parsed?.messages) && parsed.messages.length > 0) {
+        const parts = parsed.messages
+          .map((m) => {
+            const text = m?.content ?? m?.message ?? '';
+            return m?.code && text ? `${m.code}: ${text}` : text || m?.code || '';
+          })
+          .filter(Boolean);
+        if (parts.length > 0) {
+          return parts.join('; ').slice(0, 300);
+        }
+      }
+    } catch {
+      // fall through
+    }
+  }
+  return trimmed.slice(0, 300);
+}
+
   async function call(
     tool: string,
     args: Record<string, unknown>,
@@ -298,6 +321,7 @@ export function createShopMcp(opts?: ShopMcpOptions): ShopMcpClient {
         logEvent('store_error', {
           tool,
           code: err.code,
+          message: summarizeErrorForLog(err.message),
           ...(err.status !== undefined ? { status: err.status } : {}),
           ...(err.retryAfterMs !== undefined ? { retry_after_ms: err.retryAfterMs } : {}),
         });

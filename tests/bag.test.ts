@@ -216,6 +216,224 @@ describe('isSizeConverted', () => {
     assert.equal(isSizeConverted('Medium', '8 (M)'), false);
     assert.equal(isSizeConverted('XXL', '2X'), false);
     assert.equal(isSizeConverted(null, 'One Size'), false);
+    assert.equal(isSizeConverted('8.5 wide', '8.5'), false);
+    assert.equal(isSizeConverted('12', '46'), true);
+    assert.equal(isSizeConverted('12', 'EU 46'), true);
+    assert.equal(isSizeConverted('8.5 wide', '42'), true);
+    assert.equal(isSizeConverted('44', '10'), true);
+    assert.equal(isSizeConverted('11', 'UK 10'), true);
+  });
+});
+
+describe('shoe size systems, widths, and waist+inseam (brief-rehearsal-4)', () => {
+  it('converts US <-> EU and US <-> UK shoe sizes and handles nearest-above within 1.0', () => {
+    const euFull = ['39', '40', '41', '42', '43', '44', '45', '46'];
+    const euNo46 = ['39', '40', '41', '42', '43', '44', '45'];
+
+    // Men US -> EU
+    assert.equal(matchSizeLabel('12', euFull, { slot: 'shoes', gender: 'men' }), '46');
+    assert.equal(matchSizeLabel('8.5', euFull, { slot: 'shoes', gender: 'men' }), '42');
+    // 9 -> EU 42.5 -> nearest at or above within 1.0 is 43
+    assert.equal(matchSizeLabel('9', euFull, { slot: 'shoes', gender: 'men' }), '43');
+    // 12 -> EU 46 not in 39..45 -> null (sold out)
+    assert.equal(matchSizeLabel('12', euNo46, { slot: 'shoes', gender: 'men' }), null);
+
+    // Women US -> EU
+    const womenEu = ['36', '37', '38', '39', '40', '41'];
+    assert.equal(matchSizeLabel('7.5', womenEu, { slot: 'shoes', gender: 'women' }), '38');
+    assert.equal(matchSizeLabel('8', womenEu, { slot: 'shoes', gender: 'women' }), '39'); // 38.5 -> 39
+    assert.equal(matchSizeLabel('8.5', womenEu, { slot: 'shoes', gender: 'women' }), '39');
+
+    // Reverse: EU -> US
+    const usMen = ['7', '7.5', '8', '8.5', '9', '9.5', '10', '10.5', '11', '12'];
+    assert.equal(matchSizeLabel('44', usMen, { slot: 'shoes', gender: 'men' }), '10');
+    assert.equal(matchSizeLabel('EU 45', usMen, { slot: 'shoes', gender: 'men' }), '11');
+
+    // UK <-> US (men US = UK + 1, women US = UK + 2)
+    assert.equal(matchSizeLabel('11', ['UK 9', 'UK 10', 'UK 11'], { slot: 'shoes', gender: 'men' }), 'UK 10');
+    assert.equal(matchSizeLabel('8', ['UK 5', 'UK 6', 'UK 7'], { slot: 'shoes', gender: 'women' }), 'UK 6');
+    assert.equal(matchSizeLabel('UK 10', usMen, { slot: 'shoes', gender: 'men' }), '11');
+  });
+
+  it('handles shoe widths (wide/W/E/narrow/medium/regular/D) and adds width note only when fallback occurs', async () => {
+    const shoePlain = makeItem({
+      id: 'gid://shopify/p/shoe-plain',
+      variant_id: 'gid://shopify/ProductVariant/sp-85',
+      title: 'Classic Sneaker',
+      price: 120,
+      store: 'Everlane',
+      store_domain: 'm34kzg-ke.myshopify.com',
+    });
+    const shoeWide = makeItem({
+      id: 'gid://shopify/p/shoe-wide',
+      variant_id: 'gid://shopify/ProductVariant/sw-85',
+      title: 'Wide Runner',
+      price: 130,
+      store: 'Everlane',
+      store_domain: 'm34kzg-ke.myshopify.com',
+    });
+
+    assert.equal(matchSizeLabel('8.5 wide', ['8', '8.5', '9'], { slot: 'shoes', gender: 'men' }), '8.5');
+    assert.equal(matchSizeLabel('8.5 W', ['8.5 M', '8.5 W'], { slot: 'shoes', gender: 'men' }), '8.5 W');
+    assert.equal(matchSizeLabel('8.5 E', ['8.5', '8.5 Wide'], { slot: 'shoes', gender: 'men' }), '8.5 Wide');
+    assert.equal(matchSizeLabel('10 narrow', ['9', '10', '11'], { slot: 'shoes', gender: 'men' }), '10');
+    assert.equal(matchSizeLabel('11 D', ['10', '11', '12'], { slot: 'shoes', gender: 'men' }), '11');
+    assert.equal(matchSizeLabel('11 regular', ['10', '11 M', '12'], { slot: 'shoes', gender: 'men' }), '11 M');
+
+    const deps: BagStoreDeps = {
+      async getProduct(id) {
+        if (id === shoePlain.variant_id) {
+          return makeDetail(shoePlain, 'Numeric shoe size', [{ label: '8' }, { label: '8.5' }, { label: '9' }]);
+        }
+        return makeDetail(shoeWide, 'Numeric shoe size', [{ label: '8.5 M' }, { label: '8.5 W' }]);
+      },
+      async sizeVariant(variantId, size) {
+        return {
+          ok: true,
+          variant_id: `${variantId}-${size}`,
+          size,
+          available: true,
+          sizes_available: [size],
+          nearest: null,
+        };
+      },
+      async createCart() {
+        return {
+          cart_id: 'c-w',
+          continue_url: 'https://m34kzg-ke.myshopify.com/cart/c/w',
+          total_usd: 120,
+          line_items: [],
+          messages: [],
+          ms: 20,
+        };
+      },
+    };
+
+    const { addToBag } = createBag(deps);
+    const resFallback = await addToBag(
+      { name: 'L', difference: 'd', story: 's', total: 120, pieces: [{ slot: 'shoes', why: 'w', item: shoePlain }] },
+      { shoes: '8.5 wide' },
+      'men',
+    );
+    const line1 = resFallback.carts[0].added[0] as BagLineAdded;
+    assert.equal(line1.size, '8.5');
+    assert.equal(line1.note, "wide width isn't offered; added regular 8.5");
+    assert.ok(resFallback.summary.includes("wide width isn't offered; added regular 8.5"));
+
+    const resMatchedWide = await addToBag(
+      { name: 'L', difference: 'd', story: 's', total: 130, pieces: [{ slot: 'shoes', why: 'w', item: shoeWide }] },
+      { shoes: '8.5 wide' },
+      'men',
+    );
+    const line2 = resMatchedWide.carts[0].added[0] as BagLineAdded;
+    assert.equal(line2.size, '8.5 W');
+    assert.equal(line2.note, undefined);
+  });
+
+  it('adds EU shoe conversion note in summary ("went in as EU 46 (you said 12)") and handles waist+inseam formats and missing inseam note', async () => {
+    const kithShoe = makeItem({
+      id: 'gid://shopify/p/kith-shoe',
+      variant_id: 'gid://shopify/ProductVariant/ks-42',
+      title: 'Kith Sneaker',
+      price: 180,
+      store: 'Kith',
+      store_domain: 'kithnyc.myshopify.com',
+    });
+    const chino = makeItem({
+      id: 'gid://shopify/p/chino',
+      variant_id: 'gid://shopify/ProductVariant/ch-30-30',
+      title: 'Performance Chino',
+      price: 98,
+      store: 'Everlane',
+      store_domain: 'm34kzg-ke.myshopify.com',
+    });
+
+    // Check all waist+inseam input formats against combined labels
+    const comboLabels = ['30x30', '30x32', '32x30', '32x32'];
+    for (const fmt of ['30x32', '30 x 32', '30/32', 'W30 L32', '30 waist, 32 inseam', '30 by 32']) {
+      assert.equal(matchSizeLabel(fmt, comboLabels, { slot: 'bottom', gender: 'men' }), '30x32', fmt);
+    }
+
+    const receivedInseams: Array<string | undefined> = [];
+    const deps: BagStoreDeps = {
+      async getProduct(id) {
+        if (id === kithShoe.variant_id) {
+          return makeDetail(kithShoe, 'Size', [
+            { label: '41' },
+            { label: '42' },
+            { label: '45' },
+            { label: '46' },
+          ]);
+        }
+        return {
+          ...makeDetail(chino, 'Waist', [{ label: '30' }, { label: '32' }]),
+          options: [
+            {
+              name: 'Waist',
+              values: [
+                { label: '30', available: true, exists: true },
+                { label: '32', available: true, exists: true },
+              ],
+            },
+            {
+              name: 'Length',
+              values: [
+                { label: '30', available: true, exists: true },
+                { label: '32', available: true, exists: true },
+              ],
+            },
+          ],
+        };
+      },
+      async sizeVariant(variantId, size, opts) {
+        receivedInseams.push(opts?.inseam);
+        return {
+          ok: true,
+          variant_id: `${variantId}-${size}`,
+          size,
+          available: true,
+          sizes_available: [size],
+          nearest: null,
+          ...(opts?.inseam === '34' ? { note: "34 inseam isn't offered; used 32" } : {}),
+        };
+      },
+      async createCart(domain) {
+        return {
+          cart_id: `cart-${domain}`,
+          continue_url: `https://${domain}/cart/c/1`,
+          total_usd: domain.includes('kith') ? 180 : 98,
+          line_items: [],
+          messages: [],
+          ms: 20,
+        };
+      },
+    };
+
+    const { addToBag } = createBag(deps);
+    const res = await addToBag(
+      {
+        name: 'Look',
+        difference: 'd',
+        story: 's',
+        total: 278,
+        pieces: [
+          { slot: 'shoes', why: 'shoes', item: kithShoe },
+          { slot: 'bottom', why: 'pants', item: chino },
+        ],
+      },
+      { shoes: '12', bottom: '30', inseam: '34' },
+      'men',
+    );
+
+    assert.ok(receivedInseams.includes('34'));
+    const kithLine = res.carts.find((c) => c.store === 'Kith')!.added[0] as BagLineAdded;
+    assert.equal(kithLine.size, '46');
+    assert.equal(kithLine.size_converted, true);
+    assert.ok(res.summary.includes('Kith Sneaker went in as EU 46 (you said 12).'));
+
+    const chinoLine = res.carts.find((c) => c.store === 'Everlane')!.added[0] as BagLineAdded;
+    assert.equal(chinoLine.note, "34 inseam isn't offered; used 32");
+    assert.ok(res.summary.includes("34 inseam isn't offered; used 32"));
   });
 });
 
@@ -772,6 +990,429 @@ describe('addToBag', () => {
     assert.ok(res.summary.includes('Way-High Jean went in as 29 (you said 8).'));
     assert.equal(res.summary.split('Way-High Jean went in as 29').length - 1, 1);
     assert.ok(!res.summary.includes('Organic Tee went in as'));
+  });
+
+  it('treats Steve Madden "ONESZ" (and "NO SIZE") on bags/accessories as one-size needing no shopper size', async () => {
+    const bag = makeItem({
+      id: 'gid://shopify/p/tanzie',
+      variant_id: 'gid://shopify/ProductVariant/41482850140293',
+      title: 'TANZIE WOVEN BAG TOBACCO',
+      price: 88,
+      store: 'Steve Madden',
+      store_domain: 'stevemadden.myshopify.com',
+      department: 'women',
+    });
+
+    const deps: BagStoreDeps = {
+      async getProduct() {
+        return makeDetail(bag, 'Size', [{ label: 'ONESZ', available: true }]);
+      },
+      async sizeVariant() {
+        throw new Error('should not call sizeVariant for ONESZ');
+      },
+      async createCart(_domain, lines) {
+        assert.equal(lines.length, 1);
+        assert.equal(lines[0].variant_id, bag.variant_id);
+        return {
+          cart_id: 'cart-sm',
+          continue_url: 'https://stevemadden.myshopify.com/cart/c/1',
+          total_usd: 88,
+          line_items: [],
+          messages: [],
+          ms: 20,
+        };
+      },
+    };
+
+    const { addToBag } = createBag(deps);
+    const res = await addToBag(
+      {
+        name: 'Wedding Guest',
+        difference: 'Woven',
+        story: 'Summer',
+        total: 88,
+        pieces: [{ slot: 'bag', why: 'bag', item: bag }],
+      },
+      { dress: 'Medium', shoes: '8' },
+      'women',
+    );
+    assert.ok(!res.summary.startsWith('NOT DONE'));
+    assert.equal(res.carts[0].added.length, 1);
+    assert.equal(res.carts[0].added[0].size, 'ONESZ');
+    assert.equal(res.carts[0].continue_url, 'https://stevemadden.myshopify.com/cart/c/1');
+  });
+
+  it('drops the exact bad line named in a store tool error and still returns a cart for the rest', async () => {
+    const jacket = makeItem({
+      id: 'gid://shopify/p/j',
+      variant_id: 'gid://shopify/ProductVariant/67966605459748',
+      title: 'Duke Textured Bomber Jacket',
+      price: 39.99,
+      store: 'Fashion Nova',
+      store_domain: 'fnova.myshopify.com',
+    });
+    const sweater = makeItem({
+      id: 'gid://shopify/p/s',
+      variant_id: 'gid://shopify/ProductVariant/39249259888764',
+      title: 'Heavy Ribbed Pullover Sweater',
+      price: 24.99,
+      store: 'Fashion Nova',
+      store_domain: 'fnova.myshopify.com',
+    });
+    const pants = makeItem({
+      id: 'gid://shopify/p/p',
+      variant_id: 'gid://shopify/ProductVariant/39296832438396',
+      title: 'Mac Chino Pants',
+      price: 29.99,
+      store: 'Fashion Nova',
+      store_domain: 'fnova.myshopify.com',
+    });
+
+    const calls: string[][] = [];
+    const deps: BagStoreDeps = {
+      async getProduct(id) {
+        const it = [jacket, sweater, pants].find((x) => x.variant_id === id)!;
+        return makeDetail(it, 'Size', [{ label: 'L' }, { label: '34' }]);
+      },
+      async sizeVariant(variantId, size) {
+        return {
+          ok: true,
+          variant_id: variantId,
+          size,
+          available: true,
+          sizes_available: [size],
+          nearest: null,
+        };
+      },
+      async createCart(_domain, lines) {
+        const ids = lines.map((l) => l.variant_id);
+        calls.push(ids);
+        if (ids.includes(jacket.variant_id)) {
+          return {
+            cart_id: null,
+            continue_url: null,
+            total_usd: null,
+            line_items: [],
+            messages: [
+              {
+                type: 'error',
+                code: 'invalid',
+                content:
+                  'The merchandise with id gid://shopify/ProductVariant/67966605459748 does not exist.',
+                path: '$.add_items[0].product_variant_id',
+              },
+            ],
+            ms: 100,
+            error:
+              'The merchandise with id gid://shopify/ProductVariant/67966605459748 does not exist.',
+          };
+        }
+        return {
+          cart_id: 'cart-fn-recovered',
+          continue_url: 'https://fnova.myshopify.com/cart/c/recovered',
+          total_usd: 54.98,
+          line_items: [],
+          messages: [],
+          ms: 100,
+        };
+      },
+    };
+
+    const { addToBag } = createBag(deps);
+    const res = await addToBag(
+      {
+        name: 'Look',
+        difference: 'd',
+        story: 's',
+        total: 94.97,
+        pieces: [
+          { slot: 'layer', why: 'w', item: jacket },
+          { slot: 'top', why: 'w', item: sweater },
+          { slot: 'bottom', why: 'w', item: pants },
+        ],
+      },
+      { top: 'Large', bottom: '34' },
+      'men',
+    );
+
+    assert.equal(calls.length, 2);
+    assert.equal(res.carts[0].cart_id, 'cart-fn-recovered');
+    assert.equal(res.carts[0].continue_url, 'https://fnova.myshopify.com/cart/c/recovered');
+    assert.equal(res.carts[0].added.length, 2);
+    assert.equal(res.carts[0].not_added.length, 1);
+    assert.equal(res.carts[0].not_added[0].variant_id, jacket.variant_id);
+    assert.equal(res.carts[0].not_added[0].reason, 'sold out');
+    assert.equal(res.total_usd, 54.98);
+    assert.match(res.summary, /1 checkout link ready/);
+    assert.match(res.summary, /Duke Textured Bomber Jacket: sold out/);
+  });
+
+  it('bisects a multi-line cart when error names no line, isolates the bad item, and creates a combined cart for good items', async () => {
+    const items = ['A', 'B', 'C', 'D'].map((k) =>
+      makeItem({
+        id: `gid://shopify/p/${k}`,
+        variant_id: `gid://shopify/ProductVariant/100000${k.charCodeAt(0)}`,
+        title: `Item ${k}`,
+        price: 25,
+        store: 'Fashion Nova',
+        store_domain: 'fnova.myshopify.com',
+      }),
+    );
+    const badId = items[2].variant_id; // Item C fails with generic quantity error
+
+    const deps: BagStoreDeps = {
+      async getProduct(id) {
+        const it = items.find((x) => x.variant_id === id)!;
+        return makeDetail(it, 'Size', [{ label: 'One Size' }]);
+      },
+      async sizeVariant(variantId, size) {
+        return { ok: true, variant_id: variantId, size, available: true, sizes_available: [size], nearest: null };
+      },
+      async createCart(_domain, lines) {
+        const ids = lines.map((l) => l.variant_id);
+        if (ids.includes(badId)) {
+          return {
+            cart_id: null,
+            continue_url: null,
+            total_usd: null,
+            line_items: [],
+            messages: [],
+            ms: 50,
+            error: 'requested quantity not available',
+          };
+        }
+        return {
+          cart_id: `cart-${ids.length}`,
+          continue_url: `https://fnova.myshopify.com/cart/c/${ids.length}`,
+          total_usd: ids.length * 25,
+          line_items: [],
+          messages: [],
+          ms: 50,
+        };
+      },
+    };
+
+    const { addToBag } = createBag(deps);
+    const res = await addToBag(
+      {
+        name: 'Look',
+        difference: 'd',
+        story: 's',
+        total: 100,
+        pieces: items.map((item, i) => ({ slot: i === 0 ? 'top' : i === 1 ? 'bottom' : 'accessory', why: 'w', item })),
+      },
+      {},
+      'men',
+    );
+
+    assert.equal(res.carts[0].cart_id, 'cart-3');
+    assert.equal(res.carts[0].added.length, 3);
+    assert.equal(res.carts[0].not_added.length, 1);
+    assert.equal(res.carts[0].not_added[0].variant_id, badId);
+    assert.equal(res.carts[0].not_added[0].reason, 'quantity not available');
+    assert.equal(res.total_usd, 75);
+    assert.match(res.summary, /Item C: quantity not available/);
+    assert.match(res.summary, /1 checkout link ready/);
+  });
+
+  it('caps recovery at 4s and mentions the limit in summary only when capped', async () => {
+    let fakeNow = 10_000;
+    const items = ['A', 'B', 'C', 'D'].map((k) =>
+      makeItem({
+        id: `gid://shopify/p/${k}`,
+        variant_id: `gid://shopify/ProductVariant/200000${k.charCodeAt(0)}`,
+        title: `Item ${k}`,
+        price: 30,
+        store: 'Fashion Nova',
+        store_domain: 'fnova.myshopify.com',
+      }),
+    );
+
+    const deps: BagStoreDeps = {
+      now: () => fakeNow,
+      recoveryCapMs: 4000,
+      async getProduct(id) {
+        const it = items.find((x) => x.variant_id === id)!;
+        return makeDetail(it, 'Size', [{ label: 'One Size' }]);
+      },
+      async sizeVariant(variantId, size) {
+        return { ok: true, variant_id: variantId, size, available: true, sizes_available: [size], nearest: null };
+      },
+      async createCart(_domain, lines) {
+        // First 4-item call fails; first bisection half [A,B] passes but advances clock past 4s cap!
+        if (lines.length === 4) {
+          return {
+            cart_id: null,
+            continue_url: null,
+            total_usd: null,
+            line_items: [],
+            messages: [],
+            ms: 500,
+            error: 'custom checkout rule rejected cart',
+          };
+        }
+        fakeNow += 2500; // two parallel halves advance clock by 5000ms > 4000ms cap
+        if (lines.some((l) => l.variant_id === items[0].variant_id)) {
+          return {
+            cart_id: 'cart-ab',
+            continue_url: 'https://fnova.myshopify.com/cart/c/ab',
+            total_usd: 60,
+            line_items: [],
+            messages: [],
+            ms: 2500,
+          };
+        }
+        return {
+          cart_id: null,
+          continue_url: null,
+          total_usd: null,
+          line_items: [],
+          messages: [],
+          ms: 2500,
+          error: 'custom checkout rule rejected cart',
+        };
+      },
+    };
+
+    const { addToBag } = createBag(deps);
+    const res = await addToBag(
+      {
+        name: 'Look',
+        difference: 'd',
+        story: 's',
+        total: 120,
+        pieces: items.map((item) => ({ slot: 'accessory', why: 'w', item })),
+      },
+      {},
+      'men',
+    );
+
+    assert.equal(res.carts[0].cart_id, 'cart-ab');
+    assert.equal(res.carts[0].added.length, 2);
+    assert.equal(res.carts[0].not_added.length, 2);
+    assert.match(res.carts[0].not_added[0].reason, /the store refused this item: custom checkout rule rejected cart/);
+    assert.match(res.summary, /4s time limit/);
+    assert.match(res.summary, /1 checkout link ready/);
+  });
+
+  it('formats Transit Chino sold-out size honestly in BagOut.summary as "The Transit Chino: 32 is sold out (sizes left: 38)"', async () => {
+    const chino = makeItem({
+      id: 'gid://shopify/p/transit-chino',
+      variant_id: 'gid://shopify/ProductVariant/transit-38-30',
+      title: 'The Transit Chino',
+      price: 98,
+      store: 'Everlane',
+      store_domain: 'm34kzg-ke.myshopify.com',
+    });
+
+    const detail: ProductDetail = {
+      id: chino.id,
+      title: chino.title,
+      description: chino.description,
+      description_html: chino.description,
+      images: [chino.image],
+      options: [
+        {
+          name: 'Waist',
+          values: [
+            { label: '28', available: false, exists: false },
+            { label: '30', available: false, exists: false },
+            { label: '32', available: false, exists: false },
+            { label: '34', available: false, exists: false },
+            { label: '36', available: false, exists: false },
+            { label: '38', available: true, exists: true },
+          ],
+        },
+        {
+          name: 'Length',
+          values: [
+            { label: '28', available: false, exists: false },
+            { label: '30', available: true, exists: true },
+            { label: '32', available: true, exists: true },
+            { label: '34', available: false, exists: false },
+          ],
+        },
+        {
+          name: 'Color',
+          values: [{ label: 'Olive ', available: true, exists: true }],
+        },
+      ],
+      selected: [
+        { name: 'Color', label: 'Olive ' },
+        { name: 'Waist', label: '38' },
+        { name: 'Length', label: '30' },
+      ],
+      variant: {
+        id: chino.variant_id,
+        price: 98,
+        available: true,
+        options: [
+          { name: 'Color', label: 'Olive ' },
+          { name: 'Waist', label: '38' },
+          { name: 'Length', label: '30' },
+        ],
+        url: chino.url,
+      },
+    };
+
+    const mcp = createShopMcp({
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            result: {
+              structuredContent: {
+                product: {
+                  id: detail.id,
+                  title: detail.title,
+                  description: { plain: detail.description },
+                  options: detail.options,
+                  selected: detail.selected,
+                  media: [{ type: 'image', url: chino.image }],
+                  variants: [
+                    {
+                      id: chino.variant_id,
+                      price: { amount: 9800, currency: 'USD' },
+                      availability: { available: true },
+                      options: detail.variant.options,
+                      url: chino.url,
+                    },
+                  ],
+                },
+              },
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    });
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alice-transit-test-'));
+    try {
+      const store = createStore({ mcp, saved: createSavedStore({ dir: tmpDir }) });
+      const { addToBag } = createBag({
+        getProduct: store.getProduct,
+        sizeVariant: store.sizeVariant,
+        createCart: store.createCart,
+      });
+
+      const res = await addToBag(
+        {
+          name: 'Smart Casual',
+          difference: 'Chino',
+          story: 'Clean',
+          total: 98,
+          pieces: [{ slot: 'bottom', why: 'pants', item: chino }],
+        },
+        { bottom: '32' },
+        'men',
+      );
+      assert.equal(res.carts[0].added.length, 0);
+      assert.equal(res.carts[0].not_added.length, 1);
+      assert.equal(res.carts[0].not_added[0].reason, '32 is sold out (sizes left: 38)');
+      assert.ok(res.summary.includes('The Transit Chino: 32 is sold out (sizes left: 38).'));
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 

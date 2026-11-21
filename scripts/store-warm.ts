@@ -1,7 +1,18 @@
+import fs from 'node:fs';
 import path from 'node:path';
-import type { Gender } from '../src/types.ts';
+import type { Gender, Item, Outfit } from '../src/types.ts';
 import { searchMixed } from '../src/store/index.ts';
 import { savedStore } from '../src/store/saved.ts';
+import { tryOn } from '../src/tryon.ts';
+import { stopMedia } from '../src/media/client.ts';
+
+if (!process.env.GOOGLE_API_KEY) {
+  try {
+    process.loadEnvFile('.env.local');
+  } catch {
+    // .env.local may not exist
+  }
+}
 
 const QUERIES: Array<{ query: string; gender: Gender }> = [
   // Men's tops & shirts (rooftop birthday, brunch, interview, wedding, beach, business casual)
@@ -95,6 +106,7 @@ async function main(): Promise<void> {
 
   const storeCounts = new Map<string, number>();
   const uniqueIds = new Set<string>();
+  const sampleItemByDept: Partial<Record<Gender, Item>> = {};
   let totalItemsReturned = 0;
   let liveCount = 0;
   let savedCount = 0;
@@ -112,6 +124,9 @@ async function main(): Promise<void> {
 
       totalItemsReturned += res.items.length;
       for (const item of res.items) {
+        if (!sampleItemByDept[gender]) {
+          sampleItemByDept[gender] = item;
+        }
         if (!uniqueIds.has(item.id)) {
           uniqueIds.add(item.id);
           storeCounts.set(item.store, (storeCounts.get(item.store) ?? 0) + 1);
@@ -140,6 +155,52 @@ async function main(): Promise<void> {
 
   if (elapsedMs > 30_000) {
     console.log(`WARNING: warm took ${(elapsedMs / 1000).toFixed(2)}s (> 30s target)`);
+  }
+
+  // Ensure both test-shopper images exist on disk so demos without a camera skip the ~12s cold start
+  const tryonDir = process.env.ALICE_TRYON_DIR
+    ? path.resolve(process.env.ALICE_TRYON_DIR)
+    : path.resolve('data/tryon');
+  let invokedTryOn = false;
+  for (const dept of ['men', 'women'] as const) {
+    const shopperFile = path.join(tryonDir, `test-shopper-${dept}.jpg`);
+    let exists = false;
+    try {
+      const stat = fs.statSync(shopperFile);
+      exists = stat.isFile() && stat.size > 0;
+    } catch {
+      exists = false;
+    }
+    if (exists) {
+      console.log(`Test shopper (${dept}): ready (${shopperFile})`);
+      continue;
+    }
+    const sample = sampleItemByDept[dept];
+    if (!sample) {
+      console.log(`Test shopper (${dept}): skipped (no warmed item available)`);
+      continue;
+    }
+    try {
+      invokedTryOn = true;
+      const tShopper = Date.now();
+      const onePieceOutfit: Outfit = {
+        number: 1,
+        name: `Warm ${dept}`,
+        difference: 'Warm-up',
+        story: 'Test shopper warm-up',
+        total: sample.price,
+        pieces: [{ slot: dept === 'women' ? 'dress' : 'top', why: 'warm-up', item: sample }],
+      };
+      await tryOn(null, onePieceOutfit, { label: `warm-${dept}` });
+      console.log(`Test shopper (${dept}): generated in ${Date.now() - tShopper}ms (${shopperFile})`);
+    } catch (err) {
+      console.log(
+        `Test shopper (${dept}): failed (${err instanceof Error ? err.message : String(err)})`,
+      );
+    }
+  }
+  if (invokedTryOn) {
+    stopMedia();
   }
 }
 

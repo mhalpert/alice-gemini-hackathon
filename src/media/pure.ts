@@ -279,6 +279,27 @@ function minBoxAreaRatio(slot: string): number {
   return SMALL_ITEM_SLOTS.has(slot) ? 0.06 : 0.25;
 }
 
+export function classifyShotSource(hasPerson: boolean): 'product-only' | 'cropped' {
+  return hasPerson ? 'cropped' : 'product-only';
+}
+
+export function cropRawRgb(
+  rgb: Uint8Array,
+  width: number,
+  height: number,
+  channels: number,
+  crop: CropRegion,
+): Uint8Array {
+  const out = new Uint8Array(crop.width * crop.height * channels);
+  const rowBytes = crop.width * channels;
+  const srcStride = width * channels;
+  for (let y = 0; y < crop.height; y++) {
+    const srcOff = (crop.top + y) * srcStride + crop.left * channels;
+    out.set(rgb.subarray(srcOff, srcOff + rowBytes), y * rowBytes);
+  }
+  return out;
+}
+
 export function decideCrop(
   imgWidth: number,
   imgHeight: number,

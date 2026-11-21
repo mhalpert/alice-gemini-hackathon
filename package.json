@@ -22,7 +22,8 @@
     "warm": "node scripts/store-warm.ts",
     "bag:matrix": "node scripts/bag-matrix.ts",
     "cost": "node scripts/cost.ts",
-    "media:check": "node scripts/media-check.ts"
+    "media:check": "node scripts/media-check.ts",
+    "rehearsal": "node --env-file-if-exists=.env.local scripts/backend-rehearsal.ts"
   },
   "dependencies": {
     "@google/genai": "3.6.1",
