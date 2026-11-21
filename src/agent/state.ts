@@ -49,6 +49,12 @@ export interface BagState {
   notAdded: BagNotAdded[];
 }
 
+export interface OrderReviewState {
+  order_id: string;
+  bagFingerprint: string;
+  reviewedAt: number;
+}
+
 export interface CallState {
   shopperName: string | null;
   department: Gender | null;
@@ -66,6 +72,7 @@ export interface CallState {
   revealsDone: number[];
   sizes: Record<string, string>;
   bag: BagState | null;
+  orderReview: OrderReviewState | null;
   secondOutfitOffered: boolean;
   camera: CameraStatusValue;
   facts: string[];
@@ -95,6 +102,7 @@ export type CallStateAction =
   | { type: 'mark_revealed'; look: number }
   | { type: 'merge_sizes'; sizes: Record<string, string> }
   | { type: 'set_bag'; bag: BagState }
+  | { type: 'set_order_review'; review: OrderReviewState | null }
   | { type: 'set_second_outfit_offered'; offered: boolean }
   | { type: 'set_camera'; camera: CameraStatusValue }
   | { type: 'add_fact'; fact: string }
@@ -120,6 +128,7 @@ export function createInitialCallState(overrides: Partial<CallState> = {}): Call
     revealsDone: [],
     sizes: {},
     bag: null,
+    orderReview: null,
     secondOutfitOffered: false,
     camera: 'off',
     facts: [],
@@ -336,6 +345,7 @@ export function reduceCallState(
       let nextTryOnExtras = state.tryOnExtras;
       let nextCritiques = state.critiques;
       let nextReveals = state.revealsDone;
+      let nextOrderReview = state.orderReview;
 
       if (!sameLooksArray(state.looks, nextLooks)) {
         changed.push('looks');
@@ -361,6 +371,10 @@ export function reduceCallState(
           nextReveals = [];
           changed.push('revealsDone');
         }
+        if (state.orderReview !== null) {
+          nextOrderReview = null;
+          changed.push('orderReview');
+        }
       }
 
       if (changed.length === 0) return { state, changed };
@@ -373,6 +387,7 @@ export function reduceCallState(
           tryOnExtras: nextTryOnExtras,
           critiques: nextCritiques,
           revealsDone: nextReveals,
+          orderReview: nextOrderReview,
         },
         changed,
       };
@@ -406,12 +421,14 @@ export function reduceCallState(
 
       const nextReveals = state.revealsDone.filter((n) => n !== action.look.number);
       const revealsChanged = nextReveals.length !== state.revealsDone.length;
+      const orderReviewChanged = state.orderReview !== null;
 
       if (!sameLooksArray(state.looks, nextLooks)) changed.push('looks');
       if (tryOnChanged) changed.push('tryOn');
       if (tryOnExtrasChanged) changed.push('tryOnExtras');
       if (critiquesChanged) changed.push('critiques');
       if (revealsChanged) changed.push('revealsDone');
+      if (orderReviewChanged) changed.push('orderReview');
 
       if (changed.length === 0) return { state, changed };
       return {
@@ -422,6 +439,7 @@ export function reduceCallState(
           tryOnExtras: nextTryOnExtras,
           critiques: nextCritiques,
           revealsDone: nextReveals,
+          orderReview: null,
         },
         changed,
       };
@@ -540,6 +558,10 @@ export function reduceCallState(
     }
 
     case 'set_bag': {
+      const nextChanged = ['bag'];
+      if (state.orderReview !== null) {
+        nextChanged.push('orderReview');
+      }
       return {
         state: {
           ...state,
@@ -549,8 +571,34 @@ export function reduceCallState(
             links: action.bag.links,
             notAdded: action.bag.notAdded,
           },
+          orderReview: null,
         },
-        changed: ['bag'],
+        changed: nextChanged,
+      };
+    }
+
+    case 'set_order_review': {
+      const prev = state.orderReview;
+      const next = action.review
+        ? {
+            order_id: action.review.order_id,
+            bagFingerprint: action.review.bagFingerprint,
+            reviewedAt: action.review.reviewedAt,
+          }
+        : null;
+      if (
+        prev === null && next === null ||
+        (prev !== null &&
+          next !== null &&
+          prev.order_id === next.order_id &&
+          prev.bagFingerprint === next.bagFingerprint &&
+          prev.reviewedAt === next.reviewedAt)
+      ) {
+        return { state, changed };
+      }
+      return {
+        state: { ...state, orderReview: next },
+        changed: ['orderReview'],
       };
     }
 
@@ -705,6 +753,10 @@ export function summarize(state: CallState): string {
     const notAddedNote =
       notAddedItems.length > 0 ? `, NOT_ADDED=[${notAddedItems.join('; ')}]` : '';
     parts.push(`bag=[${storeNames || 'empty'} total=${formatMoney(state.bag.total)}${linkNote}${notAddedNote}]`);
+  }
+
+  if (state.orderReview) {
+    parts.push('order_review=ready');
   }
 
   if (state.secondOutfitOffered) {

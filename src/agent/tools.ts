@@ -31,7 +31,15 @@ import {
   formatWorkingNoteWithBit,
 } from './bits.ts';
 import type { TryOnExtraKind } from './extras.ts';
+import { loadConfig } from './config.ts';
 import { DEFAULT_FILLER_INITIAL_DELAY_MS } from './filler.ts';
+import {
+  type OrderController,
+  type PlaceOrderFn,
+  type PrepareOrderFn,
+  type StoreOrderModuleLike,
+  createOrderController,
+} from './order.ts';
 import type { PageSender } from './page.ts';
 import {
   type BagNotAdded,
@@ -197,6 +205,9 @@ export interface ToolDeps {
     gender: Gender,
   ) => Promise<BagOut>;
   loadStoreModule?: () => Promise<StoreModuleLike | null>;
+  prepareOrder?: PrepareOrderFn;
+  placeOrder?: PlaceOrderFn;
+  storeOrderModule?: StoreOrderModuleLike | null;
   forecast?: (where: string, when?: string) => Promise<WeatherResultLike>;
   loadWeatherModule?: () => Promise<WeatherModuleLike | null>;
 }
@@ -214,6 +225,9 @@ export interface ToolRuntimeOptions {
   workingNoteDelayMs?: number;
   sceneRevealDelayMs?: number;
   videoRevealDelayMs?: number;
+  purchaseEnabled?: boolean;
+  purchaseMaxUsd?: number;
+  orderController?: OrderController;
   bitPicker?: BitPicker;
   sendWorkingNote?: (params: WorkingNoteParams) => boolean | void;
   onToolStart?: (params: { name: string; callId: string }) => void;
@@ -853,6 +867,26 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       : resolveTryOnExtras(defaultTryOnModule);
   const loadStoreModuleFn = options.deps?.loadStoreModule ?? defaultLoadStoreModule;
   const loadWeatherModuleFn = options.deps?.loadWeatherModule ?? defaultLoadWeatherModule;
+  const envConfig =
+    !options.orderController &&
+    (options.purchaseEnabled === undefined || options.purchaseMaxUsd === undefined)
+      ? loadConfig()
+      : null;
+  const orderController =
+    options.orderController ??
+    createOrderController({
+      room: options.room,
+      purchaseEnabled: options.purchaseEnabled ?? envConfig!.purchase,
+      purchaseMaxUsd: options.purchaseMaxUsd ?? envConfig!.purchaseMaxUsd,
+      page,
+      stateStore,
+      deps: options.deps,
+      log: logFn,
+      now: nowFn,
+      onToolStart: options.onToolStart,
+      onToolEnd: options.onToolEnd,
+      onToolResult: options.onToolResult,
+    });
 
   const outfitsByNumber = new Map<number, Outfit>();
   const mediaVersionByLook = new Map<number, number>();
@@ -1544,6 +1578,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
               extrasHandledKinds.clear();
               extrasRevealedKinds.clear();
               extrasSettingByVersion.clear();
+              orderController.invalidateReview();
             }
             outfitsByNumber.set(lookNumber, numbered);
             shownOutfits.push(numbered);
@@ -1888,6 +1923,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           if (swappedVer !== undefined && stateStore.get().pickedLook === lookNum) {
             pickedLookVersions.add(lookVersionKey(lookNum, swappedVer));
           }
+          orderController.invalidateReview();
           wrapper.invalidate('swap_piece');
 
           const newItem = swapResult.piece?.item;
@@ -2077,8 +2113,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     }),
 
     add_to_bag: llm.tool({
-      description:
-        'Add a look (defaults to the picked look) to the shopping bag using a map of piece slot to the exact size the shopper gave. Carts only, never checkout or payment.',
+      description: orderController.purchaseReady
+        ? 'Add a look (defaults to the picked look) to the shopping bag using a map of piece slot to the exact size the shopper gave.'
+        : 'Add a look (defaults to the picked look) to the shopping bag using a map of piece slot to the exact size the shopper gave. Carts only, never checkout or payment.',
       parameters: z.object({
         outfit: outfitNumberSchema.optional(),
         sizes: z
@@ -2090,6 +2127,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       execute: wrapper.wrap(
         'add_to_bag',
         async ({ outfit: requestedOutfit, sizes }, { toolCallId }) => {
+        orderController.invalidateReview();
         const resolved = resolveLook(requestedOutfit);
         if (!resolved) {
           return `NOT DONE: No look selected to add to the bag. ${availableLookHint()}`;
@@ -2289,6 +2327,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         }
 
         if (!usedMock && isNotDoneSummary) {
+          orderController.onBagFailed();
           const afterPrefix = rawSummary.replace(/^NOT DONE:\s*/i, '').trim();
           const notAddedLines = bagPayload.stores.flatMap((store) =>
             store.not_added.map((line) => ({
@@ -2326,6 +2365,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         }
 
         if (!usedMock && !hasRealCart(bagOut)) {
+          orderController.onBagFailed();
           const skippedSummaries = notAdded.map(
             (na) => `${na.title} at ${na.store} (${na.reason.replace(/\.$/, '')})`,
           );
@@ -2344,6 +2384,12 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         baggedLookTotals.set(bagLookKey, bagPayload.total);
 
         const reply = await page.send('bagReady', bagPayload);
+
+        if (!usedMock && hasRealCart(bagOut)) {
+          orderController.onBagSettled(bagOut);
+        } else {
+          orderController.onBagFailed();
+        }
 
         stateStore.dispatch({
           type: 'set_bag',
@@ -2442,5 +2488,6 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         }
       }),
     }),
+    ...orderController.tools,
   };
 }
