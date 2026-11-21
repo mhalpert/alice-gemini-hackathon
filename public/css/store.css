@@ -1849,6 +1849,14 @@ img {
   }
 }
 
+@media (max-width: 640px) {
+  /* Leave enough bottom padding so the last row of products clears the phone call bubble and captions */
+  .store-main,
+  #store-search-slot {
+    padding-bottom: 96px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .panel-layer,
   .panel-backdrop,
