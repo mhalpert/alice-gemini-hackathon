@@ -81,6 +81,7 @@ export const SLOW_TOOL_NOTES: Readonly<Record<string, string>> = {
   show_on_me: 'Spinning up the try-on reveal now.',
   swap_piece: 'Hunting down a sharper replacement piece now.',
   add_to_bag: 'Tossing the look into the bag now.',
+  remove_from_bag: 'Updating your bag now.',
   search_products: 'Digging through the racks for pieces now.',
 };
 
@@ -180,6 +181,19 @@ export type TryOnExtrasFn = (
   opts: TryOnExtrasOptions,
 ) => Promise<TryOnExtrasResult>;
 
+export interface PrewarmSceneOptions {
+  occasion: string;
+  where?: string;
+  when?: string;
+  weather?: string;
+}
+
+export type PrewarmSceneFn = (
+  studio: { path: string },
+  outfit: Outfit,
+  opts: PrewarmSceneOptions,
+) => Promise<unknown> | unknown;
+
 export interface TryOnModuleLike {
   tryOn?: (
     personJpeg: Buffer | null,
@@ -187,6 +201,7 @@ export interface TryOnModuleLike {
     opts?: { label?: string },
   ) => Promise<{ url: string; path: string; ms: number; id: string }>;
   tryOnExtras?: TryOnExtrasFn;
+  prewarmScene?: PrewarmSceneFn;
 }
 
 /**
@@ -196,6 +211,16 @@ export interface TryOnModuleLike {
 export function resolveTryOnExtras(mod: unknown = defaultTryOnModule): TryOnExtrasFn | undefined {
   if (!mod || typeof mod !== 'object') return undefined;
   const candidate = (mod as TryOnModuleLike).tryOnExtras;
+  return typeof candidate === 'function' ? candidate : undefined;
+}
+
+/**
+ * Guarded dynamic lookup of the optional `prewarmScene` export on `src/tryon.ts`.
+ * Returns undefined when the backend has not exported it yet.
+ */
+export function resolvePrewarmScene(mod: unknown = defaultTryOnModule): PrewarmSceneFn | undefined {
+  if (!mod || typeof mod !== 'object') return undefined;
+  const candidate = (mod as TryOnModuleLike).prewarmScene;
   return typeof candidate === 'function' ? candidate : undefined;
 }
 
@@ -260,6 +285,7 @@ export interface ToolDeps {
     opts?: { label?: string },
   ) => Promise<{ url: string; path: string; ms: number; id: string }>;
   tryOnExtras?: TryOnExtrasFn | null;
+  prewarmScene?: PrewarmSceneFn | null;
   searchProducts?: (
     query: string,
     gender: Gender,
@@ -1056,6 +1082,95 @@ interface ActiveBuild {
   budget: number;
 }
 
+interface BaggedLookState {
+  lookNum: number;
+  sizes: Record<string, string>;
+  gender: Gender;
+  sourcePieces: Piece[];
+  removedSlots: Set<string>;
+  addedSlots: Set<string>;
+  payload: PageActions['bagReady'];
+  bagOut: BagOut;
+  notAdded: BagNotAdded[];
+  usedMock: boolean;
+}
+
+interface SwapRefreshMeta {
+  autoReveal: boolean;
+  pieceTitle: string;
+  slot: string;
+}
+
+function extractAddedSlots(payload: PageActions['bagReady'], pieces: readonly Piece[]): Set<string> {
+  const slots = new Set<string>();
+  for (const store of payload.stores) {
+    for (const line of store.added) {
+      if (line.slot && line.slot.trim()) {
+        slots.add(line.slot.trim().toLowerCase());
+        slots.add(normalizeSlotKey(line.slot));
+      } else if (line.title) {
+        const lower = line.title.trim().toLowerCase();
+        const match = pieces.find((p) => p.item.title.trim().toLowerCase() === lower);
+        if (match) {
+          slots.add(match.slot.trim().toLowerCase());
+          slots.add(normalizeSlotKey(match.slot));
+        }
+      }
+    }
+  }
+  return slots;
+}
+
+function combineBagPayloads(entries: Iterable<BaggedLookState>): PageActions['bagReady'] {
+  const list = Array.from(entries);
+  if (list.length === 0) {
+    return { stores: [], links: [], total: 0 };
+  }
+  if (list.length === 1) {
+    return list[0]!.payload;
+  }
+  const stores: BagStore[] = [];
+  const links: BagLink[] = [];
+  let total = 0;
+  for (const entry of list) {
+    stores.push(...entry.payload.stores);
+    links.push(...entry.payload.links);
+    if (Number.isFinite(entry.payload.total)) {
+      total = roundMoney(total + entry.payload.total);
+    }
+  }
+  return { stores, links, total };
+}
+
+function combineBagOuts(entries: Iterable<BaggedLookState>): BagOut | null {
+  const realEntries = Array.from(entries).filter((e) => !e.usedMock && hasRealCart(e.bagOut));
+  if (realEntries.length === 0) return null;
+  if (realEntries.length === 1) return realEntries[0]!.bagOut;
+  const carts: CartResult[] = [];
+  const summaries: string[] = [];
+  let totalUsd = 0;
+  for (const entry of realEntries) {
+    carts.push(...entry.bagOut.carts);
+    if (entry.bagOut.summary) summaries.push(entry.bagOut.summary);
+    if (Number.isFinite(entry.bagOut.total_usd)) {
+      totalUsd = roundMoney(totalUsd + entry.bagOut.total_usd);
+    }
+  }
+  return {
+    carts,
+    summary: summaries.join(' '),
+    total_usd: totalUsd,
+  };
+}
+
+function combineBagNotAdded(entries: Iterable<BaggedLookState>): BagNotAdded[] {
+  const out: BagNotAdded[] = [];
+  for (const entry of entries) {
+    out.push(...entry.notAdded);
+  }
+  return out;
+}
+
 /**
  * Returns an object map of anonymous function tools keyed by tool name.
  * IMPORTANT: Do NOT set `name` on any entry; @livekit/agents 1.10 rejects named entries in object maps.
@@ -1111,6 +1226,10 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     options.deps && 'tryOnExtras' in options.deps
       ? (options.deps.tryOnExtras ?? undefined)
       : resolveTryOnExtras(defaultTryOnModule);
+  const prewarmSceneFn: PrewarmSceneFn | undefined =
+    options.deps && 'prewarmScene' in options.deps
+      ? (options.deps.prewarmScene ?? undefined)
+      : resolvePrewarmScene(defaultTryOnModule);
   const loadStoreModuleFn = options.deps?.loadStoreModule ?? defaultLoadStoreModule;
   const loadWeatherModuleFn = options.deps?.loadWeatherModule ?? defaultLoadWeatherModule;
   const envConfig =
@@ -1138,6 +1257,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
   const mediaVersionByLook = new Map<number, number>();
   const tryOnJobs = new Map<number, TryOnJob>();
   const pickedLookVersions = new Set<string>();
+  const swapVersions = new Set<string>();
+  const swapRefreshMetaByVersion = new Map<string, SwapRefreshMeta>();
+  const prewarmedVersions = new Set<string>();
   const extrasStartedVersions = new Set<string>();
   const extrasHandledKinds = new Map<string, Set<TryOnExtraKind>>();
   const extrasStatusByVersion = new Map<
@@ -1147,7 +1269,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
   const extrasSettingByVersion = new Map<string, string>();
   const baggedResults = new Map<string, string>();
   const baggedLookTotals = new Map<string, number>();
+  const baggedLooks = new Map<string, BaggedLookState>();
   const pendingBagReservations = new Map<symbol, { key: string; amount: number }>();
+  let lastSearchItems: Item[] = [];
   let buildGen = 0;
   let activeBuild: ActiveBuild | null = null;
   let rackCalled = false;
@@ -1277,7 +1401,46 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     return mediaVersionByLook.get(lookNumber) === version && !options.signal?.aborted;
   }
 
-  function maybeStartExtrasForLook(lookNumber: number): void {
+  function maybePrewarmSceneForLook(
+    lookNumber: number,
+    outfit: Outfit,
+    version: number,
+    studioPath: string | null,
+  ): void {
+    if (!prewarmSceneFn || !studioPath || options.signal?.aborted) return;
+    if (!isCurrentMediaVersion(lookNumber, version)) return;
+
+    const key = lookVersionKey(lookNumber, version);
+    if (swapVersions.has(key)) return;
+    if (prewarmedVersions.has(key)) return;
+    prewarmedVersions.add(key);
+
+    const st = stateStore.get();
+    const occasion = st.occasion ?? '';
+    const where = st.where ?? undefined;
+    const when = st.when ?? undefined;
+    const weather = st.weather ?? lastBriefWeather ?? undefined;
+    const prewarmOpts: PrewarmSceneOptions = {
+      occasion,
+      ...(where ? { where } : {}),
+      ...(when ? { when } : {}),
+      ...(weather ? { weather } : {}),
+    };
+
+    logFn(options.room, 'scene_prewarm', { outfit: lookNumber });
+    try {
+      void Promise.resolve(prewarmSceneFn({ path: studioPath }, outfit, prewarmOpts)).catch(
+        () => {},
+      );
+    } catch {
+      // Swallow synchronous errors so prewarm never disrupts try-on flow.
+    }
+  }
+
+  function maybeStartExtrasForLook(
+    lookNumber: number,
+    opts?: { allowAfterSwap?: boolean },
+  ): void {
     if (!tryOnExtrasFn || options.signal?.aborted) return;
 
     const outfit = outfitsByNumber.get(lookNumber);
@@ -1286,7 +1449,10 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     if (!isCurrentMediaVersion(lookNumber, job.version)) return;
 
     const key = lookVersionKey(lookNumber, job.version);
-    if (!pickedLookVersions.has(key) && stateStore.get().pickedLook !== lookNumber) return;
+    if (swapVersions.has(key) && !opts?.allowAfterSwap) return;
+    if (!opts?.allowAfterSwap && !pickedLookVersions.has(key) && stateStore.get().pickedLook !== lookNumber) {
+      return;
+    }
     if (extrasStartedVersions.has(key)) return;
     extrasStartedVersions.add(key);
 
@@ -1444,6 +1610,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           job.studioPath = studioPath;
           stateStore.dispatch({ type: 'set_tryon', look: lookNumber, status: 'ready', url });
           await page.send('tryOnReady', { outfit: lookNumber, url });
+          if (!isCurrentMediaVersion(lookNumber, version)) return;
           logFn(options.room, 'tryon', {
             outfit: lookNumber,
             status: 'ready',
@@ -1451,7 +1618,26 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             url,
             had_snapshot: hadSnapshot,
           });
-          maybeStartExtrasForLook(lookNumber);
+
+          const key = lookVersionKey(lookNumber, version);
+          const swapMeta = swapRefreshMetaByVersion.get(key);
+          if (swapVersions.has(key)) {
+            if (swapMeta?.autoReveal && stateStore.get().pickedLook === lookNumber) {
+              const revealReply = await page.send('reveal', { outfit: lookNumber, url });
+              if (!isCurrentMediaVersion(lookNumber, version)) return;
+              if (revealReply.ok) {
+                stateStore.dispatch({ type: 'mark_revealed', look: lookNumber });
+                options.revealSequencer?.announceSwapStudioReady?.({
+                  outfit: lookNumber,
+                  pieceTitle: swapMeta.pieceTitle,
+                  slot: swapMeta.slot,
+                });
+              }
+            }
+          } else {
+            maybePrewarmSceneForLook(lookNumber, outfit, version, studioPath);
+            maybeStartExtrasForLook(lookNumber);
+          }
         } else {
           const error = 'try-on returned invalid or empty image url';
           stateStore.dispatch({ type: 'set_tryon', look: lookNumber, status: 'failed', error });
@@ -1544,9 +1730,28 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     })();
   }
 
-  function startBackgroundMediaForLook(outfit: Outfit): TryOnJob {
+  function startBackgroundMediaForLook(
+    outfit: Outfit,
+    mediaOpts?: {
+      isSwap?: boolean;
+      autoRevealOnReady?: boolean;
+      swappedPieceTitle?: string;
+      swappedSlot?: string;
+    },
+  ): TryOnJob {
     const lookNumber = outfit.number ?? 1;
     const version = nextLookMediaVersion(lookNumber);
+    if (mediaOpts?.isSwap) {
+      const key = lookVersionKey(lookNumber, version);
+      swapVersions.add(key);
+      if (mediaOpts.autoRevealOnReady) {
+        swapRefreshMetaByVersion.set(key, {
+          autoReveal: true,
+          pieceTitle: mediaOpts.swappedPieceTitle ?? '',
+          slot: mediaOpts.swappedSlot ?? '',
+        });
+      }
+    }
     const tryOnJob = startTryOnForLook(outfit, version);
     startCollageForLook(outfit, version);
     return tryOnJob;
@@ -1892,6 +2097,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
               outfitsByNumber.clear();
               tryOnJobs.clear();
               pickedLookVersions.clear();
+              swapVersions.clear();
+              swapRefreshMetaByVersion.clear();
+              prewarmedVersions.clear();
               extrasStartedVersions.clear();
               extrasHandledKinds.clear();
               extrasStatusByVersion.clear();
@@ -2138,6 +2346,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
             const currentVer = mediaVersionByLook.get(lookNum);
             const verKey = currentVer !== undefined ? lookVersionKey(lookNum, currentVer) : null;
+            if (verKey && swapVersions.has(verKey) && !extrasStartedVersions.has(verKey)) {
+              maybeStartExtrasForLook(lookNum, { allowAfterSwap: true });
+            }
             const stNow = stateStore.get();
             const tracked = verKey ? extrasStatusByVersion.get(verKey) : undefined;
             const extrasNow = stNow.tryOnExtras[lookNum];
@@ -2194,15 +2405,24 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     }),
 
     swap_piece: llm.tool({
-      description: 'Swap a single piece in a look (defaults to the picked look) for something matching the request.',
+      description:
+        'Swap a single piece in a look (defaults to the picked look) either for a numbered pick from the last search_products result or for something matching the request.',
       parameters: z.object({
         outfit: outfitNumberSchema.optional(),
         slot: slotSchema,
-        request: z.string().describe('What the shopper wants instead for this piece'),
+        request: z
+          .string()
+          .optional()
+          .describe('What the shopper wants instead for this piece (optional when pick is given)'),
+        pick: z
+          .number()
+          .int()
+          .optional()
+          .describe('1-based result number from the last search_products call to swap in that exact product'),
       }),
       execute: wrapper.wrap(
         'swap_piece',
-        async ({ outfit: requestedOutfit, slot, request }, { toolCallId }) => {
+        async ({ outfit: requestedOutfit, slot, request, pick }, { toolCallId }) => {
         const resolved = resolveLook(requestedOutfit);
         if (!resolved) {
           return `No look selected for a swap. ${availableLookHint()}`;
@@ -2211,16 +2431,58 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         const { lookNum, outfit } = resolved;
         const existingPiece = findPieceInOutfit(outfit, slot);
         const targetSlot = existingPiece?.slot ?? slot;
+        const isPickedLook = stateStore.get().pickedLook === lookNum;
         const started = nowFn();
-        const finishSlowWork = beginSlowWork('swap_piece', toolCallId);
+
+        if (pick !== undefined) {
+          if (lastSearchItems.length === 0) {
+            return 'NOT DONE: There is no recent product search to pick from. Call search_products first, then call swap_piece with a valid pick number.';
+          }
+          if (!Number.isInteger(pick) || pick < 1 || pick > lastSearchItems.length) {
+            return `NOT DONE: Pick ${pick} is out of range (last search returned ${lastSearchItems.length} ${lastSearchItems.length === 1 ? 'result' : 'results'}). Call search_products first or pick a number from 1 to ${lastSearchItems.length}.`;
+          }
+        }
+
+        const cleanRequest = typeof request === 'string' ? request.trim() : '';
+        if (pick === undefined && !cleanRequest) {
+          return 'NOT DONE: Provide either a request describing the replacement piece or a pick number from search_products.';
+        }
+
+        const finishSlowWork =
+          pick === undefined ? beginSlowWork('swap_piece', toolCallId) : () => {};
 
         try {
-          const swapResult = await swapPieceFn(outfit, targetSlot, request, currentBrief(), {
-            room: options.room,
-          });
+          let updatedOutfit: Outfit;
+          let newItem: Item | undefined;
+          let swapNote: string | undefined;
+
+          if (pick !== undefined) {
+            const pickedItem = lastSearchItems[pick - 1]!;
+            const newPiece: Piece = existingPiece
+              ? { ...existingPiece, item: pickedItem }
+              : { slot: targetSlot, item: pickedItem, why: '' };
+            const pieces = existingPiece
+              ? outfit.pieces.map((p) => (p === existingPiece ? newPiece : p))
+              : [...outfit.pieces, newPiece];
+            const recomputedTotal = roundMoney(
+              pieces.reduce(
+                (sum, p) => sum + (Number.isFinite(p.item.price) ? p.item.price : 0),
+                0,
+              ),
+            );
+            updatedOutfit = { ...outfit, number: lookNum, pieces, total: recomputedTotal };
+            newItem = pickedItem;
+          } else {
+            const swapResult = await swapPieceFn(outfit, targetSlot, cleanRequest, currentBrief(), {
+              room: options.room,
+            });
+            updatedOutfit = { ...swapResult.outfit, number: lookNum };
+            newItem = swapResult.piece?.item;
+            swapNote = swapResult.note;
+          }
+
           const ms = Math.max(0, Math.round(nowFn() - started));
 
-          const updatedOutfit: Outfit = { ...swapResult.outfit, number: lookNum };
           outfitsByNumber.set(lookNum, updatedOutfit);
           stateStore.dispatch({
             type: 'update_look',
@@ -2234,25 +2496,26 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           });
 
           options.revealSequencer?.cancel(lookNum);
-          startBackgroundMediaForLook(updatedOutfit);
-          const swappedVer = mediaVersionByLook.get(lookNum);
-          if (swappedVer !== undefined && stateStore.get().pickedLook === lookNum) {
-            pickedLookVersions.add(lookVersionKey(lookNum, swappedVer));
-          }
+          startBackgroundMediaForLook(updatedOutfit, {
+            isSwap: true,
+            autoRevealOnReady: isPickedLook,
+            swappedPieceTitle: newItem?.title ?? targetSlot,
+            swappedSlot: targetSlot,
+          });
           orderController.invalidateReview();
           wrapper.invalidate('swap_piece');
 
-          const newItem = swapResult.piece?.item;
           logFn(options.room, 'swap', {
             outfit: lookNum,
             slot: targetSlot,
-            request,
+            request: cleanRequest || (newItem?.title ?? ''),
+            ...(pick !== undefined ? { pick } : {}),
             ms,
             title: newItem?.title ?? null,
             price: newItem?.price ?? null,
             store: newItem?.store ?? null,
             total: updatedOutfit.total,
-            ...(swapResult.note ? { note: swapResult.note } : {}),
+            ...(swapNote ? { note: swapNote } : {}),
           });
 
           const pieceDesc = newItem
@@ -2261,8 +2524,14 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           const screenStatus = reply.ok
             ? `Updated Look ${lookNum} on screen`
             : `Updated Look ${lookNum} (page did not confirm the visual update)`;
-          const notePart = swapResult.note ? ` Note: ${swapResult.note}` : '';
-          const baseResult = `${screenStatus}: ${targetSlot} is now ${pieceDesc}. New look total: ${formatPrice(updatedOutfit.total)}.${notePart} Try-on and flat-lay are refreshing.`;
+          const notePart = swapNote ? ` Note: ${swapNote}` : '';
+          const sayExactNamePart = newItem?.title
+            ? ` Say the exact product name "${newItem.title}".`
+            : '';
+          const waitTwentySecPart = isPickedLook
+            ? ' Say now, in one short line, that you are putting the new piece on them and it takes about twenty seconds.'
+            : '';
+          const baseResult = `${screenStatus}: ${targetSlot} is now ${pieceDesc}. New look total: ${formatPrice(updatedOutfit.total)}.${notePart}${sayExactNamePart}${waitTwentySecPart} Try-on and flat-lay are refreshing.`;
 
           const bagLookKey = `${buildGen}:${lookNum}`;
           if (baggedLookTotals.has(bagLookKey)) {
@@ -2580,15 +2849,16 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
           const res = await searchFn(query, gender, searchOpts);
           const items = Array.isArray(res?.items) ? res.items : [];
+          lastSearchItems = items.slice(0, 8);
+          wrapper.invalidate('search_products');
           const reply = await page.send('showSearch', { query, items });
 
           if (items.length === 0) {
             return `Nothing in stock matched "${query}"${max_price !== undefined ? ` under ${formatPrice(max_price)}` : ''}. Shrug it off and steer them back to the curated looks.`;
           }
 
-          const list = items
-            .slice(0, 8)
-            .map((item) => `${item.title} (${formatPrice(item.price)}, ${item.store})`)
+          const list = lastSearchItems
+            .map((item, idx) => `${idx + 1}. ${item.title} (${formatPrice(item.price)}, ${item.store})`)
             .join('; ');
           const screenNote = reply.ok
             ? `Shown ${items.length} results for "${query}" on screen:`
@@ -3017,11 +3287,25 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         }
 
         baggedLookTotals.set(bagLookKey, effectiveBagTotal);
+        baggedLooks.set(bagLookKey, {
+          lookNum,
+          sizes: { ...resolvedSizes },
+          gender,
+          sourcePieces: [...activeOutfit.pieces],
+          removedSlots: new Set<string>(),
+          addedSlots: extractAddedSlots(bagPayload, activeOutfit.pieces),
+          payload: bagPayload,
+          bagOut,
+          notAdded: [...notAdded],
+          usedMock,
+        });
 
-        const reply = await page.send('bagReady', bagPayload);
+        const pageBagPayload = combineBagPayloads(baggedLooks.values());
+        const reply = await page.send('bagReady', pageBagPayload);
 
-        if (!usedMock && hasRealCart(bagOut)) {
-          orderController.onBagSettled(bagOut);
+        const combinedRealBag = combineBagOuts(baggedLooks.values());
+        if (combinedRealBag) {
+          orderController.onBagSettled(combinedRealBag);
         } else {
           orderController.onBagFailed();
         }
@@ -3029,10 +3313,10 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         stateStore.dispatch({
           type: 'set_bag',
           bag: {
-            stores: bagPayload.stores,
-            total: bagPayload.total,
-            links: bagPayload.links,
-            notAdded,
+            stores: pageBagPayload.stores,
+            total: pageBagPayload.total,
+            links: pageBagPayload.links,
+            notAdded: combineBagNotAdded(baggedLooks.values()),
           },
         });
 
@@ -3131,6 +3415,233 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           finishSlowWork();
         }
       }),
+    }),
+
+    remove_from_bag: llm.tool({
+      description:
+        "Remove a single piece or an entire look ('all') from the shopping bag without changing the look on screen. Wait for this tool result before saying what is left in the bag or giving the new total.",
+      parameters: z.object({
+        outfit: outfitNumberSchema.optional(),
+        slot: z
+          .string()
+          .describe(
+            "Piece slot to remove (top, bottom, dress, layer, shoes, accessory, bag, or jewelry) or 'all' to remove the whole look from the bag",
+          ),
+      }),
+      execute: wrapper.wrap(
+        'remove_from_bag',
+        async ({ outfit: requestedOutfit, slot }, { toolCallId }) => {
+          orderController.invalidateReview();
+
+          let resolved = resolveLook(requestedOutfit);
+          if (!resolved && requestedOutfit === undefined && baggedLooks.size === 1) {
+            const onlyEntry = Array.from(baggedLooks.values())[0]!;
+            const onlyOutfit = outfitsByNumber.get(onlyEntry.lookNum);
+            if (onlyOutfit) {
+              resolved = { lookNum: onlyEntry.lookNum, outfit: onlyOutfit };
+            }
+          }
+          if (!resolved) {
+            return `NOT DONE: No look selected to remove from the bag. ${availableLookHint()}`;
+          }
+
+          const { lookNum, outfit } = resolved;
+          const bagLookKey = `${buildGen}:${lookNum}`;
+          const bagEntry = baggedLooks.get(bagLookKey);
+          if (!bagEntry || !baggedLookTotals.has(bagLookKey)) {
+            return `NOT DONE: Look ${lookNum} (${outfit.name}) is not in the bag.`;
+          }
+
+          const summarizeRemainingBag = (payload: PageActions['bagReady']): string => {
+            const addedItems = payload.stores.flatMap((s) =>
+              s.added.map((line) =>
+                `${line.title}${line.size ? ` (size ${line.size})` : ''} at ${s.store}`,
+              ),
+            );
+            if (addedItems.length === 0) {
+              return 'The bag is now empty, total $0.';
+            }
+            const pieceWord = addedItems.length === 1 ? 'piece' : 'pieces';
+            return `Still in the bag (${addedItems.length} ${pieceWord}): ${addedItems.join(', ')}. New total: ${formatPrice(payload.total)}.`;
+          };
+
+          const commitBagState = async (
+            removedDesc: string,
+            removedSlotTag: string,
+          ): Promise<string> => {
+            baggedResults.clear();
+            wrapper.invalidate('remove_from_bag');
+
+            const pageBagPayload = combineBagPayloads(baggedLooks.values());
+            const reply = await page.send('bagReady', pageBagPayload);
+
+            const combinedRealBag = combineBagOuts(baggedLooks.values());
+            if (combinedRealBag) {
+              orderController.onBagSettled(combinedRealBag);
+            } else {
+              orderController.onBagFailed();
+            }
+
+            stateStore.dispatch({
+              type: 'set_bag',
+              bag: {
+                stores: pageBagPayload.stores,
+                total: pageBagPayload.total,
+                links: pageBagPayload.links,
+                notAdded: combineBagNotAdded(baggedLooks.values()),
+              },
+            });
+
+            logFn(options.room, 'bag_remove', {
+              outfit: lookNum,
+              slot: removedSlotTag,
+              total: pageBagPayload.total,
+              remaining_looks: baggedLooks.size,
+            });
+
+            const pageNote = reply.ok
+              ? ''
+              : ' (page did not confirm updating the bag yet)';
+            const linkNote =
+              pageBagPayload.links.length > 0
+                ? ` Updated checkout ${pageBagPayload.links.length === 1 ? 'link is' : 'links are'} on the page (${pageBagPayload.links.map((l) => l.store).join(', ')}).`
+                : '';
+
+            return `REMOVED: Took ${removedDesc} out of the bag${pageNote}. ${summarizeRemainingBag(pageBagPayload)}${linkNote} Say what is left and the new total from this result.`;
+          };
+
+          const rawSlot = slot.trim().toLowerCase();
+          if (rawSlot === 'all') {
+            baggedLooks.delete(bagLookKey);
+            baggedLookTotals.delete(bagLookKey);
+            return await commitBagState(`all of Look ${lookNum} (${outfit.name})`, 'all');
+          }
+
+          const matchedPiece =
+            findPieceInOutfit(outfit, slot) ??
+            bagEntry.sourcePieces.find(
+              (p) =>
+                p.slot.trim().toLowerCase() === rawSlot ||
+                normalizeSlotKey(p.slot) === normalizeSlotKey(rawSlot),
+            );
+          const targetSlot = matchedPiece?.slot ?? slot.trim();
+          const targetLower = targetSlot.trim().toLowerCase();
+          const targetNorm = normalizeSlotKey(targetSlot);
+
+          const isSlotInBag =
+            bagEntry.addedSlots.has(targetLower) || bagEntry.addedSlots.has(targetNorm);
+          if (!isSlotInBag) {
+            return `NOT DONE: ${targetSlot} is not in the bag for Look ${lookNum} (${outfit.name}). ${summarizeRemainingBag(combineBagPayloads(baggedLooks.values()))}`;
+          }
+
+          const nextRemovedSlots = new Set(bagEntry.removedSlots);
+          nextRemovedSlots.add(targetLower);
+          nextRemovedSlots.add(targetNorm);
+
+          const remainingAddedPieces = bagEntry.sourcePieces.filter((p) => {
+            const pl = p.slot.trim().toLowerCase();
+            const pn = normalizeSlotKey(p.slot);
+            if (nextRemovedSlots.has(pl) || nextRemovedSlots.has(pn)) return false;
+            return bagEntry.addedSlots.has(pl) || bagEntry.addedSlots.has(pn);
+          });
+
+          const removedLabel = matchedPiece
+            ? `${matchedPiece.item.title} (${targetSlot})`
+            : targetSlot;
+
+          if (remainingAddedPieces.length === 0) {
+            baggedLooks.delete(bagLookKey);
+            baggedLookTotals.delete(bagLookKey);
+            return await commitBagState(removedLabel, targetSlot);
+          }
+
+          const remainingTotal = roundMoney(
+            remainingAddedPieces.reduce(
+              (sum, p) =>
+                sum + (Number.isFinite(p.item.price) && p.item.price > 0 ? p.item.price : 0),
+              0,
+            ),
+          );
+          const filteredOutfit: Outfit = {
+            ...outfit,
+            pieces: remainingAddedPieces,
+            total: remainingTotal,
+          };
+
+          const finishSlowWork = beginSlowWork('remove_from_bag', toolCallId);
+          try {
+            let addToBagFn = options.deps?.addToBag;
+            let usedMock = false;
+            let storeImportFailed = false;
+            if (!addToBagFn) {
+              const storeMod = await loadStoreModuleFn();
+              if (storeMod === null) {
+                storeImportFailed = true;
+              } else if (typeof storeMod.addToBag === 'function') {
+                addToBagFn = storeMod.addToBag;
+              }
+            }
+
+            let bagOut: BagOut;
+            if (addToBagFn) {
+              bagOut = await addToBagFn(filteredOutfit, bagEntry.sizes, bagEntry.gender);
+            } else if (storeImportFailed) {
+              usedMock = true;
+              bagOut = mockAddToBag(filteredOutfit, bagEntry.sizes, bagEntry.gender);
+            } else {
+              return 'NOT DONE: Store shopping bag is not available right now.';
+            }
+
+            const newLookPayload = bagOutToPagePayload(bagOut, filteredOutfit, bagEntry.sizes);
+            if (!usedMock && !hasRealCart(bagOut)) {
+              return `NOT DONE: Could not rebuild the bag without ${removedLabel}; the remaining items could not be placed in a store cart.`;
+            }
+
+            const newNotAdded: BagNotAdded[] = [];
+            for (const store of newLookPayload.stores) {
+              for (const line of store.not_added) {
+                newNotAdded.push({
+                  store: store.store,
+                  title: line.title,
+                  reason: line.reason ?? 'unavailable',
+                });
+              }
+            }
+
+            const addedItemsTotal = roundMoney(
+              newLookPayload.stores.reduce(
+                (sum, store) =>
+                  sum +
+                  store.added.reduce(
+                    (s, line) =>
+                      s + (Number.isFinite(line.price) && line.price > 0 ? line.price : 0),
+                    0,
+                  ),
+                0,
+              ),
+            );
+            const newEffectiveTotal =
+              Number.isFinite(newLookPayload.total) && newLookPayload.total > 0
+                ? roundMoney(newLookPayload.total)
+                : addedItemsTotal;
+
+            baggedLookTotals.set(bagLookKey, newEffectiveTotal);
+            baggedLooks.set(bagLookKey, {
+              ...bagEntry,
+              removedSlots: nextRemovedSlots,
+              addedSlots: extractAddedSlots(newLookPayload, filteredOutfit.pieces),
+              payload: newLookPayload,
+              bagOut,
+              notAdded: newNotAdded,
+              usedMock,
+            });
+
+            return await commitBagState(removedLabel, targetSlot);
+          } finally {
+            finishSlowWork();
+          }
+        },
+      ),
     }),
     ...orderController.tools,
   };

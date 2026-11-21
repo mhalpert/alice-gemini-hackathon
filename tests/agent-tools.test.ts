@@ -17,6 +17,7 @@ import type { Critique } from '../src/brain/critic.ts';
 import type { SearchOpts } from '../src/store/catalog.ts';
 import type { BagLineAdded, BagLineNotAdded } from '../src/store/index.ts';
 import type { PageSender } from '../src/agent/page.ts';
+import type { OrderController } from '../src/agent/order.ts';
 import { createCallStateStore } from '../src/agent/state.ts';
 import {
   DUPLICATE_WINDOW_MS,
@@ -259,7 +260,7 @@ async function flushMicrotasks(): Promise<void> {
   }
 }
 
-test('createAgentTools builds 12 anonymous tools accepted by LiveKit ToolContext', () => {
+test('createAgentTools builds 13 anonymous tools accepted by LiveKit ToolContext', () => {
   const tools = createAgentTools({ room: 'test-room', log: () => {} });
   const expectedNames = [
     'remember',
@@ -270,6 +271,7 @@ test('createAgentTools builds 12 anonymous tools accepted by LiveKit ToolContext
     'show_on_me',
     'swap_piece',
     'add_to_bag',
+    'remove_from_bag',
     'show_product',
     'hide_product',
     'show_all_looks',
@@ -3658,4 +3660,302 @@ test('swap_piece on a partly or fully bagged look warns NOT IN THE BAG YET and a
   assert.equal(thirdBag.startsWith('Already in the bag.'), false);
   assert.match(thirdBag, /Added 3 pieces, total \$522\.95 for Look 1/);
   assert.match(thirdBag, /Swapped Top #3/);
+});
+
+test('remove_from_bag removes one slot, removes all, handles not bagged/not in bag, preserves screen look & other looks, and lets add_to_bag restore all', async () => {
+  const logs: RecordedLog[] = [];
+  const { page, calls } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-remove-bag', log: () => {} });
+  let invalidateCount = 0;
+  let bagSettledCalls = 0;
+  let bagFailedCalls = 0;
+  let addToBagCalls = 0;
+  const addToBagInvocations: Array<{ pieces: string[]; sizes: Record<string, string> }> = [];
+
+  const fakeOrderController: OrderController = {
+    purchaseReady: false,
+    onBagSettled() {
+      bagSettledCalls += 1;
+    },
+    onBagFailed() {
+      bagFailedCalls += 1;
+    },
+    invalidateReview() {
+      invalidateCount += 1;
+    },
+    getState() {
+      return {
+        settledBag: null,
+        settledBagFingerprint: null,
+        activeReview: null,
+        attemptedOrderIds: {},
+      };
+    },
+    tools: {},
+  };
+
+  const outfits = makeSampleOutfits();
+  const tools = createAgentTools({
+    room: 'r-remove-bag',
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    page,
+    state,
+    orderController: fakeOrderController,
+    deps: makeFakeDeps({
+      tryOnExtras: null,
+      async buildOutfits(_brief, opts) {
+        const cloned = structuredClone(outfits);
+        cloned.forEach((o, i) => opts?.onOutfit?.(o, i));
+        return {
+          outfits: cloned,
+          source: 'live',
+          timing: { first_outfit_ms: 10, total_ms: 15 },
+          problems: [],
+        };
+      },
+      async addToBag(bagOutfit, sizes): Promise<BagOut> {
+        addToBagCalls += 1;
+        addToBagInvocations.push({
+          pieces: bagOutfit.pieces.map((p) => p.slot),
+          sizes: { ...sizes },
+        });
+        const byStore = new Map<string, typeof bagOutfit.pieces>();
+        for (const p of bagOutfit.pieces) {
+          const list = byStore.get(p.item.store) ?? [];
+          list.push(p);
+          byStore.set(p.item.store, list);
+        }
+        const carts = Array.from(byStore.entries()).map(([store, pieces]) => {
+          const subtotal = Math.round(pieces.reduce((s, p) => s + p.item.price, 0) * 100) / 100;
+          return {
+            store,
+            store_domain: pieces[0]!.item.store_domain,
+            cart_id: `cart-${store.toLowerCase()}-${addToBagCalls}`,
+            continue_url: `https://${store.toLowerCase()}.example/cart/${addToBagCalls}`,
+            total_usd: subtotal,
+            added: pieces.map((p) => ({
+              variant_id: p.item.variant_id,
+              title: p.item.title,
+              size: sizes[p.slot.toLowerCase()] ?? null,
+            })),
+            not_added: [],
+            ms: 10,
+          };
+        });
+        const total = Math.round(carts.reduce((s, c) => s + (c.total_usd ?? 0), 0) * 100) / 100;
+        return {
+          carts,
+          summary: `Added ${bagOutfit.pieces.length} pieces.`,
+          total_usd: total,
+        };
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute({ occasion: 'dinner', budget_usd: 300 }, fakeToolOpts('b1'));
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+  calls.length = 0;
+
+  // 1) Remove when look is NOT bagged -> NOT DONE, no store call, no bagReady.
+  const notBagged = await tools.remove_from_bag.execute({ slot: 'shoes' }, fakeToolOpts('rm0'));
+  assert.match(notBagged, /^NOT DONE:/);
+  assert.match(notBagged, /not in the bag/i);
+  assert.equal(addToBagCalls, 0);
+  assert.equal(calls.some((c) => c.action === 'bagReady'), false);
+
+  // 2) Bag Look 1 (top $45, bottom $60, shoes $55 = $160).
+  const initialBag = await tools.add_to_bag.execute(
+    { outfit: 1, sizes: { top: 'M', bottom: '32', shoes: '10' } },
+    fakeToolOpts('bag1'),
+  );
+  assert.match(initialBag, /Added 3 pieces, total \$160/);
+  assert.equal(addToBagCalls, 1);
+  const look1SlotsBefore = [...state.get().looks.find((l) => l.number === 1)!.slots];
+
+  // 3) Remove a slot not in the bag -> NOT DONE, no store call.
+  const missingSlot = await tools.remove_from_bag.execute({ slot: 'layer' }, fakeToolOpts('rm-miss'));
+  assert.match(missingSlot, /^NOT DONE:/);
+  assert.match(missingSlot, /not in the bag/i);
+  assert.equal(addToBagCalls, 1);
+
+  // 4) Remove one slot (shoes): rebuilds cart with [top, bottom] & same sizes, updates bagReady, preserves look on screen, invalidates review.
+  calls.length = 0;
+  const invBefore = invalidateCount;
+  const rmShoes = await tools.remove_from_bag.execute({ slot: 'shoes' }, fakeToolOpts('rm-shoes'));
+  assert.match(rmShoes, /^REMOVED:/);
+  assert.match(rmShoes, /Merino Knit Polo - Espresso/);
+  assert.match(rmShoes, /Pleated Wool Trouser - Charcoal/);
+  assert.match(rmShoes, /\$105/);
+  assert.equal(addToBagCalls, 2);
+  assert.deepEqual(addToBagInvocations[1]!.pieces, ['top', 'bottom']);
+  assert.deepEqual(addToBagInvocations[1]!.sizes, { top: 'M', bottom: '32', shoes: '10' });
+  assert.equal(invalidateCount, invBefore + 1, 'remove_from_bag must invalidate order review');
+  assert.equal(calls.some((c) => c.action === 'updateOutfit'), false, 'look on screen must not change');
+  assert.deepEqual(
+    state.get().looks.find((l) => l.number === 1)!.slots,
+    look1SlotsBefore,
+    'state look slots must remain unchanged',
+  );
+  const bagAfterShoes = calls.filter((c) => c.action === 'bagReady').at(-1)!.payload as PageActions['bagReady'];
+  assert.equal(bagAfterShoes.total, 105);
+  assert.equal(
+    bagAfterShoes.stores.flatMap((s) => s.added).length,
+    2,
+    'bagReady must contain only the 2 remaining pieces',
+  );
+
+  // 5) Remove 'all' on Look 1: does NOT call store, sends empty bagReady with total 0.
+  calls.length = 0;
+  const failBefore = bagFailedCalls;
+  const rmAll = await tools.remove_from_bag.execute({ slot: 'all' }, fakeToolOpts('rm-all'));
+  assert.match(rmAll, /^REMOVED:/);
+  assert.match(rmAll, /empty|\$0/i);
+  assert.equal(addToBagCalls, 2, 'removing all must NOT call store addToBag');
+  assert.equal(bagFailedCalls, failBefore + 1);
+  const emptyBag = calls.filter((c) => c.action === 'bagReady').at(-1)!.payload as PageActions['bagReady'];
+  assert.deepEqual(emptyBag, { stores: [], links: [], total: 0 });
+  assert.equal(state.get().bag?.total, 0);
+
+  // 6) Later add_to_bag for Look 1 puts all 3 pieces back (clears removed set, even within 15s dedupe window).
+  const reAdded = await tools.add_to_bag.execute(
+    { outfit: 1, sizes: { top: 'M', bottom: '32', shoes: '10' } },
+    fakeToolOpts('bag-again'),
+  );
+  assert.match(reAdded, /Added 3 pieces, total \$160/);
+  assert.equal(addToBagCalls, 3);
+  assert.deepEqual(addToBagInvocations[2]!.pieces, ['top', 'bottom', 'shoes']);
+
+  // 7) Multi-look bag: add Look 2 as well, then remove all of Look 2 -> Look 1 stays in bagReady payload.
+  const look2Total = outfits[1]!.total;
+  const bag2 = await tools.add_to_bag.execute(
+    { outfit: 2, sizes: { top: 'M' } },
+    fakeToolOpts('bag-look2'),
+  );
+  assert.match(bag2, new RegExp(`Added ${outfits[1]!.pieces.length} pieces, total \\$${look2Total}`));
+  assert.equal(addToBagCalls, 4);
+
+  calls.length = 0;
+  const settledBefore = bagSettledCalls;
+  const rmLook2 = await tools.remove_from_bag.execute({ outfit: 2, slot: 'all' }, fakeToolOpts('rm-look2'));
+  assert.match(rmLook2, /^REMOVED:/);
+  assert.match(rmLook2, /\$160/);
+  assert.equal(addToBagCalls, 4, 'removing all of Look 2 must not call store');
+  assert.equal(bagSettledCalls, settledBefore + 1, 'Look 1 remains a settled real bag');
+  const afterRemoveLook2 = calls.filter((c) => c.action === 'bagReady').at(-1)!.payload as PageActions['bagReady'];
+  assert.equal(afterRemoveLook2.total, 160);
+  assert.equal(afterRemoveLook2.stores.flatMap((s) => s.added).length, 3);
+});
+
+test('search_products numbers results and swap_piece supports exact pick (without calling brain swap) and rejects out-of-range pick', async () => {
+  const logs: RecordedLog[] = [];
+  const { page, calls } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-pick-swap', log: () => {} });
+  let brainSwapCalls = 0;
+  let tryOnCalls = 0;
+  let collageCalls = 0;
+
+  const linenShirt = makeItem({
+    id: 'shirt-linen-1',
+    variant_id: 'var-linen-1',
+    title: 'Crisp White Linen Shirt',
+    price: 78,
+    store: 'Buck Mason',
+    store_domain: 'buckmason.myshopify.com',
+  });
+  const oxfordShirt = makeItem({
+    id: 'shirt-ox-2',
+    variant_id: 'var-ox-2',
+    title: 'Washed Oxford Shirt',
+    price: 64,
+    store: 'Everlane',
+    store_domain: 'everlane.myshopify.com',
+  });
+
+  const tools = createAgentTools({
+    room: 'r-pick-swap',
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    page,
+    state,
+    deps: makeFakeDeps({
+      tryOnExtras: null,
+      async searchProducts(): Promise<SearchResult> {
+        return { items: [linenShirt, oxfordShirt], source: 'live', ms: 20 };
+      },
+      async swapPiece(outfit, slot, request, brief, opts) {
+        brainSwapCalls += 1;
+        return makeFakeDeps().swapPiece!(outfit, slot, request, brief, opts);
+      },
+      async tryOn(_jpeg, outfit) {
+        tryOnCalls += 1;
+        return { url: `https://media.local/tryon-${outfit.number}-v${tryOnCalls}.jpg`, path: `/tmp/t-${tryOnCalls}.jpg`, ms: 10, id: `t-${tryOnCalls}` };
+      },
+      async outfitCollage(outfit) {
+        collageCalls += 1;
+        return `https://media.local/collage-${outfit.number}-v${collageCalls}.jpg`;
+      },
+    }),
+  });
+
+  await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute({ occasion: 'beach dinner', budget_usd: 300 }, fakeToolOpts('b1'));
+  await flushMicrotasks();
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+
+  // 1) Pick before any search -> NOT DONE telling to search first; zero brain swaps.
+  const noSearch = await tools.swap_piece.execute({ slot: 'top', pick: 1 }, fakeToolOpts('sw-nosearch'));
+  assert.match(noSearch, /^NOT DONE:/);
+  assert.match(noSearch, /search_products/i);
+  assert.equal(brainSwapCalls, 0);
+
+  // 2) search_products returns numbered results.
+  const searchRes = await tools.search_products.execute({ query: 'white linen shirt' }, fakeToolOpts('sr1'));
+  assert.match(searchRes, /1\. Crisp White Linen Shirt \(\$78, Buck Mason\)/);
+  assert.match(searchRes, /2\. Washed Oxford Shirt \(\$64, Everlane\)/);
+
+  // 3) Out-of-range picks (0 and 5) -> NOT DONE, zero brain swaps.
+  const pickZero = await tools.swap_piece.execute({ slot: 'top', pick: 0 }, fakeToolOpts('sw-zero'));
+  assert.match(pickZero, /^NOT DONE:/);
+  assert.match(pickZero, /search_products/i);
+  const pickHigh = await tools.swap_piece.execute({ slot: 'top', pick: 5 }, fakeToolOpts('sw-high'));
+  assert.match(pickHigh, /^NOT DONE:/);
+  assert.match(pickHigh, /out of range/i);
+  assert.equal(brainSwapCalls, 0);
+
+  // 4) Valid pick: 1 -> replaces top with exact linenShirt ($78), recomputes total (78+60+55=193), does NOT call brain swap!
+  calls.length = 0;
+  const tryOnBefore = tryOnCalls;
+  const collageBefore = collageCalls;
+  const pickRes = await tools.swap_piece.execute({ slot: 'top', pick: 1 }, fakeToolOpts('sw-pick1'));
+  await flushMicrotasks();
+
+  assert.equal(brainSwapCalls, 0, 'swap_piece with pick must NOT call brain swapPiece');
+  assert.match(pickRes, /Crisp White Linen Shirt/);
+  assert.match(pickRes, /Say the exact product name "Crisp White Linen Shirt"/);
+  assert.match(pickRes, /\$193/);
+  assert.equal(tryOnCalls, tryOnBefore + 1);
+  assert.equal(collageCalls, collageBefore + 1);
+
+  const updateCall = calls.find((c) => c.action === 'updateOutfit');
+  assert.ok(updateCall, 'updateOutfit must be sent on pick swap');
+  const updatedData = (updateCall!.payload as PageActions['updateOutfit']).data;
+  assert.equal(updatedData.total, 193);
+  assert.equal(updatedData.pieces.find((p) => p.slot === 'top')?.item.id, 'shirt-linen-1');
+  assert.equal(updatedData.pieces.find((p) => p.slot === 'bottom')?.item.price, 60);
+  assert.equal(updatedData.pieces.find((p) => p.slot === 'shoes')?.item.price, 55);
+
+  const swapLog = logs.find((l) => l.ev === 'swap');
+  assert.ok(swapLog);
+  assert.equal(swapLog!.data?.pick, 1);
+  assert.equal(swapLog!.data?.title, 'Crisp White Linen Shirt');
+  assert.equal(swapLog!.data?.total, 193);
+
+  // 5) Free-text swap path ALSO includes exact new product name and instructs her to say it.
+  const freeRes = await tools.swap_piece.execute(
+    { slot: 'shoes', request: 'brown suede loafers' },
+    fakeToolOpts('sw-free'),
+  );
+  assert.equal(brainSwapCalls, 1);
+  assert.match(freeRes, /Swapped shoes \(brown suede loafers\)/);
+  assert.match(freeRes, /Say the exact product name "Swapped shoes \(brown suede loafers\)"/);
 });
