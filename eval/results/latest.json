@@ -1,0 +1,2896 @@
+{
+  "version": 1,
+  "run_at": "2026-11-21T19:00:55.291Z",
+  "git_commit": "bbe90b9",
+  "results": [
+    {
+      "id": "first-date-men",
+      "gender": "men",
+      "occasion": "first date at a cocktail bar",
+      "budget_usd": 150,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          8,
+          7,
+          8
+        ],
+        "presentable_count": 3,
+        "presentable": true,
+        "avg": 7.67,
+        "min": 7,
+        "issues": [
+          "The retro patterned polo with cream collar clashes slightly in aesthetic and texture with the crocodile-embossed faux leather moto jacket."
+        ],
+        "outfit_issues": [
+          [],
+          [
+            "The retro patterned polo with cream collar clashes slightly in aesthetic and texture with the crocodile-embossed faux leather moto jacket."
+          ],
+          []
+        ],
+        "outfit_names": [
+          "Knit",
+          "Burgundy Evening",
+          "Warm Earth"
+        ],
+        "outfit_totals": [
+          126.97,
+          143.48,
+          138.96
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 13715,
+        "total_ms": 17548,
+        "usd": 0.061805,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          5,
+          6,
+          8
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 6.33,
+        "min": 5,
+        "issues": [
+          "Casual black thermal top with sporty red trim clashes in both color and formality with dressy dark brown leather loafers and a gold-and-brown watch",
+          "Outfit total ($160.97) exceeds the $150 budget",
+          "white sneakers are a bit too casual for an evening cocktail bar date and do not coordinate with the black belt",
+          "pairing a dark navy top with black pants looks muddled without a sharper footwear anchor"
+        ],
+        "outfit_issues": [
+          [
+            "Casual black thermal top with sporty red trim clashes in both color and formality with dressy dark brown leather loafers and a gold-and-brown watch",
+            "Outfit total ($160.97) exceeds the $150 budget"
+          ],
+          [
+            "white sneakers are a bit too casual for an evening cocktail bar date and do not coordinate with the black belt",
+            "pairing a dark navy top with black pants looks muddled without a sharper footwear anchor"
+          ],
+          []
+        ],
+        "outfit_names": [
+          "Smart Casual Blazer Look",
+          "Chic Monochrome Ensemble",
+          "Effortless Velvet Edge"
+        ],
+        "outfit_totals": [
+          160.97,
+          67.97,
+          404.94
+        ],
+        "dress_code_hits": [],
+        "over_budget": 2,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1864,
+        "total_ms": 2081,
+        "usd": 0.001034,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "first-date-women",
+      "gender": "women",
+      "occasion": "first date at a cocktail bar",
+      "budget_usd": 150,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          7,
+          5,
+          5
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 5.67,
+        "min": 5,
+        "issues": [
+          "Casual ribbed knit sock boots slightly dress down the satin midi skirt and metallic clutch",
+          "chunky lug-sole moto boots clash with the sleek emerald velvet cocktail dress",
+          "blue polka-dot scarf charm on the bag clashes with the emerald green dress",
+          "gold hardware on the boots clashes with silver hardware on the dress, jacket, and bag",
+          "Layering a casual brown ribbed long-sleeve knit tee underneath an open-back blazer defeats the entire purpose of the open-back cutout and creates an awkward, mismatched back view.",
+          "The daytime casual ribbed brown top clashes in style and formality with the edgy evening faux leather pants and open-back blazer."
+        ],
+        "outfit_issues": [
+          [
+            "Casual ribbed knit sock boots slightly dress down the satin midi skirt and metallic clutch"
+          ],
+          [
+            "chunky lug-sole moto boots clash with the sleek emerald velvet cocktail dress",
+            "blue polka-dot scarf charm on the bag clashes with the emerald green dress",
+            "gold hardware on the boots clashes with silver hardware on the dress, jacket, and bag"
+          ],
+          [
+            "Layering a casual brown ribbed long-sleeve knit tee underneath an open-back blazer defeats the entire purpose of the open-back cutout and creates an awkward, mismatched back view.",
+            "The daytime casual ribbed brown top clashes in style and formality with the edgy evening faux leather pants and open-back blazer."
+          ]
+        ],
+        "outfit_names": [
+          "Burgundy Satin Softness",
+          "Emerald Velvet Edge",
+          "Chocolate & Leather"
+        ],
+        "outfit_totals": [
+          145.95,
+          134.63,
+          145.96
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 17362,
+        "total_ms": 18830,
+        "usd": 0.097653,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          5,
+          8,
+          6
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 6.33,
+        "min": 5,
+        "issues": [
+          "Extreme clear platform heels with rhinestone silver buckles clash with the sophisticated satin midi slip dress and gold clutch",
+          "Silver buckle hardware on the shoes clashes with the gold clutch",
+          "Satin slip dress with bust cups borders on nightwear without a structured shoe or layer to elevate it",
+          "Overly ornate baroque pearl cross necklace clashes with the sleek, modern draped olive mini dress and minimalist black strappy heels"
+        ],
+        "outfit_issues": [
+          [
+            "Extreme clear platform heels with rhinestone silver buckles clash with the sophisticated satin midi slip dress and gold clutch",
+            "Silver buckle hardware on the shoes clashes with the gold clutch",
+            "Satin slip dress with bust cups borders on nightwear without a structured shoe or layer to elevate it"
+          ],
+          [],
+          [
+            "Overly ornate baroque pearl cross necklace clashes with the sleek, modern draped olive mini dress and minimalist black strappy heels"
+          ]
+        ],
+        "outfit_names": [
+          "Chic Cocktail Dress",
+          "Edgy Sophistication",
+          "Romantic Velvet"
+        ],
+        "outfit_totals": [
+          65.96,
+          212.91,
+          70.96
+        ],
+        "dress_code_hits": [],
+        "over_budget": 1,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1528,
+        "total_ms": 1771,
+        "usd": 0.000889,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "wedding-men",
+      "gender": "men",
+      "occasion": "outdoor summer wedding guest",
+      "budget_usd": 200,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          6,
+          6,
+          5
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 5.67,
+        "min": 5,
+        "issues": [
+          "short-sleeve resort knit polo is too casual for a wedding guest dress code",
+          "wide casual belt with silver buckle clashes with the dressier polished loafers with gold hardware",
+          "studded western belt is too casual and edgy for a wedding guest outfit and clashes in style with the preppy oxford shirt and woven dress loafers",
+          "Backless suede clog/slipper shoes are far too casual and sloppy for a wedding guest.",
+          "Noticeable tonal mismatch between the light tan suede mules and the dark brown suede belt."
+        ],
+        "outfit_issues": [
+          [
+            "short-sleeve resort knit polo is too casual for a wedding guest dress code",
+            "wide casual belt with silver buckle clashes with the dressier polished loafers with gold hardware"
+          ],
+          [
+            "studded western belt is too casual and edgy for a wedding guest outfit and clashes in style with the preppy oxford shirt and woven dress loafers"
+          ],
+          [
+            "Backless suede clog/slipper shoes are far too casual and sloppy for a wedding guest.",
+            "Noticeable tonal mismatch between the light tan suede mules and the dark brown suede belt."
+          ]
+        ],
+        "outfit_names": [
+          "Warm Olive Tailoring",
+          "Sage and Slate",
+          "Coastal Linen"
+        ],
+        "outfit_totals": [
+          125.97,
+          132.98,
+          170.97
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 16091,
+        "total_ms": 16092,
+        "usd": 0.045224,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          3,
+          2,
+          2
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 2.33,
+        "min": 2,
+        "issues": [
+          "cream pants violate the no-cream rule for weddings",
+          "short-sleeve camp shirt is too casual for a wedding guest",
+          "belt has black leather trim that clashes with the dark brown leather loafers",
+          "accessory slot contains a pair of striped shorts instead of an accessory",
+          "missing at least one visible accessory",
+          "no shirt layered underneath the blazer (or blazer placed in the top slot without an undershirt/dress shirt)",
+          "white sneakers are too casual for most wedding guest dress codes",
+          "Distressed drawstring shorts are far too casual and inappropriate for a wedding guest",
+          "White shirt and white shoes violate the no-white rule for wedding guests",
+          "Mismatched formality between a long-sleeve dress shirt and ragged casual shorts"
+        ],
+        "outfit_issues": [
+          [
+            "cream pants violate the no-cream rule for weddings",
+            "short-sleeve camp shirt is too casual for a wedding guest",
+            "belt has black leather trim that clashes with the dark brown leather loafers"
+          ],
+          [
+            "accessory slot contains a pair of striped shorts instead of an accessory",
+            "missing at least one visible accessory",
+            "no shirt layered underneath the blazer (or blazer placed in the top slot without an undershirt/dress shirt)",
+            "white sneakers are too casual for most wedding guest dress codes"
+          ],
+          [
+            "Distressed drawstring shorts are far too casual and inappropriate for a wedding guest",
+            "White shirt and white shoes violate the no-white rule for wedding guests",
+            "Mismatched formality between a long-sleeve dress shirt and ragged casual shorts"
+          ]
+        ],
+        "outfit_names": [
+          "Casual Linen Comfort",
+          "Summer Garden Party",
+          "Coastal Chic"
+        ],
+        "outfit_totals": [
+          369.93,
+          80.96,
+          168.92
+        ],
+        "dress_code_hits": [
+          {
+            "outfit_index": 1,
+            "outfit_name": "Casual Linen Comfort",
+            "slot": "bottom",
+            "title": "Mac Chino Straight Pants - Cream"
+          }
+        ],
+        "over_budget": 1,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1749,
+        "total_ms": 2006,
+        "usd": 0.001006,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "wedding-women",
+      "gender": "women",
+      "occasion": "outdoor summer wedding guest",
+      "budget_usd": 150,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          6,
+          5,
+          4
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 5,
+        "min": 4,
+        "issues": [
+          "the heavy dark tortoise-and-gold clutch clashes with the soft pastel sage cotton dress and daytime outdoor setting",
+          "cotton poplin milkmaid dress and oversized thin hoop earrings read slightly too casual for a wedding guest",
+          "Flat thong sandals are too casual for a wedding guest outfit and will cause the floor-length jumpsuit hem to drag on the ground",
+          "Overall look reads more like casual resort wear than wedding guest attire",
+          "The top is an athletic/loungewear long-sleeve jersey wrap top with thumbholes, which is far too casual and mismatched in formality for a wedding guest outfit and clashes with the dressy satin skirt.",
+          "Long sleeves in heavy jersey fabric are not ideal for an outdoor summer wedding."
+        ],
+        "outfit_issues": [
+          [
+            "the heavy dark tortoise-and-gold clutch clashes with the soft pastel sage cotton dress and daytime outdoor setting",
+            "cotton poplin milkmaid dress and oversized thin hoop earrings read slightly too casual for a wedding guest"
+          ],
+          [
+            "Flat thong sandals are too casual for a wedding guest outfit and will cause the floor-length jumpsuit hem to drag on the ground",
+            "Overall look reads more like casual resort wear than wedding guest attire"
+          ],
+          [
+            "The top is an athletic/loungewear long-sleeve jersey wrap top with thumbholes, which is far too casual and mismatched in formality for a wedding guest outfit and clashes with the dressy satin skirt.",
+            "Long sleeves in heavy jersey fabric are not ideal for an outdoor summer wedding."
+          ]
+        ],
+        "outfit_names": [
+          "Sage Romance",
+          "Chocolate Linen",
+          "Plum & Lavender"
+        ],
+        "outfit_totals": [
+          93.96,
+          127.95,
+          107.97
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 15099,
+        "total_ms": 17249,
+        "usd": 0.106985,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          4,
+          2,
+          6
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 4,
+        "min": 2,
+        "issues": [
+          "Off-white/white base dress violates the wedding guest dress code (never wear white, ivory, or cream to a wedding)",
+          "Lace-trim satin slip dress strongly reads as lingerie/nightwear, violating hard dress-code rules and inappropriate for a wedding guest.",
+          "Heavy black lace trim on the icy sage dress clashes with the warm rose gold and pale peach-pink accessories.",
+          "Flat wrap sandals are too casual compared to the rest of the outfit and a wedding guest dress code.",
+          "Jelly thong kitten-heel sandals are too casual and impractical for an outdoor wedding guest outfit",
+          "The plunging halter tropical maxi dress reads more like resort beachwear than polished wedding guest attire"
+        ],
+        "outfit_issues": [
+          [
+            "Off-white/white base dress violates the wedding guest dress code (never wear white, ivory, or cream to a wedding)"
+          ],
+          [
+            "Lace-trim satin slip dress strongly reads as lingerie/nightwear, violating hard dress-code rules and inappropriate for a wedding guest.",
+            "Heavy black lace trim on the icy sage dress clashes with the warm rose gold and pale peach-pink accessories.",
+            "Flat wrap sandals are too casual compared to the rest of the outfit and a wedding guest dress code."
+          ],
+          [
+            "Jelly thong kitten-heel sandals are too casual and impractical for an outdoor wedding guest outfit",
+            "The plunging halter tropical maxi dress reads more like resort beachwear than polished wedding guest attire"
+          ]
+        ],
+        "outfit_names": [
+          "Floral Garden Romance",
+          "Sunny Sage Elegance",
+          "Sunset Chiffon Chic"
+        ],
+        "outfit_totals": [
+          56.98,
+          44.94,
+          100.97
+        ],
+        "dress_code_hits": [
+          {
+            "outfit_index": 1,
+            "outfit_name": "Floral Garden Romance",
+            "slot": "dress",
+            "title": "Floral Lace Up Midi Dress - Off White"
+          }
+        ],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1856,
+        "total_ms": 2014,
+        "usd": 0.000933,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "interview-men",
+      "gender": "men",
+      "occasion": "job interview at a creative agency",
+      "budget_usd": 180,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          8,
+          8,
+          6
+        ],
+        "presentable_count": 2,
+        "presentable": true,
+        "avg": 7.33,
+        "min": 6,
+        "issues": [
+          "boxy light-wash short-sleeve denim camp shirt is too casual and sloppy for a job interview, even at a creative agency"
+        ],
+        "outfit_issues": [
+          [],
+          [],
+          [
+            "boxy light-wash short-sleeve denim camp shirt is too casual and sloppy for a job interview, even at a creative agency"
+          ]
+        ],
+        "outfit_names": [
+          "Burgundy & Grey",
+          "Charcoal & Olive",
+          "Creative Corduroy Suit"
+        ],
+        "outfit_totals": [
+          115.96,
+          155.96,
+          158.96
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 15417,
+        "total_ms": 19665,
+        "usd": 0.050403,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          4,
+          6,
+          5
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 5,
+        "min": 4,
+        "issues": [
+          "top slot contains a blazer instead of a shirt, leaving the outfit without an undershirt",
+          "shiny faux patent leather lug-sole shoes read too flashy for a job interview",
+          "loud floral neck scarf/tie clashes with the monochrome tailoring and has no shirt collar to pair with",
+          "flashy gold and brown watch clashes with the monochrome black, grey, and white palette and violates interview no-flashiness guideline",
+          "cardigan is styled as a standalone top without an undershirt or button-down included in the outfit",
+          "oversized glossy green croc-embossed travel duffle bag is inappropriate and overly flashy for a job interview",
+          "relaxed loungewear-style textured pants are too sloppy for an interview, even at a creative agency"
+        ],
+        "outfit_issues": [
+          [
+            "top slot contains a blazer instead of a shirt, leaving the outfit without an undershirt",
+            "shiny faux patent leather lug-sole shoes read too flashy for a job interview",
+            "loud floral neck scarf/tie clashes with the monochrome tailoring and has no shirt collar to pair with"
+          ],
+          [
+            "flashy gold and brown watch clashes with the monochrome black, grey, and white palette and violates interview no-flashiness guideline",
+            "cardigan is styled as a standalone top without an undershirt or button-down included in the outfit"
+          ],
+          [
+            "oversized glossy green croc-embossed travel duffle bag is inappropriate and overly flashy for a job interview",
+            "relaxed loungewear-style textured pants are too sloppy for an interview, even at a creative agency"
+          ]
+        ],
+        "outfit_names": [
+          "Creative Professional",
+          "Modern Minimalist",
+          "Smart Casual Edge"
+        ],
+        "outfit_totals": [
+          233.99,
+          98.97,
+          166.97
+        ],
+        "dress_code_hits": [
+          {
+            "outfit_index": 1,
+            "outfit_name": "Creative Professional",
+            "slot": "accessory",
+            "title": "Kith Printed Silk Neck Tie - Sage"
+          }
+        ],
+        "over_budget": 1,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1777,
+        "total_ms": 1942,
+        "usd": 0.001009,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "interview-women",
+      "gender": "women",
+      "occasion": "job interview at a bank",
+      "budget_usd": 180,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          4,
+          7,
+          3
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 4.67,
+        "min": 3,
+        "issues": [
+          "moto-style jacket with asymmetric zippers and belt is too casual and edgy for a traditional bank job interview",
+          "belt features flashy gold metal chevron detailing that is inappropriate for a conservative corporate setting",
+          "pull-on trousers do not have belt loops to accommodate the included belt",
+          "White button-down shirt has corset-style seaming and a low-buttoned bust cut that can read too trendy or revealing for a conservative bank interview if the blazer is opened",
+          "Tote bag has edgy moto-inspired hardware and tassels that slightly dress down the formal suiting",
+          "bold striped burgundy sweater clashes terribly with the busy patchwork blazer",
+          "chunky lug-sole biker boots are far too edgy and casual for a conservative bank interview",
+          "overall look lacks the polished, professional aesthetic required for banking"
+        ],
+        "outfit_issues": [
+          [
+            "moto-style jacket with asymmetric zippers and belt is too casual and edgy for a traditional bank job interview",
+            "belt features flashy gold metal chevron detailing that is inappropriate for a conservative corporate setting",
+            "pull-on trousers do not have belt loops to accommodate the included belt"
+          ],
+          [
+            "White button-down shirt has corset-style seaming and a low-buttoned bust cut that can read too trendy or revealing for a conservative bank interview if the blazer is opened",
+            "Tote bag has edgy moto-inspired hardware and tassels that slightly dress down the formal suiting"
+          ],
+          [
+            "bold striped burgundy sweater clashes terribly with the busy patchwork blazer",
+            "chunky lug-sole biker boots are far too edgy and casual for a conservative bank interview",
+            "overall look lacks the polished, professional aesthetic required for banking"
+          ]
+        ],
+        "outfit_names": [
+          "Camel and Oatmeal",
+          "Navy Pinstripe Suiting",
+          "Charcoal and Burgundy"
+        ],
+        "outfit_totals": [
+          169.96,
+          163.95,
+          143.95
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 17443,
+        "total_ms": 20565,
+        "usd": 0.109125,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          2,
+          2,
+          2
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 2,
+        "min": 2,
+        "issues": [
+          "Off-the-shoulder bodycon dress with exposed cleavage is completely inappropriate for a bank job interview",
+          "open-toe clear mule heels violate the closed-toe dress code for a bank interview",
+          "black leather belt clashes with nude/clear shoes",
+          "heather grey jersey maxi skirt is casual loungewear and inappropriate for a corporate bank interview",
+          "tie-front casual shirt is too relaxed for a formal bank interview",
+          "sheer sequin cropped cowl-neck top with exposed bikini bralette is a severe dress-code violation for a bank job interview"
+        ],
+        "outfit_issues": [
+          [
+            "Off-the-shoulder bodycon dress with exposed cleavage is completely inappropriate for a bank job interview"
+          ],
+          [
+            "open-toe clear mule heels violate the closed-toe dress code for a bank interview",
+            "black leather belt clashes with nude/clear shoes",
+            "heather grey jersey maxi skirt is casual loungewear and inappropriate for a corporate bank interview",
+            "tie-front casual shirt is too relaxed for a formal bank interview"
+          ],
+          [
+            "sheer sequin cropped cowl-neck top with exposed bikini bralette is a severe dress-code violation for a bank job interview"
+          ]
+        ],
+        "outfit_names": [
+          "Classic Navy Suit",
+          "Pencil Skirt & Blouse",
+          "Tailored Trouser Look"
+        ],
+        "outfit_totals": [
+          46.46,
+          252.97,
+          107.95
+        ],
+        "dress_code_hits": [],
+        "over_budget": 1,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 3088,
+        "total_ms": 3369,
+        "usd": 0.000996,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "brunch-men",
+      "gender": "men",
+      "occasion": "Sunday brunch",
+      "budget_usd": 120,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          8,
+          6,
+          7
+        ],
+        "presentable_count": 2,
+        "presentable": true,
+        "avg": 7,
+        "min": 6,
+        "issues": [
+          "Western-embroidered baggy trousers feel out of place with the clean, minimalist tee and classic trucker jacket",
+          "Backless suede slipper mules look too much like house slippers when paired with baggy, pooling pant hems",
+          "athletic-sole slip-on loafer sneaker feels awkward with the heavy plaid shacket and cable-knit sweater aesthetic"
+        ],
+        "outfit_issues": [
+          [],
+          [
+            "Western-embroidered baggy trousers feel out of place with the clean, minimalist tee and classic trucker jacket",
+            "Backless suede slipper mules look too much like house slippers when paired with baggy, pooling pant hems"
+          ],
+          [
+            "athletic-sole slip-on loafer sneaker feels awkward with the heavy plaid shacket and cable-knit sweater aesthetic"
+          ]
+        ],
+        "outfit_names": [
+          "Warm Earthy Layers",
+          "Denim & Agave",
+          "Charcoal & Red Plaid"
+        ],
+        "outfit_totals": [
+          118.95,
+          112.96,
+          111.98
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 16664,
+        "total_ms": 17687,
+        "usd": 0.080565,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          6,
+          6,
+          8
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 6.67,
+        "min": 6,
+        "issues": [
+          "Navy chinos clash with the black linen shirt, black belt, and black-and-white loafers",
+          "Total cost ($126.97) slightly exceeds the $120 budget",
+          "Heavily distressed black-wash baseball cap clashes with the clean white linen pants and off-white sneakers",
+          "Paint-splatter tee and torn cap read too sloppy and grunge for a Sunday brunch with linen trousers"
+        ],
+        "outfit_issues": [
+          [
+            "Navy chinos clash with the black linen shirt, black belt, and black-and-white loafers",
+            "Total cost ($126.97) slightly exceeds the $120 budget"
+          ],
+          [
+            "Heavily distressed black-wash baseball cap clashes with the clean white linen pants and off-white sneakers",
+            "Paint-splatter tee and torn cap read too sloppy and grunge for a Sunday brunch with linen trousers"
+          ],
+          []
+        ],
+        "outfit_names": [
+          "Casual Chic Brunch",
+          "Relaxed Streetwear Brunch",
+          "Smart Casual Polo Look"
+        ],
+        "outfit_totals": [
+          126.97,
+          176.97,
+          185.93
+        ],
+        "dress_code_hits": [],
+        "over_budget": 3,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1989,
+        "total_ms": 2237,
+        "usd": 0.00108,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "brunch-women",
+      "gender": "women",
+      "occasion": "Sunday brunch",
+      "budget_usd": 120,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          5,
+          8,
+          4
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 5.67,
+        "min": 4,
+        "issues": [
+          "Delicate sheer cotton-silk organza skirt clashes in weight, season, and style with a heavy wool coat and chunky patent platform loafers",
+          "Chunky multi-strand collar necklace sits awkwardly over a high crew-neck button cardigan",
+          "Shaggy faux fur snow booties clash severely with lightweight summer trousers and a short-sleeve knit top",
+          "Bulky fur booties create awkward proportions under floor-length wide-leg trousers",
+          "Mismatched brown undertones across the mauve-brown trousers, camel coat, chocolate fur booties, and glossy brown bag"
+        ],
+        "outfit_issues": [
+          [
+            "Delicate sheer cotton-silk organza skirt clashes in weight, season, and style with a heavy wool coat and chunky patent platform loafers",
+            "Chunky multi-strand collar necklace sits awkwardly over a high crew-neck button cardigan"
+          ],
+          [],
+          [
+            "Shaggy faux fur snow booties clash severely with lightweight summer trousers and a short-sleeve knit top",
+            "Bulky fur booties create awkward proportions under floor-length wide-leg trousers",
+            "Mismatched brown undertones across the mauve-brown trousers, camel coat, chocolate fur booties, and glossy brown bag"
+          ]
+        ],
+        "outfit_names": [
+          "Cozy Midi Set",
+          "Plaid Denim Chic",
+          "Warm Neutral Layers"
+        ],
+        "outfit_totals": [
+          118.94,
+          108.96,
+          114.94
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 19012,
+        "total_ms": 19291,
+        "usd": 0.051683,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          4,
+          7,
+          6
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 5.67,
+        "min": 4,
+        "issues": [
+          "The plunging bodycon mesh maxi dress reads like nightlife/clubwear and is too revealing for a daytime Sunday brunch.",
+          "Ankle-wrap straps on the sandals will get hidden and bunch awkwardly under a floor-length maxi dress.",
+          "oversized bamboo hoop earrings feel too loud and streetwear-leaning for the understated neutral linen base",
+          "athletic sock-knit running sneakers clash with the fitted keyhole top and front-slit denim midi skirt"
+        ],
+        "outfit_issues": [
+          [
+            "The plunging bodycon mesh maxi dress reads like nightlife/clubwear and is too revealing for a daytime Sunday brunch.",
+            "Ankle-wrap straps on the sandals will get hidden and bunch awkwardly under a floor-length maxi dress."
+          ],
+          [
+            "oversized bamboo hoop earrings feel too loud and streetwear-leaning for the understated neutral linen base"
+          ],
+          [
+            "athletic sock-knit running sneakers clash with the fitted keyhole top and front-slit denim midi skirt"
+          ]
+        ],
+        "outfit_names": [
+          "Floral Wrap Dress Brunch Look",
+          "Chic Linen Pants Ensemble",
+          "Denim Skirt Casual Vibe"
+        ],
+        "outfit_totals": [
+          60.96,
+          127.96,
+          80.95
+        ],
+        "dress_code_hits": [],
+        "over_budget": 1,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1774,
+        "total_ms": 2082,
+        "usd": 0.001003,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "festival-men",
+      "gender": "men",
+      "occasion": "desert music festival",
+      "budget_usd": 120,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          8,
+          8,
+          6
+        ],
+        "presentable_count": 2,
+        "presentable": true,
+        "avg": 7.33,
+        "min": 6,
+        "issues": [
+          "The neon pink, yellow, and turquoise beading on the bucket hat clashes with the burnt orange collegiate graphic on the t-shirt.",
+          "The preppy, clean-cut light denim shorts don't quite match the streetwear aesthetic of the oversized graphic tee and beaded hat."
+        ],
+        "outfit_issues": [
+          [],
+          [],
+          [
+            "The neon pink, yellow, and turquoise beading on the bucket hat clashes with the burnt orange collegiate graphic on the t-shirt.",
+            "The preppy, clean-cut light denim shorts don't quite match the streetwear aesthetic of the oversized graphic tee and beaded hat."
+          ]
+        ],
+        "outfit_names": [
+          "Earthy Desert Linen",
+          "Monochrome Mesh",
+          "Desert Denim"
+        ],
+        "outfit_totals": [
+          86.97,
+          85.96,
+          100.96
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 12482,
+        "total_ms": 17363,
+        "usd": 0.107129,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          5,
+          4,
+          4
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 4.33,
+        "min": 4,
+        "issues": [
+          "Preppy black-and-white penny loafers are completely impractical for walking in sand/dirt at a desert music festival and clash in style with heavily distressed denim shorts",
+          "open-toe slide sandals are completely impractical for walking all day in desert dust and festival crowds",
+          "a bulky weekender duffle bag with tan leather trim is luggage, not a wearable festival accessory, and clashes with the black and grey palette",
+          "heavy fleece joggers are too warm for a desert music festival",
+          "burgundy sweatpants clash in both color and aesthetic with the blue-graphic tee and beige palm straw bucket hat"
+        ],
+        "outfit_issues": [
+          [
+            "Preppy black-and-white penny loafers are completely impractical for walking in sand/dirt at a desert music festival and clash in style with heavily distressed denim shorts"
+          ],
+          [
+            "open-toe slide sandals are completely impractical for walking all day in desert dust and festival crowds",
+            "a bulky weekender duffle bag with tan leather trim is luggage, not a wearable festival accessory, and clashes with the black and grey palette"
+          ],
+          [
+            "heavy fleece joggers are too warm for a desert music festival",
+            "burgundy sweatpants clash in both color and aesthetic with the blue-graphic tee and beige palm straw bucket hat"
+          ]
+        ],
+        "outfit_names": [
+          "Desert Boho",
+          "Rave Oasis",
+          "Sunset Sunset"
+        ],
+        "outfit_totals": [
+          82.47,
+          121.95,
+          56.96
+        ],
+        "dress_code_hits": [],
+        "over_budget": 1,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 2179,
+        "total_ms": 2467,
+        "usd": 0.001018,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "festival-women",
+      "gender": "women",
+      "occasion": "desert music festival",
+      "budget_usd": 120,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          8,
+          6,
+          4
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 6,
+        "min": 4,
+        "issues": [
+          "glossy patent top-handle handbag clashes with the bohemian festival aesthetic and is impractical to carry at a music festival",
+          "heavy knee-high suede boots under a floor-length maxi dress are overly warm for a desert climate",
+          "All-black heavy ponte knit dress is far too hot, stiff, and corporate-minimalist for a desert music festival",
+          "Gold hardware on the western belt clashes with the large silver hoop earrings"
+        ],
+        "outfit_issues": [
+          [],
+          [
+            "glossy patent top-handle handbag clashes with the bohemian festival aesthetic and is impractical to carry at a music festival",
+            "heavy knee-high suede boots under a floor-length maxi dress are overly warm for a desert climate"
+          ],
+          [
+            "All-black heavy ponte knit dress is far too hot, stiff, and corporate-minimalist for a desert music festival",
+            "Gold hardware on the western belt clashes with the large silver hoop earrings"
+          ]
+        ],
+        "outfit_names": [
+          "Canyon Denim",
+          "Rust Desert Boho",
+          "Mirage Monochrome"
+        ],
+        "outfit_totals": [
+          108.99,
+          108.96,
+          92.97
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 13679,
+        "total_ms": 16468,
+        "usd": 0.0722,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          6,
+          6,
+          3
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 5,
+        "min": 3,
+        "issues": [
+          "Sleek black heeled dress booties clash with the warm boho tan/cream palette and are impractical for walking in desert terrain",
+          "black leather sandals clash with the warm brown dress and its matching brown belt",
+          "delicate flat open-toe sandals are impractical for walking all day in desert festival dust and crowds",
+          "top is a sheer mesh corset bodysuit that reads as lingerie",
+          "clashing prints and color palettes between the warm green/brown abstract bodysuit and cool grey/black marble biker shorts",
+          "shiny gold metallic shoulder bag clashes with the grunge aesthetic of the outfit"
+        ],
+        "outfit_issues": [
+          [
+            "Sleek black heeled dress booties clash with the warm boho tan/cream palette and are impractical for walking in desert terrain"
+          ],
+          [
+            "black leather sandals clash with the warm brown dress and its matching brown belt",
+            "delicate flat open-toe sandals are impractical for walking all day in desert festival dust and crowds"
+          ],
+          [
+            "top is a sheer mesh corset bodysuit that reads as lingerie",
+            "clashing prints and color palettes between the warm green/brown abstract bodysuit and cool grey/black marble biker shorts",
+            "shiny gold metallic shoulder bag clashes with the grunge aesthetic of the outfit"
+          ]
+        ],
+        "outfit_names": [
+          "Boho Fringe Vibe",
+          "Desert Sunset Maxi",
+          "Neon Desert Edge"
+        ],
+        "outfit_totals": [
+          111.95,
+          70.95,
+          123.9
+        ],
+        "dress_code_hits": [],
+        "over_budget": 1,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 2372,
+        "total_ms": 2739,
+        "usd": 0.000966,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "club-men",
+      "gender": "men",
+      "occasion": "night out at a club",
+      "budget_usd": 150,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          7,
+          8,
+          8
+        ],
+        "presentable_count": 3,
+        "presentable": true,
+        "avg": 7.67,
+        "min": 7,
+        "issues": [
+          "boxy short-sleeve cuban collar shirt sits awkwardly under a slim moto jacket"
+        ],
+        "outfit_issues": [
+          [
+            "boxy short-sleeve cuban collar shirt sits awkwardly under a slim moto jacket"
+          ],
+          [],
+          []
+        ],
+        "outfit_names": [
+          "Hunter Green Edge",
+          "Sharp Monochrome",
+          "Velvet"
+        ],
+        "outfit_totals": [
+          142.96,
+          140.97,
+          116.45
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 15732,
+        "total_ms": 18695,
+        "usd": 0.083102,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          8,
+          5,
+          5
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 6,
+        "min": 5,
+        "issues": [
+          "Drawstring cargo pants clash in formality and aesthetic with leather derby shoes",
+          "Woven mesh shoulder bag feels out of place for a men's club night out",
+          "Severely over the $150 budget at $481.97 due to the $402 bag",
+          "Oversized chunky grey ribbed sweater is too heavy, slouchy, and casual for a night out at a club",
+          "Warm brown leather Chelsea boots clash with the cool-toned dark grey sweater and black performance chinos"
+        ],
+        "outfit_issues": [
+          [],
+          [
+            "Drawstring cargo pants clash in formality and aesthetic with leather derby shoes",
+            "Woven mesh shoulder bag feels out of place for a men's club night out",
+            "Severely over the $150 budget at $481.97 due to the $402 bag"
+          ],
+          [
+            "Oversized chunky grey ribbed sweater is too heavy, slouchy, and casual for a night out at a club",
+            "Warm brown leather Chelsea boots clash with the cool-toned dark grey sweater and black performance chinos"
+          ]
+        ],
+        "outfit_names": [
+          "The Modern Clubbing Look",
+          "Edgy Streetwear Vibe",
+          "Smart Casual Night Out"
+        ],
+        "outfit_totals": [
+          143.93,
+          481.97,
+          138.98
+        ],
+        "dress_code_hits": [],
+        "over_budget": 1,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 2076,
+        "total_ms": 2421,
+        "usd": 0.001039,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "club-women",
+      "gender": "women",
+      "occasion": "night out at a club",
+      "budget_usd": 120,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          8,
+          7,
+          3
+        ],
+        "presentable_count": 2,
+        "presentable": true,
+        "avg": 6,
+        "min": 3,
+        "issues": [
+          "low-heeled ribbed knit ankle boots read daytime/workwear rather than clubbing",
+          "short choker necklace competes with the high crew neckline of the bodysuit",
+          "Severe seasonal and fabric clash between a breezy summer linen halter jumpsuit and a heavy winter wool-blend coat with leather booties",
+          "The loose daytime/vacation resort jumpsuit does not fit a club night out aesthetic and clashes completely with the edgy black leather accessories"
+        ],
+        "outfit_issues": [
+          [],
+          [
+            "low-heeled ribbed knit ankle boots read daytime/workwear rather than clubbing",
+            "short choker necklace competes with the high crew neckline of the bodysuit"
+          ],
+          [
+            "Severe seasonal and fabric clash between a breezy summer linen halter jumpsuit and a heavy winter wool-blend coat with leather booties",
+            "The loose daytime/vacation resort jumpsuit does not fit a club night out aesthetic and clashes completely with the edgy black leather accessories"
+          ]
+        ],
+        "outfit_names": [
+          "Moto",
+          "Burgundy Moto Nights",
+          "Blue Halter Sleek"
+        ],
+        "outfit_totals": [
+          110.96,
+          116.47,
+          119.95
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 16528,
+        "total_ms": 18035,
+        "usd": 0.050294,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          8,
+          5,
+          4
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 5.67,
+        "min": 4,
+        "issues": [
+          "sheer lace corset top reads as lingerie",
+          "Lace corset mini dress with underwire cups and eyelash lace trim reads too much like lingerie",
+          "Heavy black platform heels clash with the pastel pink dress and pale blush petal clutch",
+          "Textured floral sequin clutch clashes with the floral lace texture of the dress"
+        ],
+        "outfit_issues": [
+          [],
+          [
+            "sheer lace corset top reads as lingerie"
+          ],
+          [
+            "Lace corset mini dress with underwire cups and eyelash lace trim reads too much like lingerie",
+            "Heavy black platform heels clash with the pastel pink dress and pale blush petal clutch",
+            "Textured floral sequin clutch clashes with the floral lace texture of the dress"
+          ]
+        ],
+        "outfit_names": [
+          "Metallic Night Out",
+          "Edgy Velvet",
+          "Neon Pop"
+        ],
+        "outfit_totals": [
+          65.97,
+          90.96,
+          62.96
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1282,
+        "total_ms": 1477,
+        "usd": 0.000509,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "beach-men",
+      "gender": "men",
+      "occasion": "beach vacation in Miami",
+      "budget_usd": 150,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          7,
+          7,
+          2
+        ],
+        "presentable_count": 2,
+        "presentable": true,
+        "avg": 5.33,
+        "min": 2,
+        "issues": [
+          "Athletic black-striped indoor-soccer style sneakers feel too sporty and heavy for a breezy linen and seersucker beach outfit",
+          "long baggy black cargo shorts feel slightly heavy and utilitarian compared to the resort-style Cuban knit shirt",
+          "shoes slot contains a pair of shorts instead of footwear",
+          "outfit is incomplete and missing actual shoes"
+        ],
+        "outfit_issues": [
+          [
+            "Athletic black-striped indoor-soccer style sneakers feel too sporty and heavy for a breezy linen and seersucker beach outfit"
+          ],
+          [
+            "long baggy black cargo shorts feel slightly heavy and utilitarian compared to the resort-style Cuban knit shirt"
+          ],
+          [
+            "shoes slot contains a pair of shorts instead of footwear",
+            "outfit is incomplete and missing actual shoes"
+          ]
+        ],
+        "outfit_names": [
+          "Coastal Blue",
+          "Tropical Olive",
+          "Crisp Resort"
+        ],
+        "outfit_totals": [
+          117.96,
+          91.47,
+          51.97
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 17245,
+        "total_ms": 18038,
+        "usd": 0.114809,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          6,
+          6,
+          6
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 6,
+        "min": 6,
+        "issues": [
+          "navy blue loafers clash with the black linen shirt and black sunglasses",
+          "long navy performance chinos feel too covered-up and workwear-leaning for a Miami beach vacation",
+          "outfit total ($174.91) exceeds the $150 budget",
+          "Dusty washed blue gothic graphic muscle tee clashes in both color palette and aesthetic with the bright tropical resort-print swim trunks"
+        ],
+        "outfit_issues": [
+          [
+            "navy blue loafers clash with the black linen shirt and black sunglasses"
+          ],
+          [
+            "long navy performance chinos feel too covered-up and workwear-leaning for a Miami beach vacation",
+            "outfit total ($174.91) exceeds the $150 budget"
+          ],
+          [
+            "Dusty washed blue gothic graphic muscle tee clashes in both color palette and aesthetic with the bright tropical resort-print swim trunks"
+          ]
+        ],
+        "outfit_names": [
+          "Miami Beachside Casual",
+          "South Beach Sunset Dinner",
+          "Poolside Cabana Lounging"
+        ],
+        "outfit_totals": [
+          123.96,
+          174.91,
+          147.91
+        ],
+        "dress_code_hits": [],
+        "over_budget": 1,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1896,
+        "total_ms": 2166,
+        "usd": 0.001068,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "beach-women",
+      "gender": "women",
+      "occasion": "beach vacation in Miami",
+      "budget_usd": 150,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          6,
+          7,
+          7
+        ],
+        "presentable_count": 2,
+        "presentable": true,
+        "avg": 6.67,
+        "min": 6,
+        "issues": [
+          "Metallic gold stiletto heels clash in formality with the large daytime woven straw beach tote",
+          "Stiletto heels are impractical for a beach vacation daytime look paired with a beach bag",
+          "snakeskin top-handle bag with silver hardware feels a bit stiff and clashes slightly with the gold hardware on the tan sandals and sunglasses",
+          "Stark white sandals clash slightly with the warm cream, olive, and tan/tobacco tones of the romper and accessories"
+        ],
+        "outfit_issues": [
+          [
+            "Metallic gold stiletto heels clash in formality with the large daytime woven straw beach tote",
+            "Stiletto heels are impractical for a beach vacation daytime look paired with a beach bag"
+          ],
+          [
+            "snakeskin top-handle bag with silver hardware feels a bit stiff and clashes slightly with the gold hardware on the tan sandals and sunglasses"
+          ],
+          [
+            "Stark white sandals clash slightly with the warm cream, olive, and tan/tobacco tones of the romper and accessories"
+          ]
+        ],
+        "outfit_names": [
+          "Coral Sunset Maxi",
+          "Coastal Linen",
+          "Sage Poolside Romper"
+        ],
+        "outfit_totals": [
+          118.96,
+          149.96,
+          110.95
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 14511,
+        "total_ms": 16776,
+        "usd": 0.050222,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          8,
+          7,
+          6
+        ],
+        "presentable_count": 2,
+        "presentable": true,
+        "avg": 7,
+        "min": 6,
+        "issues": [
+          "stark white utilitarian pocket linen crop shirt feels slightly mismatched in texture and tone with the romantic cream-based floral chiffon skirt",
+          "heavy sequin bodycon club dress is inappropriate for a daytime beach vacation look and clashes in texture with the woven straw-style vacation clutch"
+        ],
+        "outfit_issues": [
+          [],
+          [
+            "stark white utilitarian pocket linen crop shirt feels slightly mismatched in texture and tone with the romantic cream-based floral chiffon skirt"
+          ],
+          [
+            "heavy sequin bodycon club dress is inappropriate for a daytime beach vacation look and clashes in texture with the woven straw-style vacation clutch"
+          ]
+        ],
+        "outfit_names": [
+          "Miami Beach Day",
+          "South Beach Sunset Dinner",
+          "Ocean Drive Night Out"
+        ],
+        "outfit_totals": [
+          24.96,
+          97.95,
+          63.96
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1522,
+        "total_ms": 1777,
+        "usd": 0.000901,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "business-casual-men",
+      "gender": "men",
+      "occasion": "business casual first week",
+      "budget_usd": 200,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          8,
+          8,
+          5
+        ],
+        "presentable_count": 2,
+        "presentable": true,
+        "avg": 7,
+        "min": 5,
+        "issues": [
+          "Rhinestone-studded cross-buckle belt is far too flashy and unprofessional for a business casual first week",
+          "Very baggy drop-shoulder polo will bunch awkwardly under a cropped cardigan and reads too casual for the office"
+        ],
+        "outfit_issues": [
+          [],
+          [],
+          [
+            "Rhinestone-studded cross-buckle belt is far too flashy and unprofessional for a business casual first week",
+            "Very baggy drop-shoulder polo will bunch awkwardly under a cropped cardigan and reads too casual for the office"
+          ]
+        ],
+        "outfit_names": [
+          "Structured Olive Tonal",
+          "Classic Charcoal Knit",
+          "Navy Cotton Cardigan"
+        ],
+        "outfit_totals": [
+          159.96,
+          191.98,
+          190.96
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 15916,
+        "total_ms": 19016,
+        "usd": 0.11181,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          5,
+          7,
+          4
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 5.33,
+        "min": 4,
+        "issues": [
+          "dark brown suede belt clashes with black leather shoes",
+          "white sneakers lean slightly casual for a first week in a business casual office, where leather loafers or dress shoes make a safer impression",
+          "casual athletic rugby polo with large graphics is inappropriate for business casual first week",
+          "sage floral silk neck scarf clashes terribly with the sporty rugby shirt and dark cherry shoes",
+          "bottom photo shows taupe/tan pants instead of the charcoal stated in the title"
+        ],
+        "outfit_issues": [
+          [
+            "dark brown suede belt clashes with black leather shoes"
+          ],
+          [
+            "white sneakers lean slightly casual for a first week in a business casual office, where leather loafers or dress shoes make a safer impression"
+          ],
+          [
+            "casual athletic rugby polo with large graphics is inappropriate for business casual first week",
+            "sage floral silk neck scarf clashes terribly with the sporty rugby shirt and dark cherry shoes",
+            "bottom photo shows taupe/tan pants instead of the charcoal stated in the title"
+          ]
+        ],
+        "outfit_names": [
+          "Smart Start",
+          "Casual Friday Ready",
+          "Polished & Professional"
+        ],
+        "outfit_totals": [
+          226.93,
+          80.47,
+          254.93
+        ],
+        "dress_code_hits": [],
+        "over_budget": 2,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1823,
+        "total_ms": 2034,
+        "usd": 0.001013,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "business-casual-women",
+      "gender": "women",
+      "occasion": "business casual first week",
+      "budget_usd": 200,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          6,
+          4,
+          5
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 5,
+        "min": 4,
+        "issues": [
+          "Plunging, tight knit top is too revealing and casual for the first week at a business casual office",
+          "Chunky platform knee-high boots are a bit heavy under wide-leg trousers for an office setting",
+          "Raspberry satin blouse has a large plunging chest cutout that is completely inappropriate for an office environment",
+          "Blazer has dramatic pleated white cuffs and slit panels with a rhinestone brooch that clash with the long-sleeve satin blouse and gold earrings",
+          "Cropped cardigan is too short and casual for the first week at a business casual office, and its fitted crop cut collides awkwardly over a tie-front button-down shirt.",
+          "Tie-front utility shirt reads too casual and beachy for an office setting, especially layered under a collared cropped cardigan."
+        ],
+        "outfit_issues": [
+          [
+            "Plunging, tight knit top is too revealing and casual for the first week at a business casual office",
+            "Chunky platform knee-high boots are a bit heavy under wide-leg trousers for an office setting"
+          ],
+          [
+            "Raspberry satin blouse has a large plunging chest cutout that is completely inappropriate for an office environment",
+            "Blazer has dramatic pleated white cuffs and slit panels with a rhinestone brooch that clash with the long-sleeve satin blouse and gold earrings"
+          ],
+          [
+            "Cropped cardigan is too short and casual for the first week at a business casual office, and its fitted crop cut collides awkwardly over a tie-front button-down shirt.",
+            "Tie-front utility shirt reads too casual and beachy for an office setting, especially layered under a collared cropped cardigan."
+          ]
+        ],
+        "outfit_names": [
+          "Taupe & Cream",
+          "Charcoal",
+          "Crisp Monochrome Look"
+        ],
+        "outfit_totals": [
+          175.96,
+          155.43,
+          184.96
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 21044,
+        "total_ms": 21045,
+        "usd": 0.058819,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          6,
+          4,
+          5
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 5,
+        "min": 4,
+        "issues": [
+          "The corset-style seaming and plunging unbuttoning on the top reads more club/going-out than professional office wear for a first week.",
+          "The open-weave slingback shoes are a bit too casual/summery for a first-week business casual impression.",
+          "Deep plunging neckline and high center slit on the wrap dress are too revealing for an office environment, especially during the first week",
+          "Sky-high satin platform block heels read as clubwear/eveningwear rather than business casual and look overly heavy with the light blue cotton shirt dress",
+          "top is cropped and risks exposing midriff, which is inappropriate for the first week in a business casual office",
+          "oversized hoop earrings are slightly too bold for a conservative first-week office look"
+        ],
+        "outfit_issues": [
+          [
+            "The corset-style seaming and plunging unbuttoning on the top reads more club/going-out than professional office wear for a first week.",
+            "The open-weave slingback shoes are a bit too casual/summery for a first-week business casual impression."
+          ],
+          [
+            "Deep plunging neckline and high center slit on the wrap dress are too revealing for an office environment, especially during the first week",
+            "Sky-high satin platform block heels read as clubwear/eveningwear rather than business casual and look overly heavy with the light blue cotton shirt dress"
+          ],
+          [
+            "top is cropped and risks exposing midriff, which is inappropriate for the first week in a business casual office",
+            "oversized hoop earrings are slightly too bold for a conservative first-week office look"
+          ]
+        ],
+        "outfit_names": [
+          "Classic Chic",
+          "Modern Professional",
+          "Smart Casual Layer"
+        ],
+        "outfit_totals": [
+          173.97,
+          47.95,
+          114.95
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1878,
+        "total_ms": 2121,
+        "usd": 0.000951,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "gala-men",
+      "gender": "men",
+      "occasion": "black tie optional gala",
+      "budget_usd": 250,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          1,
+          1,
+          1
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 1,
+        "min": 1,
+        "issues": [
+          "accessory slot shows a black velvet loafer instead of an accessory",
+          "missing a solid tie or bow tie and a valid visible accessory required for black tie optional",
+          "casual performance chinos from a different brand do not match the suit jacket",
+          "chunky lug-sole shoes with metal speed hooks are too casual/streetwear for a formal gala",
+          "accessory slot contains a burgundy t-shirt instead of an accessory",
+          "missing a solid tie and visible accessory required for a black tie optional gala",
+          "mismatched olive suit jacket and casual black pants instead of a matching dark suit",
+          "accessory slot contains baggy sweatpants instead of an actual accessory",
+          "missing required solid tie for a black tie optional gala",
+          "cropped streetwear-style jacket does not qualify as a formal dark suit blazer",
+          "chunky hiker-style lug shoes with tan laces are too casual for a gala"
+        ],
+        "outfit_issues": [
+          [
+            "accessory slot shows a black velvet loafer instead of an accessory",
+            "missing a solid tie or bow tie and a valid visible accessory required for black tie optional",
+            "casual performance chinos from a different brand do not match the suit jacket",
+            "chunky lug-sole shoes with metal speed hooks are too casual/streetwear for a formal gala"
+          ],
+          [
+            "accessory slot contains a burgundy t-shirt instead of an accessory",
+            "missing a solid tie and visible accessory required for a black tie optional gala",
+            "mismatched olive suit jacket and casual black pants instead of a matching dark suit"
+          ],
+          [
+            "accessory slot contains baggy sweatpants instead of an actual accessory",
+            "missing required solid tie for a black tie optional gala",
+            "cropped streetwear-style jacket does not qualify as a formal dark suit blazer",
+            "chunky hiker-style lug shoes with tan laces are too casual for a gala"
+          ]
+        ],
+        "outfit_names": [
+          "Monochrome Black Gala",
+          "Black Tie Gala",
+          "Classic Charcoal Gala"
+        ],
+        "outfit_totals": [
+          209.97,
+          145.95,
+          137.98
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 20974,
+        "total_ms": 20974,
+        "usd": 0.058819,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          2,
+          1,
+          1
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 1.33,
+        "min": 1,
+        "issues": [
+          "accessory slot contains a duplicate of the bottom trousers instead of a visible accessory",
+          "no visible accessory included in the outfit",
+          "missing a dress shirt underneath the tuxedo jacket",
+          "missing a tie or bow tie required for a black tie optional gala",
+          "trousers have a casual white athletic-style side stripe that clashes with traditional black tie tailoring",
+          "accessory slot contains striped resort shorts instead of an accessory",
+          "missing a visible accessory and formal dress shirt or tie for a black tie optional gala",
+          "pastel mint green cropped blazer is too casual and mismatched for a black tie optional gala, which requires a dark suit or tuxedo",
+          "Severe dress-code violation: Black tie optional requires a tuxedo or dark formal suit with matching trousers, not green drawstring sweatpants and a short-sleeve casual shirt",
+          "Missing a formal suit jacket or blazer",
+          "Green casual drawstring pants are completely inappropriate for a gala and clash with the silk necktie",
+          "Short-sleeve boxy pleated shirt is far too casual to wear with a silk tie or to a formal gala"
+        ],
+        "outfit_issues": [
+          [
+            "accessory slot contains a duplicate of the bottom trousers instead of a visible accessory",
+            "no visible accessory included in the outfit",
+            "missing a dress shirt underneath the tuxedo jacket",
+            "missing a tie or bow tie required for a black tie optional gala",
+            "trousers have a casual white athletic-style side stripe that clashes with traditional black tie tailoring"
+          ],
+          [
+            "accessory slot contains striped resort shorts instead of an accessory",
+            "missing a visible accessory and formal dress shirt or tie for a black tie optional gala",
+            "pastel mint green cropped blazer is too casual and mismatched for a black tie optional gala, which requires a dark suit or tuxedo"
+          ],
+          [
+            "Severe dress-code violation: Black tie optional requires a tuxedo or dark formal suit with matching trousers, not green drawstring sweatpants and a short-sleeve casual shirt",
+            "Missing a formal suit jacket or blazer",
+            "Green casual drawstring pants are completely inappropriate for a gala and clash with the silk necktie",
+            "Short-sleeve boxy pleated shirt is far too casual to wear with a silk tie or to a formal gala"
+          ]
+        ],
+        "outfit_names": [
+          "Classic Tuxedo Rental Look",
+          "Modern Velvet Blazer Ensemble",
+          "Midnight Blue Minimalist Suit"
+        ],
+        "outfit_totals": [
+          147.96,
+          108.95,
+          139.99
+        ],
+        "dress_code_hits": [
+          {
+            "outfit_index": 3,
+            "outfit_name": "Midnight Blue Minimalist Suit",
+            "slot": "accessory",
+            "title": "Kith for the New York Knicks Silk Tie - Nocturnal"
+          }
+        ],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1826,
+        "total_ms": 2071,
+        "usd": 0.001058,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "gala-women",
+      "gender": "women",
+      "occasion": "black tie optional gala",
+      "budget_usd": 250,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          8,
+          7,
+          4
+        ],
+        "presentable_count": 2,
+        "presentable": true,
+        "avg": 6.33,
+        "min": 4,
+        "issues": [
+          "basic thin hoop earrings are a bit underdressed for a black tie optional gala",
+          "Green and white diagonal-striped cutout halter jumpsuit reads like resort or cocktail wear, not formal enough for a black tie optional gala",
+          "Loud striped jumpsuit clashes with the heavily embellished silver sequin and rhinestone accessories"
+        ],
+        "outfit_issues": [
+          [],
+          [
+            "basic thin hoop earrings are a bit underdressed for a black tie optional gala"
+          ],
+          [
+            "Green and white diagonal-striped cutout halter jumpsuit reads like resort or cocktail wear, not formal enough for a black tie optional gala",
+            "Loud striped jumpsuit clashes with the heavily embellished silver sequin and rhinestone accessories"
+          ]
+        ],
+        "outfit_names": [
+          "Emerald Gala Gown",
+          "Classic Black Maxi",
+          "Satin Jumpsuit"
+        ],
+        "outfit_totals": [
+          191.92,
+          136.96,
+          114.94
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 18809,
+        "total_ms": 21814,
+        "usd": 0.04349,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          2,
+          6,
+          4
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 4,
+        "min": 2,
+        "issues": [
+          "Lace-trimmed satin slip dress reads explicitly as lingerie or nightwear, violating hard dress-code rules",
+          "Dress is far too informal and revealing for a black tie optional gala",
+          "nude PVC mules are too casual and clash with the black gown and silver rhinestone clutch",
+          "oversized pearl cross necklace looks tacky and costume-like for a black tie optional gala",
+          "ruched bodycon midi dress reads more like clubwear than formal gala attire",
+          "chunky platform velvet heels paired with a velvet dress is too heavy and lacks evening sophistication"
+        ],
+        "outfit_issues": [
+          [
+            "Lace-trimmed satin slip dress reads explicitly as lingerie or nightwear, violating hard dress-code rules",
+            "Dress is far too informal and revealing for a black tie optional gala"
+          ],
+          [
+            "nude PVC mules are too casual and clash with the black gown and silver rhinestone clutch"
+          ],
+          [
+            "oversized pearl cross necklace looks tacky and costume-like for a black tie optional gala",
+            "ruched bodycon midi dress reads more like clubwear than formal gala attire",
+            "chunky platform velvet heels paired with a velvet dress is too heavy and lacks evening sophistication"
+          ]
+        ],
+        "outfit_names": [
+          "Emerald Elegance",
+          "Classic Noir",
+          "Modern Velvet"
+        ],
+        "outfit_totals": [
+          47.96,
+          49.96,
+          178.93
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1206,
+        "total_ms": 1436,
+        "usd": 0.000361,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "tailgate-men",
+      "gender": "men",
+      "occasion": "fall tailgate",
+      "budget_usd": 130,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          8,
+          8,
+          8
+        ],
+        "presentable_count": 3,
+        "presentable": true,
+        "avg": 8,
+        "min": 8,
+        "issues": [],
+        "outfit_issues": [
+          [],
+          [],
+          []
+        ],
+        "outfit_names": [
+          "Cream Fleece & Denim",
+          "Olive Puffer & Cargos",
+          "Flannel & Chinos"
+        ],
+        "outfit_totals": [
+          129.48,
+          101.99,
+          129.98
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 15106,
+        "total_ms": 21608,
+        "usd": 0.04349,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          5,
+          6,
+          6
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 5.67,
+        "min": 5,
+        "issues": [
+          "cognac dressy chukka boots clash with the red-and-black flannel, black jeans, and streetwear-style safety-pin beanie",
+          "sand-colored distressed beanie feels disconnected from the red and black palette",
+          "Navy and beige motor racing hat clashes in both color palette and theme with the black, red, and white Chicago Bulls hoodie",
+          "missing an outer layer for a fall outdoor tailgate",
+          "relaxed untucked lounge henley completely covers the belt, leaving no visible accessory",
+          "light natural tan boots contrast too sharply with the dark brown suede belt"
+        ],
+        "outfit_issues": [
+          [
+            "cognac dressy chukka boots clash with the red-and-black flannel, black jeans, and streetwear-style safety-pin beanie",
+            "sand-colored distressed beanie feels disconnected from the red and black palette"
+          ],
+          [
+            "Navy and beige motor racing hat clashes in both color palette and theme with the black, red, and white Chicago Bulls hoodie"
+          ],
+          [
+            "missing an outer layer for a fall outdoor tailgate",
+            "relaxed untucked lounge henley completely covers the belt, leaving no visible accessory",
+            "light natural tan boots contrast too sharply with the dark brown suede belt"
+          ]
+        ],
+        "outfit_names": [
+          "Classic Gameday",
+          "Sporty Layer",
+          "Rugged Tailgate"
+        ],
+        "outfit_totals": [
+          143.94,
+          99.47,
+          441.97
+        ],
+        "dress_code_hits": [],
+        "over_budget": 2,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1296,
+        "total_ms": 1511,
+        "usd": 0.000595,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "apple-picking-women",
+      "gender": "women",
+      "occasion": "apple picking",
+      "budget_usd": 130,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          4,
+          6,
+          6
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 5.33,
+        "min": 4,
+        "issues": [
+          "shoes slot features children's/girls' boots ('Mini Deanna Cozy Boot') instead of women's sizing",
+          "top-handle patent satchel bag is impractical for hands-free apple picking and clashes in texture with casual cozy boots and cargos",
+          "Over-the-knee boots do not layer well with loose straight-leg jeans (too bulky to tuck in, awkward underneath)",
+          "Suede over-the-knee boots are impractical for walking through an orchard",
+          "High platform heeled knee-high boots are impractical for walking around an uneven orchard during apple picking.",
+          "The ultra-wide hip belt will not fit through standard denim belt loops on the mom jeans."
+        ],
+        "outfit_issues": [
+          [
+            "shoes slot features children's/girls' boots ('Mini Deanna Cozy Boot') instead of women's sizing",
+            "top-handle patent satchel bag is impractical for hands-free apple picking and clashes in texture with casual cozy boots and cargos"
+          ],
+          [
+            "Over-the-knee boots do not layer well with loose straight-leg jeans (too bulky to tuck in, awkward underneath)",
+            "Suede over-the-knee boots are impractical for walking through an orchard"
+          ],
+          [
+            "High platform heeled knee-high boots are impractical for walking around an uneven orchard during apple picking.",
+            "The ultra-wide hip belt will not fit through standard denim belt loops on the mom jeans."
+          ]
+        ],
+        "outfit_names": [
+          "Cozy Orchard Neutrals",
+          "Orchard Plaid Layer",
+          "Corduroy & Denim"
+        ],
+        "outfit_totals": [
+          102.96,
+          91.96,
+          129.96
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 19374,
+        "total_ms": 19757,
+        "usd": 0.038201,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          8,
+          7,
+          4
+        ],
+        "presentable_count": 2,
+        "presentable": true,
+        "avg": 6.33,
+        "min": 4,
+        "issues": [
+          "Block heel on the boots is a bit high for walking on uneven orchard terrain",
+          "stiletto-heeled fold-over boots are completely impractical for walking through an orchard on grass and dirt",
+          "ultra-short pleated mini skirt is inconvenient for reaching, bending, and outdoor activity",
+          "taupe bag feels disconnected from the black and hunter green palette"
+        ],
+        "outfit_issues": [
+          [],
+          [
+            "Block heel on the boots is a bit high for walking on uneven orchard terrain"
+          ],
+          [
+            "stiletto-heeled fold-over boots are completely impractical for walking through an orchard on grass and dirt",
+            "ultra-short pleated mini skirt is inconvenient for reaching, bending, and outdoor activity",
+            "taupe bag feels disconnected from the black and hunter green palette"
+          ]
+        ],
+        "outfit_names": [
+          "Cozy Orchard Day",
+          "Autumn Flannel Style",
+          "Sweet Cider Stroll"
+        ],
+        "outfit_totals": [
+          122.97,
+          177.93,
+          185.97
+        ],
+        "dress_code_hits": [],
+        "over_budget": 2,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1798,
+        "total_ms": 2041,
+        "usd": 0.00104,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "rooftop-men",
+      "gender": "men",
+      "occasion": "a friend's rooftop birthday",
+      "budget_usd": 150,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          6,
+          8,
+          8
+        ],
+        "presentable_count": 2,
+        "presentable": true,
+        "avg": 7.33,
+        "min": 6,
+        "issues": [
+          "the black pants have a drawstring lounge waist without belt loops, making the leather belt unusable",
+          "Casual drawstring pants feel slightly too relaxed next to a tailored car coat and Chelsea boots"
+        ],
+        "outfit_issues": [
+          [
+            "the black pants have a drawstring lounge waist without belt loops, making the leather belt unusable",
+            "Casual drawstring pants feel slightly too relaxed next to a tailored car coat and Chelsea boots"
+          ],
+          [],
+          []
+        ],
+        "outfit_names": [
+          "Camel & Charcoal",
+          "Olive & Denim",
+          "Espresso Moto Edge"
+        ],
+        "outfit_totals": [
+          134.98,
+          113.96,
+          139.95
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 14417,
+        "total_ms": 19273,
+        "usd": 0.072837,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          8,
+          7,
+          4
+        ],
+        "presentable_count": 2,
+        "presentable": true,
+        "avg": 6.33,
+        "min": 4,
+        "issues": [
+          "Wide, puddle-hem relaxed jeans clash slightly in proportion with a fitted preppy tipped polo and penny loafers",
+          "Brown suede belt clashes with black trousers, charcoal tee, and white faux leather sneakers",
+          "Belt does not coordinate with the shoe color family",
+          "Total cost ($335.99) is more than double the $150 budget due to the $275 belt",
+          "Basic t-shirt is a bit underwhelmed for a rooftop birthday without a third piece or elevated texture"
+        ],
+        "outfit_issues": [
+          [],
+          [
+            "Wide, puddle-hem relaxed jeans clash slightly in proportion with a fitted preppy tipped polo and penny loafers"
+          ],
+          [
+            "Brown suede belt clashes with black trousers, charcoal tee, and white faux leather sneakers",
+            "Belt does not coordinate with the shoe color family",
+            "Total cost ($335.99) is more than double the $150 budget due to the $275 belt",
+            "Basic t-shirt is a bit underwhelmed for a rooftop birthday without a third piece or elevated texture"
+          ]
+        ],
+        "outfit_names": [
+          "Casual Rooftop Chic",
+          "Sunset Party Prep",
+          "Modern Evening Breeze"
+        ],
+        "outfit_totals": [
+          113.46,
+          83.48,
+          335.99
+        ],
+        "dress_code_hits": [],
+        "over_budget": 1,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1832,
+        "total_ms": 2097,
+        "usd": 0.001059,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "rooftop-women",
+      "gender": "women",
+      "occasion": "a friend's rooftop birthday",
+      "budget_usd": 150,
+      "source": "test-kit",
+      "pipeline": {
+        "scores": [
+          8,
+          8,
+          6
+        ],
+        "presentable_count": 2,
+        "presentable": true,
+        "avg": 7.33,
+        "min": 6,
+        "issues": [
+          "Casual cozy rib knit cardigan clashes in formality and texture with the dressy satin midi skirt and tailored asymmetrical blazer",
+          "Layering a long-sleeve button cardigan under a fitted single-breasted blazer is bulky and awkward for a rooftop birthday party"
+        ],
+        "outfit_issues": [
+          [],
+          [],
+          [
+            "Casual cozy rib knit cardigan clashes in formality and texture with the dressy satin midi skirt and tailored asymmetrical blazer",
+            "Layering a long-sleeve button cardigan under a fitted single-breasted blazer is bulky and awkward for a rooftop birthday party"
+          ]
+        ],
+        "outfit_names": [
+          "Burgundy Moto Night",
+          "Monochrome Knit Chic",
+          "Chartreuse Satin & Blazer"
+        ],
+        "outfit_totals": [
+          94.96,
+          130.95,
+          122.96
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 16769,
+        "total_ms": 20392,
+        "usd": 0.048365,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          7,
+          4,
+          6
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 5.67,
+        "min": 4,
+        "issues": [
+          "Oversized bamboo-style hoop earrings clash slightly with the soft romantic floral chiffon dress",
+          "Lace-trimmed satin cami reads too much like lingerie/pajama wear",
+          "Shoes photo shows casual shell-embellished platform flip-flops instead of taupe ankle strap sandals, which are too casual for a rooftop birthday and clash with tailored trousers",
+          "Heavy black bag and black-soled flip-flops clash with the soft butter yellow and stone color palette",
+          "Metallic clash between the bright silver leather heels and the heavy gold statement necklace",
+          "The satin slip dress borders on reading like nightwear due to its thin straps and bust seam construction"
+        ],
+        "outfit_issues": [
+          [
+            "Oversized bamboo-style hoop earrings clash slightly with the soft romantic floral chiffon dress"
+          ],
+          [
+            "Lace-trimmed satin cami reads too much like lingerie/pajama wear",
+            "Shoes photo shows casual shell-embellished platform flip-flops instead of taupe ankle strap sandals, which are too casual for a rooftop birthday and clash with tailored trousers",
+            "Heavy black bag and black-soled flip-flops clash with the soft butter yellow and stone color palette"
+          ],
+          [
+            "Metallic clash between the bright silver leather heels and the heavy gold statement necklace",
+            "The satin slip dress borders on reading like nightwear due to its thin straps and bust seam construction"
+          ]
+        ],
+        "outfit_names": [
+          "Rooftop Chic",
+          "Sunset Vibes",
+          "Urban Party"
+        ],
+        "outfit_totals": [
+          80.96,
+          96.94,
+          129.91
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1617,
+        "total_ms": 1830,
+        "usd": 0.000884,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "hacker-1",
+      "gender": "men",
+      "occasion": "my girlfriend's parents are taking us to a fancy-ish Italian place, don't want to look like I'm trying too hard",
+      "budget_usd": 200,
+      "source": "messy",
+      "pipeline": {
+        "scores": [
+          7,
+          5,
+          6
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 6,
+        "min": 5,
+        "issues": [
+          "The stacked flare cut of the chinos leans slightly streetwear-casual for a nice dinner with parents.",
+          "Pull-on trousers have an elastic waistband without belt loops, making the leather belt incompatible",
+          "Pairing a navy polo sweater with slightly different midnight navy trousers and a black coat creates a muddy, mismatched dark palette",
+          "boxy cropped blazer has a trendy streetwear silhouette that clashes with classic dinner attire and reads as trying too hard",
+          "flashy western-style croc-embossed belt clashes with sleek dress loafers and tailored trousers"
+        ],
+        "outfit_issues": [
+          [
+            "The stacked flare cut of the chinos leans slightly streetwear-casual for a nice dinner with parents."
+          ],
+          [
+            "Pull-on trousers have an elastic waistband without belt loops, making the leather belt incompatible",
+            "Pairing a navy polo sweater with slightly different midnight navy trousers and a black coat creates a muddy, mismatched dark palette"
+          ],
+          [
+            "boxy cropped blazer has a trendy streetwear silhouette that clashes with classic dinner attire and reads as trying too hard",
+            "flashy western-style croc-embossed belt clashes with sleek dress loafers and tailored trousers"
+          ]
+        ],
+        "outfit_names": [
+          "Warm Earthy Knit",
+          "Midnight Navy Polish",
+          "Burgundy and Slate"
+        ],
+        "outfit_totals": [
+          145.96,
+          190.97,
+          161.97
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 16573,
+        "total_ms": 20386,
+        "usd": 0.102792,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          4,
+          6,
+          2
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 4,
+        "min": 2,
+        "issues": [
+          "Large Von Dutch logo sweatshirt is too casual and streetwear-leaning for a nice Italian restaurant dinner with a partner's parents",
+          "Mismatched formality between the casual graphic sweatshirt and the dressy leather horsebit loafers",
+          "Monotone navy sweatshirt and navy pants look flat together without a contrasting layer",
+          "grey, tan, and brown woven belt clashes with black suede boots",
+          "accessory slot contains checkered shorts instead of an accessory",
+          "missing a visible accessory",
+          "top slot contains a blazer with no base shirt or tee included to wear underneath"
+        ],
+        "outfit_issues": [
+          [
+            "Large Von Dutch logo sweatshirt is too casual and streetwear-leaning for a nice Italian restaurant dinner with a partner's parents",
+            "Mismatched formality between the casual graphic sweatshirt and the dressy leather horsebit loafers",
+            "Monotone navy sweatshirt and navy pants look flat together without a contrasting layer"
+          ],
+          [
+            "grey, tan, and brown woven belt clashes with black suede boots"
+          ],
+          [
+            "accessory slot contains checkered shorts instead of an accessory",
+            "missing a visible accessory",
+            "top slot contains a blazer with no base shirt or tee included to wear underneath"
+          ]
+        ],
+        "outfit_names": [
+          "Smart Casual Italian Dinner",
+          "Elevated Dining",
+          "Relaxed Sophistication"
+        ],
+        "outfit_totals": [
+          207.93,
+          443.95,
+          80.96
+        ],
+        "dress_code_hits": [],
+        "over_budget": 2,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1592,
+        "total_ms": 1815,
+        "usd": 0.001101,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "hacker-2",
+      "gender": "women",
+      "occasion": "work holiday party at a rooftop bar in December, coming straight from the office",
+      "budget_usd": 250,
+      "source": "messy",
+      "pipeline": {
+        "scores": [
+          6,
+          6,
+          4
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 5.33,
+        "min": 4,
+        "issues": [
+          "Plunging neckline on the velvet dress is too revealing to wear straight from the office",
+          "Slouchy flat ankle boots are too casual for a velvet cocktail dress at a holiday party",
+          "Bag has a juvenile teddy bear and blue polka-dot bow charm that clashes with the sleek monochrome look, plus silver hardware clashing with the gold earrings",
+          "Sleeveless jumpsuit without an office-appropriate blazer or cardigan doesn't work for a full winter workday before the party (the faux fur jacket is purely evening outerwear).",
+          "Shoes have prominent gold heels and hardware that clash with the silver metallic handbag and silver earrings.",
+          "Navy jumpsuit paired with heavy black fur and black shoes feels slightly muddled in color palette.",
+          "chunky platform front-zip suede boots are far too casual and heavy for a work holiday party and clash with the refined pleated crepe skirt",
+          "fitted blazer layered over a chunky oversized ribbed sweater will bunch up and fit poorly",
+          "dainty layered necklace will be completely hidden under the high funnel-neck sweater, leaving the outfit with no visible accessory",
+          "lacks festive polish for a holiday party at a rooftop bar"
+        ],
+        "outfit_issues": [
+          [
+            "Plunging neckline on the velvet dress is too revealing to wear straight from the office",
+            "Slouchy flat ankle boots are too casual for a velvet cocktail dress at a holiday party",
+            "Bag has a juvenile teddy bear and blue polka-dot bow charm that clashes with the sleek monochrome look, plus silver hardware clashing with the gold earrings"
+          ],
+          [
+            "Sleeveless jumpsuit without an office-appropriate blazer or cardigan doesn't work for a full winter workday before the party (the faux fur jacket is purely evening outerwear).",
+            "Shoes have prominent gold heels and hardware that clash with the silver metallic handbag and silver earrings.",
+            "Navy jumpsuit paired with heavy black fur and black shoes feels slightly muddled in color palette."
+          ],
+          [
+            "chunky platform front-zip suede boots are far too casual and heavy for a work holiday party and clash with the refined pleated crepe skirt",
+            "fitted blazer layered over a chunky oversized ribbed sweater will bunch up and fit poorly",
+            "dainty layered necklace will be completely hidden under the high funnel-neck sweater, leaving the outfit with no visible accessory",
+            "lacks festive polish for a holiday party at a rooftop bar"
+          ]
+        ],
+        "outfit_names": [
+          "Classic Velvet Midi",
+          "Midnight Tailored Jumpsuit",
+          "Chocolate Tonal Midi"
+        ],
+        "outfit_totals": [
+          198.12,
+          100.94,
+          249.97
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 15271,
+        "total_ms": 16608,
+        "usd": 0.08589,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          4,
+          4,
+          4
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 4,
+        "min": 4,
+        "issues": [
+          "Floor-length satin gown with a thigh-high slit, deep V-neck, and cold-shoulder cutouts is completely inappropriate to wear at the office during the day",
+          "Missing a warm coat or outer layer for a rooftop bar in December",
+          "Extreme double-platform rhinestone heels are impractical and overly flashy for wearing all day at the office",
+          "Gold hoop earrings clash with the silver rhinestone hardware on the shoes",
+          "missing a warm outer layer for a December rooftop party",
+          "barely-there strappy open-toe sandals are unsuitable for both a daytime office and December weather",
+          "fuzzy ear-warmer headband is too casual and out of place with a silk blouse and sequin skirt",
+          "head-to-toe sequin skirt is overly flashy to wear straight from the office",
+          "sheer plunging lace top reads as lingerie and is inappropriate for the office",
+          "open-toe mules are not season-appropriate for a December rooftop or office wear",
+          "missing a warm layer or coat for a December rooftop bar"
+        ],
+        "outfit_issues": [
+          [
+            "Floor-length satin gown with a thigh-high slit, deep V-neck, and cold-shoulder cutouts is completely inappropriate to wear at the office during the day",
+            "Missing a warm coat or outer layer for a rooftop bar in December",
+            "Extreme double-platform rhinestone heels are impractical and overly flashy for wearing all day at the office",
+            "Gold hoop earrings clash with the silver rhinestone hardware on the shoes"
+          ],
+          [
+            "missing a warm outer layer for a December rooftop party",
+            "barely-there strappy open-toe sandals are unsuitable for both a daytime office and December weather",
+            "fuzzy ear-warmer headband is too casual and out of place with a silk blouse and sequin skirt",
+            "head-to-toe sequin skirt is overly flashy to wear straight from the office"
+          ],
+          [
+            "sheer plunging lace top reads as lingerie and is inappropriate for the office",
+            "open-toe mules are not season-appropriate for a December rooftop or office wear",
+            "missing a warm layer or coat for a December rooftop bar"
+          ]
+        ],
+        "outfit_names": [
+          "Velvet Elegance",
+          "Metallic Chic",
+          "Tailored Glamour"
+        ],
+        "outfit_totals": [
+          79.96,
+          135.46,
+          66.95
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 2095,
+        "total_ms": 2357,
+        "usd": 0.000964,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "hacker-3",
+      "gender": "men",
+      "occasion": "second date, bowling then probably drinks after",
+      "budget_usd": 120,
+      "source": "messy",
+      "pipeline": {
+        "scores": [
+          8,
+          6,
+          6
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 6.67,
+        "min": 6,
+        "issues": [
+          "Navy jacket clashes with the black-and-white sweater and black pants",
+          "Heavily iced-out rhinestone watch looks gaudy and out of place with a clean, casual canvas bomber and striped knit",
+          "Tan trucker jacket and tan relaxed pants are nearly the same shade of brown/camel, creating a mismatched pseudo-suit effect with conflicting textures",
+          "The relaxed lounge-style pants lack belt loops, making the leather belt unusable and invisible under the untucked boxy shirt"
+        ],
+        "outfit_issues": [
+          [],
+          [
+            "Navy jacket clashes with the black-and-white sweater and black pants",
+            "Heavily iced-out rhinestone watch looks gaudy and out of place with a clean, casual canvas bomber and striped knit"
+          ],
+          [
+            "Tan trucker jacket and tan relaxed pants are nearly the same shade of brown/camel, creating a mismatched pseudo-suit effect with conflicting textures",
+            "The relaxed lounge-style pants lack belt loops, making the leather belt unusable and invisible under the untucked boxy shirt"
+          ]
+        ],
+        "outfit_names": [
+          "Charcoal & Indigo",
+          "Navy",
+          "Warm Earthy Layers"
+        ],
+        "outfit_totals": [
+          111.95,
+          113.97,
+          112.96
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 19558,
+        "total_ms": 22208,
+        "usd": 0.069552,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          8,
+          5,
+          6
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 6.33,
+        "min": 5,
+        "issues": [
+          "Multi-colored grey/tan/brown woven belt clashes with the black and white loafers",
+          "Belt alone ($200) blows past the entire $120 budget",
+          "brownish-taupe suede lug-sole shoes clash with the monochrome black top and black jeans",
+          "chunky hiking-inspired suede shoes feel clunky for a casual bowling and drinks date, and single-handedly push the outfit nearly $100 over the $120 budget"
+        ],
+        "outfit_issues": [
+          [],
+          [
+            "Multi-colored grey/tan/brown woven belt clashes with the black and white loafers",
+            "Belt alone ($200) blows past the entire $120 budget"
+          ],
+          [
+            "brownish-taupe suede lug-sole shoes clash with the monochrome black top and black jeans",
+            "chunky hiking-inspired suede shoes feel clunky for a casual bowling and drinks date, and single-handedly push the outfit nearly $100 over the $120 budget"
+          ]
+        ],
+        "outfit_names": [
+          "Casual Cool",
+          "Retro Sport",
+          "Edgy Evening"
+        ],
+        "outfit_totals": [
+          85.97,
+          309.99,
+          216.94
+        ],
+        "dress_code_hits": [],
+        "over_budget": 2,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1758,
+        "total_ms": 1937,
+        "usd": 0.001082,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "hacker-4",
+      "gender": "women",
+      "occasion": "my cousin's quinceañera, church in the afternoon then a party hall at night",
+      "budget_usd": 180,
+      "source": "messy",
+      "pipeline": {
+        "scores": [
+          7,
+          6,
+          5
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 6,
+        "min": 5,
+        "issues": [
+          "gold hoop earrings clash slightly with the oversized silver buckle on the heels",
+          "heavy faux fur coat over a velvet dress can look overly heavy for an afternoon church service",
+          "The blazer's dramatic white pleated cutouts and silver rhinestone detail clash with the gold hardware on the bag and the rich wine satin skirt.",
+          "The matte jersey halter top reads a bit too casual and charcoal-toned next to the formal satin skirt and patent pumps.",
+          "The pinstripe bodysuit-and-trouser jumpsuit reads like business office wear rather than festive quinceañera attire",
+          "The casual boxy wool jacket clashes in style and formality with the rhinestone evening necklace and stiletto pumps",
+          "The attached black belt on the jumpsuit clashes with the cream pumps"
+        ],
+        "outfit_issues": [
+          [
+            "gold hoop earrings clash slightly with the oversized silver buckle on the heels",
+            "heavy faux fur coat over a velvet dress can look overly heavy for an afternoon church service"
+          ],
+          [
+            "The blazer's dramatic white pleated cutouts and silver rhinestone detail clash with the gold hardware on the bag and the rich wine satin skirt.",
+            "The matte jersey halter top reads a bit too casual and charcoal-toned next to the formal satin skirt and patent pumps."
+          ],
+          [
+            "The pinstripe bodysuit-and-trouser jumpsuit reads like business office wear rather than festive quinceañera attire",
+            "The casual boxy wool jacket clashes in style and formality with the rhinestone evening necklace and stiletto pumps",
+            "The attached black belt on the jumpsuit clashes with the cream pumps"
+          ]
+        ],
+        "outfit_names": [
+          "Black Velvet Luxe",
+          "Wine Satin Tailoring",
+          "Tailored Midnight Jumpsuit"
+        ],
+        "outfit_totals": [
+          177.96,
+          145.96,
+          147.96
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 14706,
+        "total_ms": 17864,
+        "usd": 0.078203,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          7,
+          3,
+          5
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 5,
+        "min": 3,
+        "issues": [
+          "chunky choker necklace competes with the high draped neckline of the dress",
+          "clear lucite mule heels are slightly casual and difficult to dance in compared to strapped evening sandals",
+          "Ultra-short plunging sequin mini dress is clubwear and completely inappropriate for a family quinceañera and church ceremony",
+          "Missing a cover-up or layer required for the afternoon church portion of the event",
+          "Black patent pumps clash with the rich navy blue dress; silver, nude, or navy heels would be much more cohesive",
+          "Spaghetti-strap corset bustier dress is quite revealing for an afternoon church service without a wrap or layer"
+        ],
+        "outfit_issues": [
+          [
+            "chunky choker necklace competes with the high draped neckline of the dress",
+            "clear lucite mule heels are slightly casual and difficult to dance in compared to strapped evening sandals"
+          ],
+          [
+            "Ultra-short plunging sequin mini dress is clubwear and completely inappropriate for a family quinceañera and church ceremony",
+            "Missing a cover-up or layer required for the afternoon church portion of the event"
+          ],
+          [
+            "Black patent pumps clash with the rich navy blue dress; silver, nude, or navy heels would be much more cohesive",
+            "Spaghetti-strap corset bustier dress is quite revealing for an afternoon church service without a wrap or layer"
+          ]
+        ],
+        "outfit_names": [
+          "Emerald Elegance",
+          "Blushing Bloom",
+          "Navy Night Out"
+        ],
+        "outfit_totals": [
+          54.96,
+          62.97,
+          68.97
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 1594,
+        "total_ms": 1802,
+        "usd": 0.000828,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    },
+    {
+      "id": "hacker-5",
+      "gender": "women",
+      "occasion": "first day teaching middle school, on my feet all day",
+      "budget_usd": 100,
+      "source": "messy",
+      "pipeline": {
+        "scores": [
+          5,
+          6,
+          4
+        ],
+        "presentable_count": 0,
+        "presentable": false,
+        "avg": 5,
+        "min": 4,
+        "issues": [
+          "Mesh beach/market tote bag is too casual and impractical for a teacher's first day at work",
+          "Sweater top neckline plunges too low for teaching middle school",
+          "Shiny black patent lug-sole loafers feel disconnected from the warm cream, brown, and tan palette",
+          "micro quilted chain crossbody bag is impractical and too trendy/going-out for a teacher's first day at work",
+          "turtleneck sweater appears slightly cropped and expose-prone when writing on a board or moving around a classroom",
+          "the dress is a cocktail/party style with dramatic asymmetrical draped sleeves and a high-low sheer hem, which is not appropriate for teaching middle school",
+          "layering a structured belted blazer over a dress with bulky asymmetrical draped sleeves will bunch up and fit poorly"
+        ],
+        "outfit_issues": [
+          [
+            "Mesh beach/market tote bag is too casual and impractical for a teacher's first day at work",
+            "Sweater top neckline plunges too low for teaching middle school",
+            "Shiny black patent lug-sole loafers feel disconnected from the warm cream, brown, and tan palette"
+          ],
+          [
+            "micro quilted chain crossbody bag is impractical and too trendy/going-out for a teacher's first day at work",
+            "turtleneck sweater appears slightly cropped and expose-prone when writing on a board or moving around a classroom"
+          ],
+          [
+            "the dress is a cocktail/party style with dramatic asymmetrical draped sleeves and a high-low sheer hem, which is not appropriate for teaching middle school",
+            "layering a structured belted blazer over a dress with bulky asymmetrical draped sleeves will bunch up and fit poorly"
+          ]
+        ],
+        "outfit_names": [
+          "Warm Academia",
+          "Warm Earthy Polish",
+          "Olive Polished Midi"
+        ],
+        "outfit_totals": [
+          72.95,
+          90.98,
+          88.46
+        ],
+        "dress_code_hits": [],
+        "over_budget": 0,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 21434,
+        "total_ms": 21434,
+        "usd": 0.07216,
+        "usd_source": "ledger",
+        "outfit_count": 3
+      },
+      "baseline": {
+        "scores": [
+          5,
+          8,
+          4
+        ],
+        "presentable_count": 1,
+        "presentable": false,
+        "avg": 5.67,
+        "min": 4,
+        "issues": [
+          "beachy coral necklace clashes with tailored pinstripe trousers and loafers",
+          "corset-seamed plunging blouse is too provocative and tight for teaching middle school",
+          "chunky dark brown low-slung belt clashes with the black bodycon knit skirt and cream knit sneakers",
+          "form-fitting Fashion Nova bodycon tee and jersey skirt read too casual and figure-hugging for a professional first day teaching middle school",
+          "knit slip-on athletic sneakers are too casual for a teacher's first day impression"
+        ],
+        "outfit_issues": [
+          [
+            "beachy coral necklace clashes with tailored pinstripe trousers and loafers",
+            "corset-seamed plunging blouse is too provocative and tight for teaching middle school"
+          ],
+          [],
+          [
+            "chunky dark brown low-slung belt clashes with the black bodycon knit skirt and cream knit sneakers",
+            "form-fitting Fashion Nova bodycon tee and jersey skirt read too casual and figure-hugging for a professional first day teaching middle school",
+            "knit slip-on athletic sneakers are too casual for a teacher's first day impression"
+          ]
+        ],
+        "outfit_names": [
+          "Classic Chic Professional",
+          "Comfortable & Polished Dress",
+          "Smart Casual Cardigan Combo"
+        ],
+        "outfit_totals": [
+          153.91,
+          159.92,
+          74.98
+        ],
+        "dress_code_hits": [],
+        "over_budget": 2,
+        "missing_shoes_or_bottom": 0,
+        "other_department_items": 0,
+        "first_ms": 2190,
+        "total_ms": 2388,
+        "usd": 0.00099,
+        "usd_source": "tokens",
+        "outfit_count": 3
+      }
+    }
+  ]
+}
