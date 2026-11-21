@@ -7,6 +7,9 @@ fills a cart you can check out at the store.
 
 Built at the Gemini 4 NYC Hackathon on Saturday, November 21, 2026.
 
+During judging it is live at https://alicestyles.me. It runs on a laptop at the event, so the
+link works only while that laptop is up.
+
 ## What a call looks like
 
 1. You open the page and press Talk. Alice hears you and sees your camera.
@@ -23,6 +26,10 @@ Nothing in the call is typed unless you want it to be. For loud rooms there is n
 cancellation on your audio, a "Type instead" box and a mute key. While a slow step runs,
 Alice keeps talking in short lines, and she checks in if you go quiet. A video face for
 Alice is optional (`AVATAR=tavus`) and off by default.
+
+Without a call the page is still a store: choose an occasion from the dropdown or search for
+one, add a ready-made look to the bag in your sizes, remove pieces, and check out at the store.
+In a call Alice can also walk through a look one piece at a time, pointing at a detail.
 
 ## Models and what each one does
 
@@ -156,10 +163,11 @@ node --env-file-if-exists=.env.local eval/run.ts && node eval/report.ts
   shows a crop of that photo below the chin, not a cut-out.
 - **Stock.** A size that is sold out is reported and left out of the cart. Alice does not
   pick the nearest size for you.
-- **Buying.** Alice fills the carts; you pay on each store's own checkout page. Placing the
-  order inside the call is behind a switch that is off by default. That path has only been
-  run against fakes and an independent test harness; the real account and order shapes are
-  unverified until a first real order.
+- **Buying.** Alice fills the carts and you pay on each store's own checkout page. Placing
+  the order inside the call was tried with a real Shop account on the day: the Shop sign-in
+  worked and the stores accepted the order request, but Fashion Nova and Steve Madden require
+  a step on their own checkout page, so Alice hands over the store link. No in-call order was
+  completed, and Everlane and Kith were not tried.
 - **Ready-made looks.** For common occasions Alice starts from looks the builder prepared
   earlier in the day, re-checked for price and stock when served. Unusual occasions and
   budgets are built live and take longer.
