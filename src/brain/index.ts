@@ -9,6 +9,7 @@
 //   0                  no delays (tests)
 import { readFileSync } from 'node:fs';
 import type { Brief, BuildResult, Outfit, Piece } from '../types.ts';
+import { calllog } from '../calllog.ts';
 
 type Pace = 'library' | 'live' | '0';
 
@@ -39,11 +40,18 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 const clone = <T>(x: T): T => structuredClone(x);
 const sum = (pieces: Piece[]) => Math.round(pieces.reduce((s, p) => s + p.item.price, 0) * 100) / 100;
 
-export interface BuildOptions { onOutfit?(outfit: Outfit, index: number): void }
+// Writes to the shared per-call log when the caller passes its room; never throws.
+function log(room: string | undefined, ev: string, data: Record<string, unknown>) {
+  if (!room) return;
+  try { calllog(room, ev, data); } catch { /* logging must never break a build */ }
+}
+
+export interface BuildOptions { onOutfit?(outfit: Outfit, index: number): void; room?: string }
 
 export async function buildOutfits(brief: Brief, opts: BuildOptions = {}): Promise<BuildResult> {
   const started = performance.now();
   const schedule = SCHEDULE[pace()];
+  log(opts.room, 'build_start', { brief, mock: true, pace: pace() });
   const problems: string[] = ['mock: these are the fixture looks, not a build for this brief'];
   if (brief?.gender && brief.gender !== fixture().brief.gender) {
     problems.push(`mock: the fixture only has ${fixture().brief.gender}'s looks`);
@@ -61,6 +69,7 @@ export async function buildOutfits(brief: Brief, opts: BuildOptions = {}): Promi
     }
     outfits.push(outfit);
     if (index === 0) firstMs = Math.round(performance.now() - started);
+    log(opts.room, 'build_outfit', { index, number: outfit.number, name: outfit.name, total: outfit.total, ms: Math.round(performance.now() - started) });
     try {
       opts.onOutfit?.(clone(outfit), index);
     } catch (err) {
@@ -68,12 +77,14 @@ export async function buildOutfits(brief: Brief, opts: BuildOptions = {}): Promi
     }
   }
 
-  return {
+  const result: BuildResult = {
     outfits,
     source: 'library',
     timing: { first_outfit_ms: firstMs, total_ms: Math.round(performance.now() - started) },
     problems,
   };
+  log(opts.room, 'build_done', { source: result.source, timing: result.timing, problems, totals: outfits.map((o) => o.total) });
+  return result;
 }
 
 // Colour words a shopper might say, with the title words that count as a match.
@@ -108,8 +119,20 @@ const titleHas = (title: string, words: string[]) => {
 };
 
 export interface SwapResult { outfit: Outfit; piece: Piece; note?: string }
+export interface SwapOptions { room?: string }
 
-export async function swapPiece(outfit: Outfit, slot: string, request: string, brief: Brief): Promise<SwapResult> {
+export async function swapPiece(outfit: Outfit, slot: string, request: string, brief: Brief, opts: SwapOptions = {}): Promise<SwapResult> {
+  const started = performance.now();
+  log(opts.room, 'swap_start', { outfit: outfit?.number, slot, request, mock: true });
+  const result = await swapInner(outfit, slot, request, brief);
+  log(opts.room, 'swap_done', {
+    outfit: result.outfit.number, slot, request, piece: result.piece?.item?.title,
+    total: result.outfit.total, note: result.note, ms: Math.round(performance.now() - started),
+  });
+  return result;
+}
+
+async function swapInner(outfit: Outfit, slot: string, request: string, brief: Brief): Promise<SwapResult> {
   await sleep(SWAP_MS[pace()]);
   const look = clone(outfit);
   const at = look.pieces.findIndex((p) => p.slot === slot);
