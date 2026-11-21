@@ -9,6 +9,7 @@ import {
   formatWorkingNoteWithBit,
 } from '../src/agent/bits.ts';
 import {
+  BUILD_OUTFITS_FILLER_DELAY_MS,
   DEFAULT_FILLER_FOLLOWUP_DELAY_MS,
   DEFAULT_FILLER_INITIAL_DELAY_MS,
   type FillerWorkingNoteParams,
@@ -175,7 +176,8 @@ test('createBitPicker never repeats a bit, rotates themes, enforces cap of 3 per
   assert.ok(note.includes(allPicked[0]!.text));
 });
 
-test('createToolFiller skips fast results (< 2s), sends working note + up to 2 follow-up bits (cap 3), and stops on result', () => {
+test('createToolFiller skips fast build_outfits (< 4s), sends working note + up to 2 follow-up bits (cap 3), and stops on result', () => {
+  assert.equal(BUILD_OUTFITS_FILLER_DELAY_MS, 4_000);
   const clock = createFakeClock();
   const workingNotes: FillerWorkingNoteParams[] = [];
   const replies: Array<{ instructions: string }> = [];
@@ -198,21 +200,22 @@ test('createToolFiller skips fast results (< 2s), sends working note + up to 2 f
     clearTimeoutFn: clock.clearTimeoutFn,
   });
 
-  // 1) Fast library result (< 2s): zero bits used, zero working notes, zero replies, zero logs.
+  // 1) Fast library build_outfits (< 4s, e.g. 3.9s): zero bits used, zero working notes, zero replies, zero logs.
   filler.onToolStart({
     name: 'build_outfits',
     callId: 'fast-1',
     baseNote: 'Working on building three outfits now.',
   });
-  clock.advance(DEFAULT_FILLER_INITIAL_DELAY_MS - 100);
-  filler.onToolEnd('fast-1');
+  clock.advance(BUILD_OUTFITS_FILLER_DELAY_MS - 100);
+  filler.onToolResult({ callId: 'fast-1', name: 'build_outfits' });
   clock.advance(10_000);
   assert.equal(workingNotes.length, 0);
   assert.equal(replies.length, 0);
   assert.equal(logs.length, 0);
   assert.equal(picker.usedIds().length, 0);
+  assert.equal(clock.activeTimers(), 0);
 
-  // 2) Slow build_outfits: bit #1 at 2s via working note, bit #2 at 4s after Alice finishes, bit #3 at 4s after bit #2, then capped at 3.
+  // 2) Slow build_outfits: bit #1 at 4s via working note, bit #2 at 4s after Alice finishes, bit #3 at 4s after bit #2, then capped at 3.
   filler.onToolStart({
     name: 'build_outfits',
     callId: 'slow-1',
@@ -220,8 +223,8 @@ test('createToolFiller skips fast results (< 2s), sends working note + up to 2 f
   });
   assert.equal(filler.isRunning, true);
 
-  clock.advance(DEFAULT_FILLER_INITIAL_DELAY_MS - 1);
-  assert.equal(workingNotes.length, 0);
+  clock.advance(BUILD_OUTFITS_FILLER_DELAY_MS - 1);
+  assert.equal(workingNotes.length, 0, 'build_outfits must not fire filler before 4s');
 
   clock.advance(1);
   assert.equal(workingNotes.length, 1);
@@ -348,4 +351,65 @@ test('createToolFiller pauses while shopper or Alice speaks and disposes cleanly
   assert.equal(filler.isRunning, false);
   clock.advance(20_000);
   assert.equal(replies.length, 2);
+});
+
+test('createToolFiller cancels any queued filler the moment onToolResult arrives and suppresses all fillers when isSuppressed is true', () => {
+  const clock = createFakeClock();
+  const workingNotes: FillerWorkingNoteParams[] = [];
+  const replies: Array<{ instructions: string }> = [];
+  let suppressed = false;
+
+  const filler = createToolFiller({
+    room: 'filler-cancel',
+    initialAgentState: 'listening',
+    initialUserState: 'listening',
+    isSuppressed: () => suppressed,
+    sendWorkingNote: (params) => {
+      workingNotes.push(params);
+      return true;
+    },
+    generateReply: (opts) => replies.push(opts),
+    log: () => {},
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+  });
+
+  // 1) Queued filler for search_products cancelled right before 2s when result arrives.
+  filler.onToolStart({
+    name: 'search_products',
+    callId: 'sp-1',
+    baseNote: 'Digging through the racks for pieces now.',
+  });
+  clock.advance(DEFAULT_FILLER_INITIAL_DELAY_MS - 1);
+  filler.onToolResult({ callId: 'sp-1', name: 'search_products' });
+  clock.advance(10_000);
+  assert.equal(workingNotes.length, 0);
+  assert.equal(replies.length, 0);
+  assert.equal(clock.activeTimers(), 0);
+
+  // 2) Queued filler with empty callId cancelled by tool name on result arrival.
+  filler.onToolStart({
+    name: 'swap_piece',
+    callId: '',
+    baseNote: 'Hunting down a sharper replacement piece now.',
+  });
+  clock.advance(DEFAULT_FILLER_INITIAL_DELAY_MS - 50);
+  filler.onToolResult({ callId: '', name: 'swap_piece' });
+  clock.advance(10_000);
+  assert.equal(workingNotes.length, 0);
+  assert.equal(replies.length, 0);
+  assert.equal(clock.activeTimers(), 0);
+
+  // 3) Suppressed mode (express): zero fillers even after long waits.
+  suppressed = true;
+  filler.onToolStart({
+    name: 'build_outfits',
+    callId: 'b-sup',
+    baseNote: 'Pulling three killer outfits together now.',
+  });
+  clock.advance(20_000);
+  assert.equal(workingNotes.length, 0);
+  assert.equal(replies.length, 0);
+  assert.equal(filler.isRunning, false);
 });

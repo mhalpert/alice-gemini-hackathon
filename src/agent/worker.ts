@@ -561,9 +561,16 @@ export default defineAgent({
       log: calllog,
     });
 
+    let toolFillerRef: ReturnType<typeof createToolFiller> | null = null;
+
     const callState = createCallStateStore({
       roomName,
       appContext,
+      onExpressChange: (express) => {
+        if (express) {
+          toolFillerRef?.cancelAll();
+        }
+      },
       log: calllog,
     });
 
@@ -609,6 +616,7 @@ export default defineAgent({
     const toolFiller = createToolFiller({
       room: roomName,
       bitPicker,
+      isSuppressed: () => callState.get().express,
       generateReply: (opts) => {
         silenceCheckInRef?.onExternalReply();
         return sessionRef?.generateReply(opts);
@@ -616,12 +624,14 @@ export default defineAgent({
       sendWorkingNote: (params) => sendInterimToolNote(activeRealtimeSession, params),
       log: calllog,
     });
+    toolFillerRef = toolFiller;
 
     const silenceCheckIn = createSilenceCheckIn({
       room: roomName,
       generateReply: (opts) => sessionRef?.generateReply(opts),
       isSuppressed: () =>
         resultNudger.hasPending || toolFiller.isRunning || revealSequencer.isActive,
+      isExpress: () => callState.get().express,
       log: calllog,
     });
     silenceCheckInRef = silenceCheckIn;
@@ -660,8 +670,11 @@ export default defineAgent({
         revealSequencer.onToolEnd(ev.callId);
       },
       onSlowToolStart: (ev) => toolFiller.onToolStart(ev),
-      onSlowToolEnd: (ev) => toolFiller.onToolEnd(ev.callId),
-      onToolResult: (ev) => resultNudger.onToolResult(ev),
+      onSlowToolEnd: (ev) => toolFiller.onToolEnd(ev.callId, ev.name),
+      onToolResult: (ev) => {
+        toolFiller.onToolResult(ev);
+        resultNudger.onToolResult(ev);
+      },
       getSnapshot: () => vision?.latest() ?? null,
       getLatestFrameJpeg: () => {
         if (callState.get().camera !== 'on') return null;

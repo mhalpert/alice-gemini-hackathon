@@ -21,6 +21,8 @@ import type { OrderController } from '../src/agent/order.ts';
 import { createCallStateStore } from '../src/agent/state.ts';
 import {
   DUPLICATE_WINDOW_MS,
+  FAST_BUILD_RESULT_PREFIX,
+  SLOW_TOOL_NOTES,
   TOOL_ERROR_FALLBACK,
   createAgentTools,
   createToolWrapper,
@@ -2767,13 +2769,13 @@ test('slow tools send working notes with bits after 2s, skip fast results and re
 
   await tools.set_department.execute({ department: 'men' }, fakeToolOpts('d1'));
 
-  // 1) Slow build_outfits (> 2s) sends working note with bit and records usedBitIds in state.
+  // 1) Slow build_outfits (>= 4s with no look on screen) sends working note with bit and records usedBitIds in state.
   const buildPromise = tools.build_outfits.execute(
     { occasion: 'rooftop', budget_usd: 250 },
     fakeToolOpts('b-slow'),
   );
-  await clock.advance(1_999);
-  assert.equal(notes.length, 0);
+  await clock.advance(3_999);
+  assert.equal(notes.length, 0, 'build_outfits must not send a working note before 4s');
   await clock.advance(1);
   assert.equal(notes.length, 1);
   assert.equal(notes[0]!.name, 'build_outfits');
@@ -2783,11 +2785,16 @@ test('slow tools send working notes with bits after 2s, skip fast results and re
   resolveSlowBuild({
     outfits: structuredClone(sample),
     source: 'live',
-    timing: { first_outfit_ms: 2_500, total_ms: 3_000 },
+    timing: { first_outfit_ms: 4_100, total_ms: 4_500 },
     problems: [],
   });
-  await buildPromise;
+  const slowBuildRes = await buildPromise;
   await flushMicrotasks();
+  assert.equal(
+    slowBuildRes.startsWith('The looks are ALREADY on screen.'),
+    false,
+    'slow build (>= 4s) must not get the fast-build ALREADY on screen prefix',
+  );
 
   // 2) show_on_me when try-on is ALREADY ready (Look 1) sends NO working note / bit.
   const show1Res = await tools.show_on_me.execute({ outfit: 1 }, fakeToolOpts('s-ready'));
@@ -2823,7 +2830,7 @@ test('slow tools send working notes with bits after 2s, skip fast results and re
   assert.equal(notes.length, 2, 'fast swap_piece must not send a working note or bit');
   assert.equal(state.get().usedBitIds.length, 2);
 
-  // 5) onToolStart / onToolEnd / onSlowToolStart / onSlowToolEnd fire cleanly for add_to_bag and search_products.
+  // 5) onToolStart / onToolEnd / onSlowToolStart / onSlowToolEnd fire cleanly; add_to_bag has NO slow filler.
   const events: string[] = [];
   const hookedTools = createAgentTools({
     room: 'r-hooks',
@@ -2850,8 +2857,10 @@ test('slow tools send working notes with bits after 2s, skip fast results and re
   assert.ok(events.includes('slow_end:build_outfits'));
   assert.ok(events.includes('slow_start:search_products'));
   assert.ok(events.includes('slow_end:search_products'));
-  assert.ok(events.includes('slow_start:add_to_bag'));
-  assert.ok(events.includes('slow_end:add_to_bag'));
+  assert.equal(events.includes('slow_start:add_to_bag'), false, 'add_to_bag must have no filler line');
+  assert.equal(events.includes('slow_end:add_to_bag'), false, 'add_to_bag must have no filler line');
+  assert.ok(events.includes('start:add_to_bag'));
+  assert.ok(events.includes('end:add_to_bag'));
   assert.ok(events.includes('start:set_department'));
   assert.ok(events.includes('end:set_department'));
   assert.equal(events.includes('slow_start:set_department'), false);
@@ -3958,4 +3967,163 @@ test('search_products numbers results and swap_piece supports exact pick (withou
   assert.equal(brainSwapCalls, 1);
   assert.match(freeRes, /Swapped shoes \(brown suede loafers\)/);
   assert.match(freeRes, /Say the exact product name "Swapped shoes \(brown suede loafers\)"/);
+});
+
+test('polish11: fast build_outfits (<4s) begins with ALREADY on screen prefix, look-on-screen cancels filler before 4s, add_to_bag has no filler, and swap_piece passes known sizes', async () => {
+  const { page } = createFakePage();
+  const clock = createFakeClock();
+  const notes: WorkingNoteParams[] = [];
+  const state = createCallStateStore({ roomName: 'r-p11', log: () => {} });
+  const sample = makeSampleOutfits();
+
+  assert.equal('add_to_bag' in SLOW_TOOL_NOTES, false, 'add_to_bag must be removed from SLOW_TOOL_NOTES');
+
+  // 1) Fast build (< 4s, e.g. 1s library): begins with exact ALREADY on screen prefix and sends zero fillers.
+  const fastTools = createAgentTools({
+    room: 'r-p11-fast',
+    log: () => {},
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+    sendWorkingNote: (n) => {
+      notes.push(n);
+      return true;
+    },
+    page,
+    state,
+    deps: makeFakeDeps({
+      async buildOutfits(_brief, opts) {
+        await new Promise<void>((r) => clock.setTimeoutFn(r, 1_000));
+        sample.forEach((o, i) => opts?.onOutfit?.(structuredClone(o), i));
+        return {
+          outfits: structuredClone(sample),
+          source: 'library',
+          timing: { first_outfit_ms: 450, total_ms: 1_000 },
+          problems: [],
+        };
+      },
+      async addToBag(outfit, sizes, gender) {
+        await new Promise<void>((r) => clock.setTimeoutFn(r, 5_000));
+        return makeFakeDeps().addToBag!(outfit, sizes, gender);
+      },
+    }),
+  });
+
+  await fastTools.set_department.execute({ department: 'men' }, fakeToolOpts('p11-d1'));
+  const fastPromise = fastTools.build_outfits.execute(
+    { occasion: 'dinner', budget_usd: 250 },
+    fakeToolOpts('p11-b1'),
+  );
+  await clock.advance(1_000);
+  const fastRes = await fastPromise;
+  await clock.advance(6_000);
+
+  assert.equal(
+    fastRes.startsWith(
+      'The looks are ALREADY on screen. Do not say you are pulling or building anything and do not say they are finally in: present them now.',
+    ),
+    true,
+    `fast build_outfits (<4s) must begin with ALREADY on screen prefix, got: ${fastRes}`,
+  );
+  assert.equal(notes.length, 0, 'fast build_outfits (<4s) must emit zero filler/working notes');
+
+  // 2) add_to_bag never sends a filler/working note even if it takes 5s.
+  const bagPromise = fastTools.add_to_bag.execute(
+    { outfit: 1, sizes: { top: 'M', shoes: '10' } },
+    fakeToolOpts('p11-bag1'),
+  );
+  await clock.advance(5_000);
+  await bagPromise;
+  assert.equal(notes.length, 0, 'add_to_bag must never speak a filler/working note');
+
+  // 3) build_outfits where first look lands at 2.5s (before 4s) and rest finish at 5.5s: ZERO fillers because a look is already on screen!
+  let resolveRest!: () => void;
+  const restGate = new Promise<void>((r) => {
+    resolveRest = r;
+  });
+  let triggerFirstLook!: () => void;
+  const firstLookGate = new Promise<void>((r) => {
+    triggerFirstLook = r;
+  });
+
+  const partialTools = createAgentTools({
+    room: 'r-p11-partial',
+    log: () => {},
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+    sendWorkingNote: (n) => {
+      notes.push(n);
+      return true;
+    },
+    page,
+    state: createCallStateStore({ roomName: 'r-p11-partial', log: () => {} }),
+    deps: makeFakeDeps({
+      async buildOutfits(_brief, opts) {
+        await firstLookGate;
+        opts?.onOutfit?.(structuredClone(sample[0]!), 0);
+        await restGate;
+        opts?.onOutfit?.(structuredClone(sample[1]!), 1);
+        return {
+          outfits: structuredClone(sample),
+          source: 'live',
+          timing: { first_outfit_ms: 2_500, total_ms: 5_500 },
+          problems: [],
+        };
+      },
+    }),
+  });
+  await partialTools.set_department.execute({ department: 'men' }, fakeToolOpts('p11-d2'));
+  const partialPromise = partialTools.build_outfits.execute(
+    { occasion: 'wedding', budget_usd: 300 },
+    fakeToolOpts('p11-b2'),
+  );
+  await clock.advance(2_500);
+  triggerFirstLook();
+  await flushMicrotasks();
+  await clock.advance(3_000); // now at 5.5s total, past 4s, with Look 1 already on screen
+  assert.equal(notes.length, 0, 'once a look is on screen before 4s, no build_outfits filler may fire');
+  resolveRest();
+  await partialPromise;
+
+  // 4) swap_piece passes { room, sizes } with ONLY the known sizes (top/bottom/shoes) from call state.
+  const capturedOpts: Array<SwapOptions | undefined> = [];
+  const swapState = createCallStateStore({ roomName: 'r-p11-swap', log: () => {} });
+  const swapTools = createAgentTools({
+    room: 'r-p11-swap',
+    log: () => {},
+    page,
+    state: swapState,
+    deps: makeFakeDeps({
+      async swapPiece(outfit, slot, request, brief, opts) {
+        capturedOpts.push(opts);
+        return makeFakeDeps().swapPiece!(outfit, slot, request, brief, opts);
+      },
+    }),
+  });
+  await swapTools.set_department.execute({ department: 'men' }, fakeToolOpts('sw-d1'));
+  await swapTools.build_outfits.execute({ occasion: 'dinner', budget_usd: 250 }, fakeToolOpts('sw-b1'));
+  await swapTools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('sw-p1'));
+
+  // Before any sizes are known: sizes omitted.
+  await swapTools.swap_piece.execute({ slot: 'shoes', request: 'loafers' }, fakeToolOpts('sw-1'));
+  assert.equal(capturedOpts[0]?.room, 'r-p11-swap');
+  assert.equal(capturedOpts[0]?.sizes, undefined);
+
+  // After top and shoes are known (bottom still unknown): passes only { top, shoes }.
+  swapState.dispatch({ type: 'merge_sizes', sizes: { top: 'M', shoes: '10.5' } });
+  await swapTools.swap_piece.execute({ slot: 'shoes', request: 'brown boots' }, fakeToolOpts('sw-2'));
+  assert.deepEqual(capturedOpts[1], {
+    room: 'r-p11-swap',
+    sizes: { top: 'M', shoes: '10.5' },
+  });
+  assert.equal('bottom' in (capturedOpts[1]?.sizes ?? {}), false);
+
+  // After bottom is also known: passes all three.
+  swapState.dispatch({ type: 'merge_sizes', sizes: { bottom: '32x30' } });
+  await swapTools.swap_piece.execute({ slot: 'bottom', request: 'dark chinos' }, fakeToolOpts('sw-3'));
+  assert.deepEqual(capturedOpts[2], {
+    room: 'r-p11-swap',
+    sizes: { top: 'M', bottom: '32x30', shoes: '10.5' },
+  });
 });

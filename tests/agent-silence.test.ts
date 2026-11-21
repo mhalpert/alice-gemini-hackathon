@@ -13,7 +13,11 @@ import {
   DEFAULT_SILENCE_COOLDOWN_MS,
   DEFAULT_SILENCE_FIRST_MS,
   DEFAULT_SILENCE_SECOND_MS,
+  EXPRESS_FIRST_CHECKIN_INSTRUCTIONS,
+  EXPRESS_SECOND_CHECKIN_INSTRUCTIONS,
+  FIRST_CHECKIN_INSTRUCTIONS,
   MAX_SILENCE_CHECKINS_PER_CALL,
+  SECOND_CHECKIN_INSTRUCTIONS,
   createSilenceCheckIn,
   endsWithQuestionMark,
   isGoodbyeMessage,
@@ -391,5 +395,65 @@ test('never fires while a tool is running, when suppressed, after a goodbye, or 
   assert.equal(clock.activeTimers(), 0);
   clock.advance(30_000);
   assert.equal(replies.length, 1);
+});
+
+test('silence check-in wording never blames the shopper, names "Type instead" (never "the chat"), and uses joke-free express lines when express is on', () => {
+  const allLines = [
+    ...FIRST_CHECKIN_INSTRUCTIONS,
+    ...SECOND_CHECKIN_INSTRUCTIONS,
+    ...EXPRESS_FIRST_CHECKIN_INSTRUCTIONS,
+    ...EXPRESS_SECOND_CHECKIN_INSTRUCTIONS,
+  ];
+
+  for (const line of allLines) {
+    assert.doesNotMatch(line, /did i lose you|lost (?:you|them)/i, `must not blame shopper: ${line}`);
+    assert.doesNotMatch(line, /\bchat\b/i, `must call typing "Type instead", never "chat": ${line}`);
+    assert.doesNotMatch(line, /a little louder|must be loud on their end/i, `must not blame shopper volume: ${line}`);
+  }
+
+  assert.ok(
+    FIRST_CHECKIN_INSTRUCTIONS.some((line) => line.includes('Take your time. Want me to pick for you?')),
+    'first check-in instructions should include calm "Take your time. Want me to pick for you?"',
+  );
+  assert.ok(
+    allLines.some((line) => line.includes('Type instead')),
+    'typing guidance must name the control "Type instead"',
+  );
+
+  // Express mode keeps check-ins active with calm, joke-free lines while timing constants stay unchanged.
+  assert.equal(DEFAULT_SILENCE_FIRST_MS, 9_000);
+  assert.equal(DEFAULT_SILENCE_SECOND_MS, 12_000);
+  assert.equal(DEFAULT_SILENCE_COOLDOWN_MS, 30_000);
+
+  const clock = createFakeClock();
+  const replies: Array<{ instructions: string }> = [];
+  const silence = createSilenceCheckIn({
+    room: 'silence-express',
+    initialAgentState: 'listening',
+    initialUserState: 'listening',
+    isExpress: () => true,
+    generateReply: (opts) => replies.push(opts),
+    log: () => {},
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+  });
+
+  silence.onAgentStateChanged('speaking');
+  silence.onAssistantMessage('Occasion and budget?');
+  silence.onAgentStateChanged('listening');
+
+  clock.advance(DEFAULT_SILENCE_FIRST_MS);
+  assert.equal(replies.length, 1);
+  assert.ok(EXPRESS_FIRST_CHECKIN_INSTRUCTIONS.includes(replies[0]!.instructions));
+  assert.match(replies[0]!.instructions, /no jokes/i);
+
+  silence.onAgentStateChanged('speaking');
+  silence.onAgentStateChanged('listening');
+  clock.advance(DEFAULT_SILENCE_SECOND_MS);
+  assert.equal(replies.length, 2);
+  assert.ok(EXPRESS_SECOND_CHECKIN_INSTRUCTIONS.includes(replies[1]!.instructions));
+  assert.match(replies[1]!.instructions, /no jokes/i);
+  assert.match(replies[1]!.instructions, /Type instead/);
 });
 

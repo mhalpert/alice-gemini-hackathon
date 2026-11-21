@@ -10,15 +10,25 @@ export const MAX_SILENCE_CHECKINS_PER_CALL = 4;
 export type SilenceLogFn = (room: string, ev: string, data?: Record<string, unknown>) => void;
 
 export const FIRST_CHECKIN_INSTRUCTIONS: readonly string[] = [
-  'The shopper went quiet for a few seconds. Check in once with one short, punchy New York line—joke that you did not catch that and tell them to hit you with it a little louder. Keep it quick and playful.',
-  'The shopper went quiet for a few seconds. Check in once with one short, sassy line—say it sounds wild in there and they can speak up or drop it in the chat. Keep it tight.',
-  'The shopper went quiet for a few seconds. Check in once with one short, high-energy line—ask if you lost them and tell them to say it again or toss it in the chat.',
+  'The shopper is taking a moment. Check in once with one calm, warm line such as "Take your time. Want me to pick for you?" Keep it relaxed and zero pressure.',
+  'The shopper is taking a moment. Check in once with one calm, relaxed line—tell them there is no rush, and they can talk whenever or tap "Type instead" on the page.',
+  'The shopper is taking a moment. Check in once with one calm, easygoing line—tell them to take their time and offer to pick a direction for them if they want.',
 ];
 
 export const SECOND_CHECKIN_INSTRUCTIONS: readonly string[] = [
-  'Still no reply from the shopper. Give one last short, playful line in different words—say it must be loud on their end and remind them they can type in the chat whenever they are ready. Zero pressure, keep it quick.',
-  'Still no reply from the shopper. Give one last short, breezy line in different words—tell them you are hanging right here whenever they want to jump back in, voice or chat.',
-  'Still no reply from the shopper. Give one last short, witty line in different words—say take your time and holler or drop it in chat when ready.',
+  'Still quiet from the shopper. Give one last calm, zero-pressure line in different words—say you are right here whenever they are ready, or they can tap "Type instead".',
+  'Still quiet from the shopper. Give one last calm, breezy line in different words—say take all the time they need and jump back in by voice or "Type instead" whenever they want.',
+  'Still quiet from the shopper. Give one last calm, gentle line in different words—offer to pick a favourite for them or wait until they talk or tap "Type instead" when ready.',
+];
+
+export const EXPRESS_FIRST_CHECKIN_INSTRUCTIONS: readonly string[] = [
+  'Express mode is on and the shopper is quiet. Give ONE calm sentence (at most 10 words, no jokes): "Take your time. Want me to pick for you?"',
+  'Express mode is on and the shopper is quiet. Give ONE calm sentence (at most 10 words, no jokes) letting them know they can talk or tap "Type instead".',
+];
+
+export const EXPRESS_SECOND_CHECKIN_INSTRUCTIONS: readonly string[] = [
+  'Express mode is on and the shopper is still quiet. Give ONE calm sentence (at most 10 words, no jokes): "I am right here—talk or tap Type instead whenever ready."',
+  'Express mode is on and the shopper is still quiet. Give ONE calm sentence (at most 10 words, no jokes): "No rush—say the word or tap Type instead when ready."',
 ];
 
 const GOODBYE_RE =
@@ -55,6 +65,7 @@ export interface SilenceCheckInOptions {
   initialAgentState?: AgentStateValue;
   initialUserState?: string;
   isSuppressed?: () => boolean;
+  isExpress?: () => boolean;
   log?: SilenceLogFn;
   now?: () => number;
   setTimeoutFn?: (fn: () => void, ms: number) => TimerHandle;
@@ -143,12 +154,15 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
   }
 
   function pickInstruction(nextCount: number): string {
+    const express = Boolean(options.isExpress?.());
     if (nextCount === 1) {
-      const text = FIRST_CHECKIN_INSTRUCTIONS[firstWordingIdx % FIRST_CHECKIN_INSTRUCTIONS.length]!;
+      const pool = express ? EXPRESS_FIRST_CHECKIN_INSTRUCTIONS : FIRST_CHECKIN_INSTRUCTIONS;
+      const text = pool[firstWordingIdx % pool.length]!;
       firstWordingIdx += 1;
       return text;
     }
-    const text = SECOND_CHECKIN_INSTRUCTIONS[secondWordingIdx % SECOND_CHECKIN_INSTRUCTIONS.length]!;
+    const pool = express ? EXPRESS_SECOND_CHECKIN_INSTRUCTIONS : SECOND_CHECKIN_INSTRUCTIONS;
+    const text = pool[secondWordingIdx % pool.length]!;
     secondWordingIdx += 1;
     return text;
   }
