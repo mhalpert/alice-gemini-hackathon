@@ -42,6 +42,7 @@ export interface AliceBudgetOptions {
   productMs?: number;
   searchMs?: number;
   looksMs?: number;
+  looksDefaultMs?: number;
 }
 
 export interface AliceServerOptions {
@@ -82,6 +83,7 @@ const STOREFRONT_WAIT_MAX_MS = 6000;
 const PRODUCT_BUDGET_MS = 1300;
 const SEARCH_BUDGET_MS = 1300;
 const LOOKS_BUDGET_MS = 1400;
+const LOOKS_DEFAULT_BUDGET_MS = 4000;
 const SEARCH_QUERY_MAX_LEN = 80;
 const OCCASION_MAX_LEN = 120;
 const TRYON_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.(jpg|jpeg|png|webp|mp4)$/;
@@ -625,17 +627,16 @@ function loadFixtureOutfits(
       if (allOutfits.length === 0) return [];
 
       const matching = allOutfits.filter((outfit) => {
-        if (outfit.pieces.length > 0 && outfit.pieces.every((p) => p?.item?.department === department)) {
-          return true;
+        if (outfit.pieces.length > 0) {
+          return outfit.pieces.every((p) => {
+            const dept = p?.item?.department;
+            return dept === department || dept === undefined || dept === null || (dept as string) === '';
+          });
         }
-        if (outfit.pieces.length === 0 && parsed.brief?.gender === department) {
-          return true;
-        }
-        return false;
+        return parsed.brief?.gender === department;
       });
 
-      const chosen = matching.length > 0 ? matching : allOutfits;
-      return chosen.slice(0, limit);
+      return matching.slice(0, limit);
     } catch {
       // try next candidate
     }
@@ -818,6 +819,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
   const productBudgetMs = opts.budgets?.productMs ?? PRODUCT_BUDGET_MS;
   const searchBudgetMs = opts.budgets?.searchMs ?? SEARCH_BUDGET_MS;
   const looksBudgetMs = opts.budgets?.looksMs ?? LOOKS_BUDGET_MS;
+  const looksDefaultBudgetMs = opts.budgets?.looksDefaultMs ?? LOOKS_DEFAULT_BUDGET_MS;
 
   const searchMixedFn = opts.store?.searchMixed ?? defaultSearchMixed;
   const searchFn = opts.store?.search ?? defaultSearch;
@@ -1479,8 +1481,10 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
             queryOccasion = matched.rawKey ?? matched.occasion;
           }
 
+          const effectiveLooksBudgetMs = occasion !== null ? looksBudgetMs : looksDefaultBudgetMs;
           let libraryOutfits: Outfit[] | null = null;
           let libraryAnsweredEmpty = false;
+          let timedOut = false;
           try {
             const inFlightKey = `${department}|${limit}|${queryOccasion ?? ''}`;
             let looksPromise = inFlightLooks.get(inFlightKey);
@@ -1511,8 +1515,10 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
               looksPromise = created;
             }
 
-            const raced = await raceWithBudget(looksPromise, looksBudgetMs);
-            if (!raced.timedOut && raced.value !== null) {
+            const raced = await raceWithBudget(looksPromise, effectiveLooksBudgetMs);
+            if (raced.timedOut) {
+              timedOut = true;
+            } else if (raced.value !== null) {
               if (raced.value.length > 0) {
                 libraryOutfits = raced.value;
               } else {
@@ -1536,7 +1542,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
 
           // For an occasion query, never fall back to wrong-occasion fixture looks.
           if (occasion !== null) {
-            logExtra = `dept=${department} source=library n=0${libraryAnsweredEmpty ? '' : ' timeout_or_err=true'}`;
+            logExtra = `dept=${department} source=library n=0${timedOut ? ' timeout=true' : libraryAnsweredEmpty ? '' : ' timeout_or_err=true'}`;
             sendJson(
               res,
               200,
@@ -1548,7 +1554,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
 
           const publicRoot = path.resolve(opts.publicDir ?? path.join(import.meta.dirname, 'public'));
           const fixtureLooks = loadFixtureOutfits(publicRoot, department, limit);
-          logExtra = `dept=${department} source=fixture n=${fixtureLooks.length}`;
+          logExtra = `dept=${department} source=fixture n=${fixtureLooks.length}${timedOut ? ' timeout=true' : ''}`;
           sendJson(
             res,
             200,
