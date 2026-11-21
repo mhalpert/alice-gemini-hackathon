@@ -394,6 +394,28 @@ export function mountCall(root, { handlers = {} } = {}) {
 
   // ---- connecting ----------------------------------------------------------
 
+  // A link can carry the passcode after the # (for example in a QR code): #k=... .
+  // It is read once, kept for this tab, and taken out of the address bar.
+  // A passcode typed into the field always wins over it.
+  const LINK_CODE_KEY = 'alice.linkCode';
+  function readLinkCode() {
+    let code = '';
+    try {
+      const match = /(?:^#|&)k=([^&]+)/.exec(location.hash);
+      if (match) {
+        code = decodeURIComponent(match[1]).slice(0, 80);
+        sessionStorage.setItem(LINK_CODE_KEY, code);
+        history.replaceState(null, '', location.pathname + location.search);
+      } else {
+        code = sessionStorage.getItem(LINK_CODE_KEY) || '';
+      }
+    } catch {
+      // Storage or history unavailable: the passcode field still works
+    }
+    return code;
+  }
+  const linkCode = readLinkCode();
+
   // A dev link can carry ?token=...&url=... ; otherwise the server hands out a token.
   async function getToken(passcode) {
     const query = new URLSearchParams(location.search);
@@ -414,7 +436,7 @@ export function mountCall(root, { handlers = {} } = {}) {
     setState('connecting');
     el.status.textContent = '';
     try {
-      const grant = await getToken(el.passcode.value.trim());
+      const grant = await getToken(el.passcode.value.trim() || linkCode);
       if (grant.needsPasscode) {
         el.passcode.hidden = false;
         el.passcode.focus();
