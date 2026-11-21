@@ -75,7 +75,8 @@ export interface CapsuleOptions {
   toolsDir?: string;
   store?: CapsuleStoreLayer;
   critiqueAll?: CritiqueAllFn;
-  skipCritic?: boolean;
+  /** Opt-in stylist critic (default off unless opts.critic === true or ALICE_CAPSULE_CRITIC=on). */
+  critic?: boolean;
   /** Allow callers/scripts to run even when ALICE_CAPSULE env switch is off. */
   force?: boolean;
 }
@@ -174,6 +175,16 @@ export interface RawPipelineOutput {
 }
 
 export function isCapsuleEnabled(raw: string | undefined = process.env.ALICE_CAPSULE): boolean {
+  const norm = (raw ?? '').trim().toLowerCase();
+  return norm === 'on' || norm === '1' || norm === 'true';
+}
+
+export function isCapsuleCriticEnabled(
+  opts?: { critic?: boolean },
+  raw: string | undefined = process.env.ALICE_CAPSULE_CRITIC,
+): boolean {
+  if (opts?.critic === true) return true;
+  if (opts?.critic === false) return false;
   const norm = (raw ?? '').trim().toLowerCase();
   return norm === 'on' || norm === '1' || norm === 'true';
 }
@@ -898,7 +909,7 @@ async function evaluateCritic(
   brief: CapsuleBrief,
   opts: CapsuleOptions,
 ): Promise<CapsuleCriticEntry[] | null> {
-  if (opts.skipCritic || outfits.length === 0) return null;
+  if (!isCapsuleCriticEnabled(opts) || outfits.length === 0) return null;
 
   const critiqueAllFn = opts.critiqueAll ?? defaultCritiqueAll;
   const criticBrief: Brief = {
@@ -1050,8 +1061,9 @@ export async function packCapsule(
       });
     }
 
-    // Start critic in parallel with store enrichment/verification when images are already in final_output.json
-    const quickOutfits = pipeline.ok ? buildQuickOutfitsForCritic(pipeline, brief) : null;
+    // Critic is opt-in (opts.critic === true or ALICE_CAPSULE_CRITIC=on); when off, nothing is started or waited for.
+    const criticOn = isCapsuleCriticEnabled(opts);
+    const quickOutfits = criticOn && pipeline.ok ? buildQuickOutfitsForCritic(pipeline, brief) : null;
     const parallelCriticPromise = quickOutfits
       ? evaluateCritic(quickOutfits, brief, opts)
       : null;
@@ -1072,10 +1084,11 @@ export async function packCapsule(
       opts.store,
     );
 
-    // Report-only dress-code notes and critic (never triggers a re-solve; capped at 8 s)
-    const criticEntries = result.ok
-      ? await (parallelCriticPromise ?? evaluateCritic(result.outfits, brief, opts))
-      : null;
+    // Report-only dress-code notes (always on, instant) and optional critic (parallel, 8 s cap)
+    const criticEntries =
+      criticOn && result.ok
+        ? await (parallelCriticPromise ?? evaluateCritic(result.outfits, brief, opts))
+        : null;
     attachAdvisoryReports(result, brief, criticEntries, emitStep);
     result.timings.total_ms = Math.max(0, Date.now() - t0);
 
@@ -1189,7 +1202,8 @@ export async function repackCapsule(
       });
     }
 
-    const quickOutfits = pipeline.ok ? buildQuickOutfitsForCritic(pipeline, brief) : null;
+    const criticOn = isCapsuleCriticEnabled(opts);
+    const quickOutfits = criticOn && pipeline.ok ? buildQuickOutfitsForCritic(pipeline, brief) : null;
     const parallelCriticPromise = quickOutfits
       ? evaluateCritic(quickOutfits, brief, opts)
       : null;
@@ -1210,10 +1224,11 @@ export async function repackCapsule(
       opts.store,
     );
 
-    // Strictly ONE sandbox run per repack; dress-code notes and critic are report-only
-    const criticEntries = result.ok
-      ? await (parallelCriticPromise ?? evaluateCritic(result.outfits, brief, opts))
-      : null;
+    // Strictly ONE sandbox run per repack; dress-code notes always on, critic opt-in
+    const criticEntries =
+      criticOn && result.ok
+        ? await (parallelCriticPromise ?? evaluateCritic(result.outfits, brief, opts))
+        : null;
     attachAdvisoryReports(result, brief, criticEntries, emitStep);
     result.timings.total_ms = Math.max(0, Date.now() - t0);
 

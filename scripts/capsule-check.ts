@@ -109,9 +109,12 @@ async function liveValidateSample(res: CapsuleResult): Promise<void> {
 async function main(): Promise<void> {
   const modelArg = process.argv.slice(2).find((a) => !a.startsWith('-'));
   const forceRebuild = process.argv.includes('--rebuild');
+  const criticOptIn = process.argv.includes('--critic') ? true : undefined;
   const model = modelArg || process.env.ALICE_MODEL_CAPSULE || undefined;
 
-  console.log(`Warming capsule environment${model ? ` (model=${model})` : ''}...`);
+  console.log(
+    `Warming capsule environment${model ? ` (model=${model})` : ''}${criticOptIn ? ' [critic=on]' : ''}...`,
+  );
   const warmHandle = warmCapsule({ setupModel: model, forceRebuild });
   const warm = await warmHandle.ready;
   console.log(
@@ -124,6 +127,7 @@ async function main(): Promise<void> {
   console.log('\n--- Running packCapsule (Lisbon brief) ---');
   const packed = await packCapsule(LISBON_BRIEF, {
     model,
+    critic: criticOptIn,
     force: true,
     onStep: (s) => console.log(`  [+${(s.t_ms / 1000).toFixed(2)}s] (${s.kind}) ${s.text}`),
   });
@@ -135,6 +139,7 @@ async function main(): Promise<void> {
     console.log('\n--- Running repackCapsule ("the dinner is now black tie optional") ---');
     const repacked = await repackCapsule(packed, 'the dinner is now black tie optional', {
       model,
+      critic: criticOptIn,
       force: true,
       onStep: (s) => console.log(`  [+${(s.t_ms / 1000).toFixed(2)}s] (${s.kind}) ${s.text}`),
     });

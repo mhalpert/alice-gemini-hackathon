@@ -13,6 +13,7 @@ import {
 } from '../src/capsule/environment.ts';
 import {
   DEFAULT_CAPSULE_MODEL,
+  isCapsuleCriticEnabled,
   isCapsuleEnabled,
   mapPipelineToCapsuleResult,
   packCapsule,
@@ -533,18 +534,48 @@ describe('capsule packing, download-first, critic, dress-code repack, and switch
       };
 
       const prevEnv = process.env.ALICE_CAPSULE;
+      const prevCritic = process.env.ALICE_CAPSULE_CRITIC;
       process.env.ALICE_CAPSULE = 'on';
+      delete process.env.ALICE_CAPSULE_CRITIC;
+      let criticCalls = 0;
+      const countingCritic: CritiqueAllFn = async (outfits, brief, opts) => {
+        criticCalls += 1;
+        return okCritiqueAll(outfits, brief, opts);
+      };
       try {
+        assert.equal(isCapsuleCriticEnabled(), false);
+        assert.equal(isCapsuleCriticEnabled({ critic: true }), true);
+        assert.equal(isCapsuleCriticEnabled(undefined, 'on'), true);
+
+        // Critic off by default -> criticAll is NOT called and nothing is waited for
+        const packedDefault = await packCapsule(SAMPLE_BRIEF, {
+          client: fakeClient,
+          toolsDir,
+          statePath,
+          store: makeFakeStore(),
+          critiqueAll: countingCritic,
+          onStep: (s) => steps.push(s),
+        });
+        assert.equal(packedDefault.ok, true);
+        assert.equal(criticCalls, 0, 'critic must not run when opt-in is off');
+        assert.equal(packedDefault.critic, undefined);
+        assert.equal(
+          packedDefault.certificate.checks.some((c) => c.name === 'critic_all_6_plus'),
+          false,
+        );
+
+        // Opt-in via opts.critic: true -> critic runs and adds advisory check
         const packed = await packCapsule(SAMPLE_BRIEF, {
           client: fakeClient,
           toolsDir,
           statePath,
           store: makeFakeStore(),
-          critiqueAll: okCritiqueAll,
-          onStep: (s) => steps.push(s),
+          critiqueAll: countingCritic,
+          critic: true,
         });
         assert.equal(packed.ok, true);
-        assert.equal(packed.interaction_id, 'int-run-1');
+        assert.equal(criticCalls, 1);
+        assert.equal(packed.interaction_id, 'int-run-2');
         assert.equal(downloadedPaths[0], 'workspace/capsule_state/final_output.json');
         assert.equal(
           packed.explanation,
@@ -569,9 +600,11 @@ describe('capsule packing, download-first, critic, dress-code repack, and switch
           toolsDir,
           statePath,
           store: makeFakeStore(),
-          critiqueAll: okCritiqueAll,
+          critiqueAll: countingCritic,
+          critic: true,
         });
         assert.equal(repacked.ok, true);
+        assert.equal(criticCalls, 2);
         const streamCallsAfterRepack = capturedInputs.filter((p) => p.stream).length;
         assert.equal(
           streamCallsAfterRepack - streamCallsBeforeRepack,
@@ -580,12 +613,14 @@ describe('capsule packing, download-first, critic, dress-code repack, and switch
         );
         const lastReq = capturedInputs[capturedInputs.length - 1]!;
         assert.equal(lastReq.environment, 'env-stream-1');
-        assert.equal(lastReq.previous_interaction_id, 'int-run-1');
+        assert.equal(lastReq.previous_interaction_id, 'int-run-2');
       } finally {
         setCallLogSink(null);
         setCallRoom(null);
         if (prevEnv === undefined) delete process.env.ALICE_CAPSULE;
         else process.env.ALICE_CAPSULE = prevEnv;
+        if (prevCritic === undefined) delete process.env.ALICE_CAPSULE_CRITIC;
+        else process.env.ALICE_CAPSULE_CRITIC = prevCritic;
       }
     });
   });
@@ -681,6 +716,7 @@ describe('capsule packing, download-first, critic, dress-code repack, and switch
         statePath,
         store: makeFakeStore(),
         critiqueAll: lowCritic,
+        critic: true,
         force: true,
       });
 
@@ -708,6 +744,7 @@ describe('capsule packing, download-first, critic, dress-code repack, and switch
         statePath,
         store: makeFakeStore(),
         critiqueAll: failingCritic,
+        critic: true,
         force: true,
       });
       assert.equal(streamCalls, 2, 'repack must make strictly ONE agent interaction');
