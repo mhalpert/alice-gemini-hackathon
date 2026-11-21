@@ -463,8 +463,22 @@ export function buildPieceWalkthroughLine(
 /**
  * Fixed-speech instruction for speaking one piece's walkthrough line.
  */
-export function buildPieceWalkthroughInstruction(line: string): string {
-  return `The next piece slide just came up on screen. Say this line in your voice as Alice: "${line}" Keep it to that one sentence, never invent materials, and do not ask a question.`;
+export function buildPieceWalkthroughInstruction(
+  line: string,
+  piece?: Piece,
+  note?: string,
+  index = 0,
+): string {
+  if (!piece) {
+    return `The next piece slide just came up on screen. Say this line in your voice as Alice: "${line}" Keep it to that one sentence, never invent materials, and do not ask a question.`;
+  }
+  const leadIn = WALKTHROUGH_LEAD_INS[index % WALKTHROUGH_LEAD_INS.length]!;
+  const title = stripTitleColor(piece.item.title) || piece.slot;
+  const why = typeof piece.why === 'string' ? piece.why.replace(/\s+/g, ' ').trim() : '';
+  const facts = [note ? `the pointer is on: ${note}` : '', why ? `stylist note: ${why}` : '']
+    .filter(Boolean)
+    .join('; ');
+  return `The slide for the ${piece.slot} piece "${title}" just came up on screen${facts ? ` (${facts})` : ''}. Say ONE natural spoken sentence of at most 14 words in your voice as Alice, starting "${leadIn} ...", naming the piece in plain words and the one detail the pointer is on. Never read out fabric percentages, product codes, sizes or a spec list, never invent materials, and do not ask a question.`;
 }
 
 /**
@@ -718,7 +732,7 @@ export function createWalkthroughController(
       });
 
       try {
-        options.generateReply({ instructions: buildPieceWalkthroughInstruction(line) });
+        options.generateReply({ instructions: buildPieceWalkthroughInstruction(line, piece, note, idx) });
       } catch (err) {
         logFn(options.room, 'session_error', {
           source: 'walkthrough_piece',
