@@ -1,71 +1,38 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import sharp from 'sharp';
-import type { Outfit, Piece } from '../types.ts';
-import { boardFileName, publicUrl, tryonDir, withWidth } from './pure.ts';
+import type { BoardBoxes, Outfit, Piece } from '../types.ts';
+import type { BoardCell, PlacedBoardPiece } from './pure.ts';
+import {
+  BOARD_GUTTER,
+  BOARD_H,
+  BOARD_W,
+  boardFileName,
+  computeBoardBoxes,
+  layoutBoardCells,
+  publicUrl,
+  tryonDir,
+  withWidth,
+} from './pure.ts';
 import { fetchImageBuffer, getProductShot, writeFileAtomic } from './shots.ts';
 
-const BOARD_W = 1200;
-const BOARD_H = 900;
-const GUTTER = 24;
 const BOARD_BG = { r: 244, g: 239, b: 232, alpha: 1 };
 const BOARD_BG_HEX = '#f4efe8';
 
-interface Cell {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
+export interface BuiltCollage {
+  url: string;
+  path: string;
+  boxes: BoardBoxes;
 }
 
-function layoutCells(pieceCount: number): Cell[] {
-  if (pieceCount <= 0) return [];
-  if (pieceCount === 1) {
-    return [
-      {
-        x: GUTTER,
-        y: GUTTER,
-        w: BOARD_W - 2 * GUTTER,
-        h: BOARD_H - 2 * GUTTER,
-      },
-    ];
-  }
-
-  const halfW = Math.floor((BOARD_W - 3 * GUTTER) / 2);
-  const innerH = BOARD_H - 2 * GUTTER;
-
-  const cells: Cell[] = [
-    {
-      x: GUTTER,
-      y: GUTTER,
-      w: halfW,
-      h: innerH,
-    },
-  ];
-
-  const restCount = pieceCount - 1;
-  const rightX = GUTTER + halfW + GUTTER;
-  const rightW = BOARD_W - GUTTER - rightX;
-  const cols = restCount <= 2 ? 1 : 2;
-  const rows = Math.ceil(restCount / cols);
-  const cellW = Math.floor((rightW - (cols - 1) * GUTTER) / cols);
-  const cellH = Math.floor((innerH - (rows - 1) * GUTTER) / rows);
-
-  for (let i = 0; i < restCount; i++) {
-    const row = Math.floor(i / cols);
-    const col = i % cols;
-    const itemsInRow = row === rows - 1 ? restCount - row * cols : cols;
-    const rowWidth = itemsInRow * cellW + (itemsInRow - 1) * GUTTER;
-    const rowStartX = rightX + Math.floor((rightW - rowWidth) / 2);
-    cells.push({
-      x: rowStartX + col * (cellW + GUTTER),
-      y: GUTTER + row * (cellH + GUTTER),
-      w: cellW,
-      h: cellH,
-    });
-  }
-
-  return cells;
+interface PreparedOverlay {
+  slot: string;
+  input: Buffer;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  blend: 'multiply';
 }
 
 async function loadPieceBuffer(piece: Piece): Promise<Buffer | null> {
@@ -91,8 +58,9 @@ async function loadPieceBuffer(piece: Piece): Promise<Buffer | null> {
 
 async function prepareCellOverlay(
   buf: Buffer,
-  cell: Cell,
-): Promise<{ input: Buffer; left: number; top: number; blend: 'multiply' } | null> {
+  cell: BoardCell,
+  slot: string,
+): Promise<PreparedOverlay | null> {
   try {
     const flatBuf = await sharp(buf).rotate().flatten({ background: '#ffffff' }).png().toBuffer();
 
@@ -123,9 +91,12 @@ async function prepareCellOverlay(
     const top = cell.y + Math.floor((cell.h - info.height) / 2);
 
     return {
+      slot,
       input: data,
       left,
       top,
+      width: info.width,
+      height: info.height,
       blend: 'multiply',
     };
   } catch {
@@ -133,7 +104,7 @@ async function prepareCellOverlay(
   }
 }
 
-export async function buildCollage(outfit: Outfit, label?: string): Promise<string | null> {
+export async function buildCollage(outfit: Outfit, label?: string): Promise<BuiltCollage | null> {
   const t0 = Date.now();
   try {
     const pieces = Array.isArray(outfit?.pieces) ? outfit.pieces : [];
@@ -141,22 +112,36 @@ export async function buildCollage(outfit: Outfit, label?: string): Promise<stri
       return null;
     }
 
-    const cells = layoutCells(pieces.length);
-    const overlays = (
+    const cells = layoutBoardCells(pieces.length, BOARD_W, BOARD_H, BOARD_GUTTER);
+    const prepared = (
       await Promise.all(
         pieces.map(async (piece, idx) => {
           const buf = await loadPieceBuffer(piece);
           if (!buf) return null;
-          return prepareCellOverlay(buf, cells[idx]);
+          return prepareCellOverlay(buf, cells[idx], piece.slot);
         }),
       )
-    ).filter(
-      (o): o is { input: Buffer; left: number; top: number; blend: 'multiply' } => o !== null,
-    );
+    ).filter((o): o is PreparedOverlay => o !== null);
 
-    if (overlays.length === 0) {
+    if (prepared.length === 0) {
       return null;
     }
+
+    const overlays = prepared.map((o) => ({
+      input: o.input,
+      left: o.left,
+      top: o.top,
+      blend: o.blend,
+    }));
+
+    const placements: PlacedBoardPiece[] = prepared.map((o) => ({
+      slot: o.slot,
+      left: o.left,
+      top: o.top,
+      width: o.width,
+      height: o.height,
+    }));
+    const boxes = computeBoardBoxes(placements, BOARD_W, BOARD_H);
 
     const outBuf = await sharp({
       create: {
@@ -178,7 +163,11 @@ export async function buildCollage(outfit: Outfit, label?: string): Promise<stri
     console.log(
       `[board] look ${outfit.number ?? label ?? '?'} ${overlays.length} pieces ${Date.now() - t0}ms`,
     );
-    return publicUrl(name);
+    return {
+      url: publicUrl(name),
+      path: filePath,
+      boxes,
+    };
   } catch (err) {
     console.error('[media] collage error:', (err as Error)?.message);
     return null;

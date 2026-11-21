@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
-import type { Item, Outfit, Piece } from '../types.ts';
+import type { BoardBoxes, Item, Outfit, Piece } from '../types.ts';
 
 export const TRYON_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.(jpg|jpeg|png|webp|mp4)$/;
 
@@ -44,6 +44,170 @@ export function boardFileName(outfit: Pick<Outfit, 'number'>, label?: string): s
   const tag = sanitizeNamePart(rawTag, 'look');
   const rand = crypto.randomBytes(4).toString('hex');
   return `board-${tag}-${rand}.jpg`;
+}
+
+export function boardBuildKey(outfit: Pick<Outfit, 'number' | 'pieces'>, label?: string): string {
+  const tag = typeof label === 'string' && label.trim().length > 0 ? label.trim() : '';
+  const num = outfit.number !== undefined ? String(outfit.number) : '';
+  const piecesKey = Array.isArray(outfit.pieces)
+    ? outfit.pieces
+        .map((p) => `${p?.slot ?? ''}:${p?.item?.id ?? ''}:${p?.item?.variant_id ?? ''}`)
+        .join(',')
+    : '';
+  return `${num}|${tag}|${piecesKey}`;
+}
+
+export const BOARD_W = 1200;
+export const BOARD_H = 900;
+export const BOARD_GUTTER = 24;
+
+export interface BoardCell {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface PlacedBoardPiece {
+  slot: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+function round4(n: number): number {
+  return Math.round(n * 10_000) / 10_000;
+}
+
+function clamp01(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return n;
+}
+
+export function layoutBoardCells(
+  pieceCount: number,
+  boardW = BOARD_W,
+  boardH = BOARD_H,
+  gutter = BOARD_GUTTER,
+): BoardCell[] {
+  if (pieceCount <= 0) return [];
+  if (pieceCount === 1) {
+    return [
+      {
+        x: gutter,
+        y: gutter,
+        w: boardW - 2 * gutter,
+        h: boardH - 2 * gutter,
+      },
+    ];
+  }
+
+  const halfW = Math.floor((boardW - 3 * gutter) / 2);
+  const innerH = boardH - 2 * gutter;
+
+  const cells: BoardCell[] = [
+    {
+      x: gutter,
+      y: gutter,
+      w: halfW,
+      h: innerH,
+    },
+  ];
+
+  const restCount = pieceCount - 1;
+  const rightX = gutter + halfW + gutter;
+  const rightW = boardW - gutter - rightX;
+  const cols = restCount <= 2 ? 1 : 2;
+  const rows = Math.ceil(restCount / cols);
+  const cellW = Math.floor((rightW - (cols - 1) * gutter) / cols);
+  const cellH = Math.floor((innerH - (rows - 1) * gutter) / rows);
+
+  for (let i = 0; i < restCount; i++) {
+    const row = Math.floor(i / cols);
+    const col = i % cols;
+    const itemsInRow = row === rows - 1 ? restCount - row * cols : cols;
+    const rowWidth = itemsInRow * cellW + (itemsInRow - 1) * gutter;
+    const rowStartX = rightX + Math.floor((rightW - rowWidth) / 2);
+    cells.push({
+      x: rowStartX + col * (cellW + gutter),
+      y: gutter + row * (cellH + gutter),
+      w: cellW,
+      h: cellH,
+    });
+  }
+
+  return cells;
+}
+
+export function placeInBoardCell(
+  cell: BoardCell,
+  imgWidth: number,
+  imgHeight: number,
+  scale = 0.92,
+): { left: number; top: number; width: number; height: number } {
+  const targetW = Math.max(1, Math.floor(cell.w * scale));
+  const targetH = Math.max(1, Math.floor(cell.h * scale));
+  const safeW = Math.max(1, imgWidth);
+  const safeH = Math.max(1, imgHeight);
+  const ratio = Math.min(targetW / safeW, targetH / safeH);
+  const width = Math.max(1, Math.min(targetW, Math.round(safeW * ratio)));
+  const height = Math.max(1, Math.min(targetH, Math.round(safeH * ratio)));
+  const left = cell.x + Math.floor((cell.w - width) / 2);
+  const top = cell.y + Math.floor((cell.h - height) / 2);
+  return { left, top, width, height };
+}
+
+export function computeBoardBoxes(
+  placements: PlacedBoardPiece[],
+  boardW = BOARD_W,
+  boardH = BOARD_H,
+): BoardBoxes {
+  const boxes: BoardBoxes = {};
+  if (!Array.isArray(placements) || boardW <= 0 || boardH <= 0) {
+    return boxes;
+  }
+
+  const slotCounts = new Map<string, number>();
+
+  for (const p of placements) {
+    if (!p || p.width <= 0 || p.height <= 0) continue;
+    const baseSlot = typeof p.slot === 'string' && p.slot.trim().length > 0 ? p.slot.trim() : 'piece';
+    const seen = (slotCounts.get(baseSlot) ?? 0) + 1;
+    slotCounts.set(baseSlot, seen);
+
+    let key = seen === 1 ? baseSlot : `${baseSlot}#${seen}`;
+    let suffix = seen;
+    while (key in boxes) {
+      suffix += 1;
+      key = `${baseSlot}#${suffix}`;
+    }
+
+    const x = round4(clamp01(p.left / boardW));
+    const y = round4(clamp01(p.top / boardH));
+    const w = round4(clamp01(Math.min(p.width / boardW, 1 - x)));
+    const h = round4(clamp01(Math.min(p.height / boardH, 1 - y)));
+    boxes[key] = [x, y, w, h];
+  }
+
+  return boxes;
+}
+
+export function placeBoardPieces(
+  pieces: Array<{ slot: string; width: number; height: number }>,
+  boardW = BOARD_W,
+  boardH = BOARD_H,
+  gutter = BOARD_GUTTER,
+): { cells: BoardCell[]; placed: PlacedBoardPiece[]; boxes: BoardBoxes } {
+  const cells = layoutBoardCells(pieces.length, boardW, boardH, gutter);
+  const placed: PlacedBoardPiece[] = pieces.map((piece, idx) => {
+    const rect = placeInBoardCell(cells[idx], piece.width, piece.height);
+    return { slot: piece.slot, ...rect };
+  });
+  const boxes = computeBoardBoxes(placed, boardW, boardH);
+  return { cells, placed, boxes };
 }
 
 export function tryonFileName(id: string): string {
