@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
-import type { Item, Outfit, Piece } from '../types.ts';
+import type { BoardBoxes, Item, Outfit, Piece } from '../types.ts';
 
 export const TRYON_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.(jpg|jpeg|png|webp|mp4)$/;
 
@@ -46,8 +46,180 @@ export function boardFileName(outfit: Pick<Outfit, 'number'>, label?: string): s
   return `board-${tag}-${rand}.jpg`;
 }
 
+export function boardBuildKey(outfit: Pick<Outfit, 'number' | 'pieces'>, label?: string): string {
+  const tag = typeof label === 'string' && label.trim().length > 0 ? label.trim() : '';
+  const num = outfit.number !== undefined ? String(outfit.number) : '';
+  const piecesKey = Array.isArray(outfit.pieces)
+    ? outfit.pieces
+        .map((p) => `${p?.slot ?? ''}:${p?.item?.id ?? ''}:${p?.item?.variant_id ?? ''}`)
+        .join(',')
+    : '';
+  return `${num}|${tag}|${piecesKey}`;
+}
+
+export const BOARD_W = 1200;
+export const BOARD_H = 900;
+export const BOARD_GUTTER = 24;
+
+export interface BoardCell {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface PlacedBoardPiece {
+  slot: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+function round4(n: number): number {
+  return Math.round(n * 10_000) / 10_000;
+}
+
+function clamp01(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return n;
+}
+
+export function layoutBoardCells(
+  pieceCount: number,
+  boardW = BOARD_W,
+  boardH = BOARD_H,
+  gutter = BOARD_GUTTER,
+): BoardCell[] {
+  if (pieceCount <= 0) return [];
+  if (pieceCount === 1) {
+    return [
+      {
+        x: gutter,
+        y: gutter,
+        w: boardW - 2 * gutter,
+        h: boardH - 2 * gutter,
+      },
+    ];
+  }
+
+  const halfW = Math.floor((boardW - 3 * gutter) / 2);
+  const innerH = boardH - 2 * gutter;
+
+  const cells: BoardCell[] = [
+    {
+      x: gutter,
+      y: gutter,
+      w: halfW,
+      h: innerH,
+    },
+  ];
+
+  const restCount = pieceCount - 1;
+  const rightX = gutter + halfW + gutter;
+  const rightW = boardW - gutter - rightX;
+  const cols = restCount <= 2 ? 1 : 2;
+  const rows = Math.ceil(restCount / cols);
+  const cellW = Math.floor((rightW - (cols - 1) * gutter) / cols);
+  const cellH = Math.floor((innerH - (rows - 1) * gutter) / rows);
+
+  for (let i = 0; i < restCount; i++) {
+    const row = Math.floor(i / cols);
+    const col = i % cols;
+    const itemsInRow = row === rows - 1 ? restCount - row * cols : cols;
+    const rowWidth = itemsInRow * cellW + (itemsInRow - 1) * gutter;
+    const rowStartX = rightX + Math.floor((rightW - rowWidth) / 2);
+    cells.push({
+      x: rowStartX + col * (cellW + gutter),
+      y: gutter + row * (cellH + gutter),
+      w: cellW,
+      h: cellH,
+    });
+  }
+
+  return cells;
+}
+
+export function placeInBoardCell(
+  cell: BoardCell,
+  imgWidth: number,
+  imgHeight: number,
+  scale = 0.92,
+): { left: number; top: number; width: number; height: number } {
+  const targetW = Math.max(1, Math.floor(cell.w * scale));
+  const targetH = Math.max(1, Math.floor(cell.h * scale));
+  const safeW = Math.max(1, imgWidth);
+  const safeH = Math.max(1, imgHeight);
+  const ratio = Math.min(targetW / safeW, targetH / safeH);
+  const width = Math.max(1, Math.min(targetW, Math.round(safeW * ratio)));
+  const height = Math.max(1, Math.min(targetH, Math.round(safeH * ratio)));
+  const left = cell.x + Math.floor((cell.w - width) / 2);
+  const top = cell.y + Math.floor((cell.h - height) / 2);
+  return { left, top, width, height };
+}
+
+export function computeBoardBoxes(
+  placements: PlacedBoardPiece[],
+  boardW = BOARD_W,
+  boardH = BOARD_H,
+): BoardBoxes {
+  const boxes: BoardBoxes = {};
+  if (!Array.isArray(placements) || boardW <= 0 || boardH <= 0) {
+    return boxes;
+  }
+
+  const slotCounts = new Map<string, number>();
+
+  for (const p of placements) {
+    if (!p || p.width <= 0 || p.height <= 0) continue;
+    const baseSlot = typeof p.slot === 'string' && p.slot.trim().length > 0 ? p.slot.trim() : 'piece';
+    const seen = (slotCounts.get(baseSlot) ?? 0) + 1;
+    slotCounts.set(baseSlot, seen);
+
+    let key = seen === 1 ? baseSlot : `${baseSlot}#${seen}`;
+    let suffix = seen;
+    while (key in boxes) {
+      suffix += 1;
+      key = `${baseSlot}#${suffix}`;
+    }
+
+    const x = round4(clamp01(p.left / boardW));
+    const y = round4(clamp01(p.top / boardH));
+    const w = round4(clamp01(Math.min(p.width / boardW, 1 - x)));
+    const h = round4(clamp01(Math.min(p.height / boardH, 1 - y)));
+    boxes[key] = [x, y, w, h];
+  }
+
+  return boxes;
+}
+
+export function placeBoardPieces(
+  pieces: Array<{ slot: string; width: number; height: number }>,
+  boardW = BOARD_W,
+  boardH = BOARD_H,
+  gutter = BOARD_GUTTER,
+): { cells: BoardCell[]; placed: PlacedBoardPiece[]; boxes: BoardBoxes } {
+  const cells = layoutBoardCells(pieces.length, boardW, boardH, gutter);
+  const placed: PlacedBoardPiece[] = pieces.map((piece, idx) => {
+    const rect = placeInBoardCell(cells[idx], piece.width, piece.height);
+    return { slot: piece.slot, ...rect };
+  });
+  const boxes = computeBoardBoxes(placed, boardW, boardH);
+  return { cells, placed, boxes };
+}
+
 export function tryonFileName(id: string): string {
   return `tryon-${id}.jpg`;
+}
+
+export function sceneFileName(id: string): string {
+  return `scene-${id}.jpg`;
+}
+
+export function videoFileName(id: string): string {
+  return `video-${id}.mp4`;
 }
 
 export function newTryonId(): string {
@@ -993,4 +1165,136 @@ export async function runTryOnVerifyLoop<TImage>(
       }
     })();
   });
+}
+
+// ---------------------------------------------------------------------------
+// Try-on extras: setting builder & parallel scene + video orchestrator (pure)
+// ---------------------------------------------------------------------------
+
+export interface BuildSettingInput {
+  occasion: string;
+  where?: string;
+  when?: string;
+  weather?: string;
+}
+
+export function buildSetting(opts: BuildSettingInput): string {
+  const occasion = (opts.occasion ?? '').trim() || 'a stylish outing';
+  const where = (opts.where ?? '').trim();
+  const rawWhen = (opts.when ?? '').trim();
+  const weather = (opts.weather ?? '').trim();
+
+  const parts: string[] = [occasion];
+
+  if (where) {
+    parts.push(/^in\s+/i.test(where) ? where : `in ${where}`);
+  }
+
+  if (weather && rawWhen) {
+    const cleanWhen = rawWhen.replace(/^on\s+(?:a\s+|an\s+)?/i, '').trim();
+    const article = /^[aeiou]/i.test(weather) ? 'an' : 'a';
+    parts.push(`on ${article} ${weather} ${cleanWhen}`);
+  } else if (rawWhen) {
+    const hasPrep = /^(on|at|in|during|this|next|today|tonight|tomorrow)\b/i.test(rawWhen);
+    parts.push(hasPrep ? rawWhen : `on ${rawWhen}`);
+  } else if (weather) {
+    parts.push(`in ${weather} weather`);
+  }
+
+  let sentence = parts.join(' ').replace(/\s+/g, ' ').trim();
+  const lower = sentence.toLowerCase();
+
+  if (lower.includes('rooftop') && !lower.includes('lights') && !lower.includes('skyline')) {
+    const isNight = /evening|night|dinner|sunset|cocktail|tonight/i.test(lower);
+    sentence += isNight ? ', city lights behind' : ', open city skyline behind';
+  } else if (lower.includes('beach') && !lower.includes('ocean') && !lower.includes('shore')) {
+    sentence += ', soft ocean light and shoreline behind';
+  }
+
+  return sentence;
+}
+
+export interface TryOnExtraRender {
+  url: string;
+  path: string;
+  ms: number;
+  id: string;
+}
+
+export interface TryOnExtraRenderEvent {
+  kind: 'scene' | 'video';
+  ok: boolean;
+  url?: string;
+  ms: number;
+}
+
+export interface TryOnExtrasResult {
+  scene: { url: string; path: string; ms: number } | null;
+  video: { url: string; path: string; ms: number } | null;
+  setting: string;
+}
+
+export interface RunTryOnExtrasDeps {
+  setting: string;
+  sceneEnabled: boolean;
+  videoEnabled: boolean;
+  runScene: () => Promise<{ url: string; path: string; ms: number } | null>;
+  runVideo: () => Promise<{ url: string; path: string; ms: number } | null>;
+  onRender?: (r: TryOnExtraRenderEvent) => void;
+  now?: () => number;
+}
+
+export async function runTryOnExtrasLoop(deps: RunTryOnExtrasDeps): Promise<TryOnExtrasResult> {
+  const now = deps.now ?? (() => Date.now());
+
+  const notify = (ev: TryOnExtraRenderEvent): void => {
+    try {
+      deps.onRender?.(ev);
+    } catch {
+      // Never let a callback error break extras
+    }
+  };
+
+  const scenePromise: Promise<{ url: string; path: string; ms: number } | null> = deps.sceneEnabled
+    ? (async () => {
+        const t0 = now();
+        try {
+          const res = await deps.runScene();
+          const ms = res?.ms ?? Math.max(0, now() - t0);
+          notify({
+            kind: 'scene',
+            ok: Boolean(res),
+            ...(res ? { url: res.url } : {}),
+            ms,
+          });
+          return res ? { url: res.url, path: res.path, ms: res.ms } : null;
+        } catch {
+          notify({ kind: 'scene', ok: false, ms: Math.max(0, now() - t0) });
+          return null;
+        }
+      })()
+    : Promise.resolve(null);
+
+  const videoPromise: Promise<{ url: string; path: string; ms: number } | null> = deps.videoEnabled
+    ? (async () => {
+        const t0 = now();
+        try {
+          const res = await deps.runVideo();
+          const ms = res?.ms ?? Math.max(0, now() - t0);
+          notify({
+            kind: 'video',
+            ok: Boolean(res),
+            ...(res ? { url: res.url } : {}),
+            ms,
+          });
+          return res ? { url: res.url, path: res.path, ms: res.ms } : null;
+        } catch {
+          notify({ kind: 'video', ok: false, ms: Math.max(0, now() - t0) });
+          return null;
+        }
+      })()
+    : Promise.resolve(null);
+
+  const [scene, video] = await Promise.all([scenePromise, videoPromise]);
+  return { scene, video, setting: deps.setting };
 }

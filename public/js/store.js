@@ -11,6 +11,27 @@ const NAV_ITEMS = [
 
 const COUNT_WORDS = ['Zero', 'One', 'Two', 'Three', 'Four', 'Five', 'Six'];
 
+const RENDER_KINDS = ['studio', 'scene', 'video'];
+const RENDER_PRIORITY = ['video', 'scene', 'studio'];
+
+const RENDER_CAPTIONS = {
+  studio: 'On you',
+  scene: 'On you, on location',
+  video: 'On you, in motion',
+};
+
+const RENDER_LABELS = {
+  studio: 'Studio',
+  scene: 'On location',
+  video: 'In motion',
+};
+
+function normalizeRenderKind(raw) {
+  if (typeof raw !== 'string') return 'studio';
+  const trimmed = raw.trim().toLowerCase();
+  return RENDER_KINDS.includes(trimmed) ? trimmed : 'studio';
+}
+
 // Shared Shopify image sizing helper — always use this for store CDN URLs
 function sized(url, width) {
   if (!url || typeof url !== 'string') return '';
@@ -39,10 +60,29 @@ function safeExternalUrl(url) {
   return null;
 }
 
+function safeOptionalUrl(url) {
+  if (typeof url !== 'string' || !url.trim()) return null;
+  return safeExternalUrl(url);
+}
+
 function formatPrice(amount) {
   const num = Number(amount);
   if (!Number.isFinite(num)) return '$0';
   return Number.isInteger(num) ? `$${num}` : `$${num.toFixed(2)}`;
+}
+
+// Format a price only when a valid numeric value is present; missing values return null
+function formatOptionalPrice(amount) {
+  if (typeof amount === 'number' && Number.isFinite(amount)) {
+    return formatPrice(amount);
+  }
+  if (typeof amount === 'string') {
+    const clean = amount.trim();
+    if (!clean) return null;
+    const num = Number(clean);
+    if (Number.isFinite(num)) return formatPrice(num);
+  }
+  return null;
 }
 
 function formatSlot(slot) {
@@ -336,13 +376,18 @@ export function mountStore(root, { onTalk } = {}) {
   const state = {
     view: 'boutique', // 'empty' | 'boutique' | 'looks' | 'picked' | 'search'
     outfits: new Map(), // look number -> Outfit
-    media: new Map(), // look number -> { tryOnStatus, tryOnUrl, collageUrl, collageBoxes, revealed, stageSwapped, preloads }
+    media: new Map(), // look number -> { tryOnStatus, tryOnUrl, renders, activeRender, userPickedRender, autoAdvancedKinds, newRenderTags, videoPreload, videoFailed, failedUrls, collageUrl, collageBoxes, revealed, stageSwapped, preloads }
     subtitleMeta: { raw: '', cleanSubtitle: '', occasion: '', budget: null },
     pickedOutfit: null,
     highlightedSlot: null,
     bagCount: 0,
     bagData: null,
     bagOpen: false,
+    bagOpenedStores: new Set(),
+    drawerMode: 'bag', // 'bag' | 'review' | 'result'
+    orderReview: null,
+    orderConfirmedId: null,
+    orderResult: null,
     productOpen: false,
     lastSearch: null,
     searchFromBoutique: false,
@@ -382,6 +427,14 @@ export function mountStore(root, { onTalk } = {}) {
       state.media.set(num, {
         tryOnStatus: null,
         tryOnUrl: null,
+        renders: { studio: null, scene: null, video: null },
+        activeRender: null,
+        userPickedRender: false,
+        autoAdvancedKinds: new Set(),
+        newRenderTags: new Map(),
+        videoPreload: null,
+        videoFailed: false,
+        failedUrls: new Set(),
         collageUrl: null,
         collageBoxes: null,
         revealed: false,
@@ -392,6 +445,29 @@ export function mountStore(root, { onTalk } = {}) {
     return state.media.get(num);
   }
 
+  function hasAnyRender(media) {
+    return Boolean(media && (media.renders.studio || media.renders.scene || media.renders.video));
+  }
+
+  function availableRenderKinds(media) {
+    if (!media) return [];
+    return RENDER_KINDS.filter(
+      (kind) => Boolean(media.renders[kind]) && !(kind === 'video' && media.videoFailed)
+    );
+  }
+
+  function pickRenderKind(media, preferredKind = null, { exclude = null } = {}) {
+    if (!media) return null;
+    const isUsable = (kind) =>
+      Boolean(kind && kind !== exclude && media.renders[kind]) &&
+      !(kind === 'video' && media.videoFailed);
+    if (isUsable(preferredKind)) return preferredKind;
+    for (const kind of RENDER_PRIORITY) {
+      if (isUsable(kind)) return kind;
+    }
+    return null;
+  }
+
   function preloadImage(media, url) {
     if (!url) return;
     const img = new Image();
@@ -399,6 +475,82 @@ export function mountStore(root, { onTalk } = {}) {
     img.src = url;
     media.preloads.push(img);
     if (media.preloads.length > 4) media.preloads.shift();
+  }
+
+  // Pause and clear a <video> element so it stops decoding and drops buffered data
+  function releaseVideoElement(videoEl) {
+    if (!videoEl) return;
+    videoEl.dataset.activeSrc = '';
+    videoEl.dataset.preloadUrl = '';
+    try {
+      videoEl.pause();
+    } catch {
+      // Ignore pause errors on detached or unloaded elements
+    }
+    videoEl.removeAttribute('src');
+    try {
+      videoEl.load();
+    } catch {
+      // Ignore load errors when media playback is unavailable
+    }
+  }
+
+  // Preload a clip in a detached muted video element so playback can start right away on reveal
+  function preloadVideo(media, url) {
+    if (!url) return;
+    if (media.videoPreload) {
+      if (media.videoPreload.dataset.preloadUrl === url) return;
+      releaseVideoElement(media.videoPreload);
+      media.videoPreload = null;
+    }
+    const video = document.createElement('video');
+    video.preload = 'auto';
+    video.muted = true;
+    video.defaultMuted = true;
+    video.playsInline = true;
+    video.setAttribute('preload', 'auto');
+    video.setAttribute('muted', '');
+    video.setAttribute('playsinline', '');
+    video.dataset.preloadUrl = url;
+    video.src = url;
+    try {
+      video.load();
+    } catch {
+      // Ignore environments without media preloading
+    }
+    media.videoPreload = video;
+  }
+
+  function clearLookRenders(media) {
+    if (!media) return;
+    media.tryOnUrl = null;
+    media.renders = { studio: null, scene: null, video: null };
+    media.activeRender = null;
+    media.userPickedRender = false;
+    media.autoAdvancedKinds.clear();
+    media.videoFailed = false;
+    media.failedUrls.clear();
+    for (const timerId of media.newRenderTags.values()) {
+      clearTimeout(timerId);
+    }
+    media.newRenderTags.clear();
+    if (media.videoPreload) {
+      releaseVideoElement(media.videoPreload);
+      media.videoPreload = null;
+    }
+    media.preloads = [];
+  }
+
+  function markRenderNew(outfitNumber, media, kind) {
+    const existingTimer = media.newRenderTags.get(kind);
+    if (existingTimer) clearTimeout(existingTimer);
+    const timerId = setTimeout(() => {
+      media.newRenderTags.delete(kind);
+      if (state.view === 'picked' && activePickedRefs && activePickedRefs.outfit === outfitNumber) {
+        syncRenderStrip(activePickedRefs, media);
+      }
+    }, 4000);
+    media.newRenderTags.set(kind, timerId);
   }
 
   function setHasProducts() {
@@ -540,7 +692,7 @@ export function mountStore(root, { onTalk } = {}) {
             onClick: () => {
               if (state.bagOpen) {
                 closeBagDrawer();
-              } else if (state.bagData) {
+              } else if (hasDrawerContent()) {
                 openBagDrawer();
               }
             },
@@ -669,8 +821,36 @@ export function mountStore(root, { onTalk } = {}) {
   );
   productSlotEl.replaceChildren(productLayerEl);
 
+  const bagTitleEl = el('h2', { className: 'bag-panel-title' }, 'Your bag');
   const bagBodyEl = el('div', { className: 'panel-body bag-panel-body' });
   const bagFooterEl = el('div', { className: 'panel-footer bag-panel-footer' });
+  const bagSheetEl = el(
+    'aside',
+    {
+      className: 'panel-sheet panel-sheet--bag',
+      role: 'dialog',
+      'aria-modal': 'true',
+      'aria-label': 'Your bag',
+    },
+    el(
+      'div',
+      { className: 'panel-head bag-panel-head' },
+      bagTitleEl,
+      el(
+        'button',
+        {
+          type: 'button',
+          className: 'panel-close-btn',
+          'aria-label': 'Close bag',
+          dataset: { closeBag: 'true' },
+          onClick: () => closeBagDrawer(),
+        },
+        closeSvg()
+      )
+    ),
+    bagBodyEl,
+    bagFooterEl
+  );
   const bagLayerEl = el(
     'div',
     { className: 'panel-layer panel-layer--bag', 'aria-hidden': 'true' },
@@ -678,33 +858,7 @@ export function mountStore(root, { onTalk } = {}) {
       className: 'panel-backdrop',
       onClick: () => closeBagDrawer(),
     }),
-    el(
-      'aside',
-      {
-        className: 'panel-sheet panel-sheet--bag',
-        role: 'dialog',
-        'aria-modal': 'true',
-        'aria-label': 'Your bag',
-      },
-      el(
-        'div',
-        { className: 'panel-head bag-panel-head' },
-        el('h2', { className: 'bag-panel-title' }, 'Your bag'),
-        el(
-          'button',
-          {
-            type: 'button',
-            className: 'panel-close-btn',
-            'aria-label': 'Close bag',
-            dataset: { closeBag: 'true' },
-            onClick: () => closeBagDrawer(),
-          },
-          closeSvg()
-        )
-      ),
-      bagBodyEl,
-      bagFooterEl
-    )
+    bagSheetEl
   );
   bagSlotEl.replaceChildren(bagLayerEl);
 
@@ -784,6 +938,9 @@ export function mountStore(root, { onTalk } = {}) {
   window.addEventListener('resize', syncHeaderHeight, { passive: true });
 
   function updateNavActive() {
+    if (state.view !== 'picked') {
+      releaseStageVideo();
+    }
     const looksLink = navLinks.get('Looks by Alice');
     if (looksLink) {
       const active = state.view === 'looks' || state.view === 'picked';
@@ -990,6 +1147,7 @@ export function mountStore(root, { onTalk } = {}) {
   }
 
   function renderEmptyView() {
+    releaseStageVideo();
     boutiqueRefs = null;
     mainEl.replaceChildren(
       el(
@@ -1738,6 +1896,7 @@ export function mountStore(root, { onTalk } = {}) {
   }
 
   function renderLooksView() {
+    releaseStageVideo();
     boutiqueRefs = null;
     const looks = sortedOutfits();
     if (looks.length === 0) {
@@ -1959,13 +2118,250 @@ export function mountStore(root, { onTalk } = {}) {
     ring.setAttribute('aria-hidden', 'false');
   }
 
-  function applyStageState(panelRefs, media, { deferReveal = false } = {}) {
+  function syncVideoPlayButton(panelRefs) {
+    if (!panelRefs || !panelRefs.stageVideo || !panelRefs.videoPlayBtn) return;
+    const playing = !panelRefs.stageVideo.paused && !panelRefs.stageVideo.ended;
+    panelRefs.videoPlayBtn.classList.toggle('is-playing', playing);
+    panelRefs.videoPlayBtn.setAttribute('aria-pressed', playing ? 'true' : 'false');
+    panelRefs.videoPlayBtn.setAttribute('aria-label', playing ? 'Pause video' : 'Play video');
+    if (panelRefs.videoPlayLabel) {
+      panelRefs.videoPlayLabel.textContent = playing ? 'Pause' : 'Play';
+    }
+  }
+
+  function releaseStageVideo(panelRefs = null) {
+    const target = panelRefs && panelRefs.stageVideo ? panelRefs.stageVideo : null;
+    if (target) {
+      releaseVideoElement(target);
+      if (target === activeStageVideo) activeStageVideo = null;
+    }
+    if (activeStageVideo && activeStageVideo !== target) {
+      releaseVideoElement(activeStageVideo);
+      activeStageVideo = null;
+    }
+    if (panelRefs && panelRefs.videoPlayBtn) {
+      panelRefs.videoPlayBtn.hidden = true;
+      panelRefs.videoPlayBtn.classList.remove('is-playing');
+      panelRefs.videoPlayBtn.setAttribute('aria-pressed', 'false');
+    }
+  }
+
+  function triggerMediaFade(mediaEl, panelRefs) {
+    if (!mediaEl || prefersReducedMotion()) return;
+    mediaEl.classList.add('is-media-entering');
+    void mediaEl.offsetWidth;
+    requestAnimationFrame(() => {
+      if (state.view === 'picked' && activePickedRefs === panelRefs) {
+        mediaEl.classList.remove('is-media-entering');
+      }
+    });
+  }
+
+  function handleVideoFailure(panelRefs, media, failedUrl) {
+    if (!media || media.renders.video !== failedUrl) return;
+    media.videoFailed = true;
+    releaseStageVideo(panelRefs);
+    const fallbackKind = pickRenderKind(media, null, { exclude: 'video' });
+    media.activeRender = fallbackKind;
+    media.tryOnUrl = fallbackKind ? media.renders[fallbackKind] : null;
+    if (state.view === 'picked' && activePickedRefs === panelRefs) {
+      applyStageState(panelRefs, media);
+    }
+  }
+
+  function mountStageVideo(panelRefs, media, videoUrl, { fade = false } = {}) {
+    const { stageVideo, videoPlayBtn } = panelRefs;
+    const reduced = prefersReducedMotion();
+    const srcChanged = stageVideo.dataset.activeSrc !== videoUrl;
+
+    stageVideo.muted = true;
+    stageVideo.defaultMuted = true;
+    stageVideo.playsInline = true;
+    stageVideo.loop = true;
+    stageVideo.controls = false;
+    stageVideo.hidden = false;
+
+    if (reduced) {
+      stageVideo.autoplay = false;
+      stageVideo.removeAttribute('autoplay');
+      if (srcChanged) {
+        stageVideo.dataset.activeSrc = videoUrl;
+        stageVideo.src = videoUrl;
+        try {
+          stageVideo.load();
+        } catch {
+          // Ignore load errors when media playback is unavailable
+        }
+        try {
+          stageVideo.pause();
+        } catch {
+          // Ignore pause errors
+        }
+      }
+      activeStageVideo = stageVideo;
+      videoPlayBtn.hidden = false;
+      syncVideoPlayButton(panelRefs);
+    } else {
+      stageVideo.autoplay = true;
+      stageVideo.setAttribute('autoplay', '');
+      videoPlayBtn.hidden = true;
+      if (srcChanged) {
+        stageVideo.dataset.activeSrc = videoUrl;
+        stageVideo.src = videoUrl;
+      }
+      activeStageVideo = stageVideo;
+      if (srcChanged || stageVideo.paused) {
+        try {
+          const playPromise = stageVideo.play();
+          if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch((err) => {
+              if (err && err.name === 'AbortError') return;
+              if (activePickedRefs !== panelRefs || stageVideo.dataset.activeSrc !== videoUrl) return;
+              handleVideoFailure(panelRefs, media, videoUrl);
+            });
+          }
+        } catch {
+          handleVideoFailure(panelRefs, media, videoUrl);
+          return;
+        }
+      }
+    }
+
+    if (fade) {
+      triggerMediaFade(stageVideo, panelRefs);
+    } else {
+      stageVideo.classList.remove('is-media-entering');
+    }
+  }
+
+  function createRenderTile(panelRefs, kind) {
+    const tileImg = el('img', {
+      className: 'render-tile-img',
+      alt: '',
+      decoding: 'async',
+      hidden: true,
+      onError: () => {
+        tileImg.hidden = true;
+      },
+    });
+    const playIcon =
+      kind === 'video' ? el('span', { className: 'render-tile-play', 'aria-hidden': 'true' }) : null;
+    const newTag = el('span', { className: 'render-tile-new', hidden: true }, 'New');
+    const mediaBox = el('span', { className: 'render-tile-media' }, tileImg, playIcon, newTag);
+    const labelEl = el('span', { className: 'render-tile-label' }, RENDER_LABELS[kind]);
+    const btn = el(
+      'button',
+      {
+        type: 'button',
+        className: `render-tile render-tile--${kind}`,
+        dataset: { renderKind: kind },
+        'aria-pressed': 'false',
+        onClick: () => {
+          const currentMedia = getMedia(panelRefs.outfit);
+          if (!currentMedia.revealed || !currentMedia.renders[kind]) return;
+          if (kind === 'video' && currentMedia.videoFailed) return;
+          const wasSwapped = currentMedia.stageSwapped;
+          const prevKind = currentMedia.activeRender;
+          currentMedia.userPickedRender = true;
+          currentMedia.stageSwapped = false;
+          currentMedia.activeRender = kind;
+          currentMedia.tryOnUrl = currentMedia.renders[kind];
+          const timerId = currentMedia.newRenderTags.get(kind);
+          if (timerId) {
+            clearTimeout(timerId);
+            currentMedia.newRenderTags.delete(kind);
+          }
+          if (state.view === 'picked' && activePickedRefs === panelRefs) {
+            applyStageState(panelRefs, currentMedia, {
+              fadeRender: !wasSwapped && prevKind !== kind,
+            });
+          }
+        },
+      },
+      mediaBox,
+      labelEl
+    );
+    return { btn, tileImg, newTag };
+  }
+
+  // Show labelled render tiles under the stage once revealed and more than one render exists
+  function syncRenderStrip(panelRefs, media, { newlyArrivedKind = null } = {}) {
+    const { renderStrip, renderTiles } = panelRefs;
+    if (!renderStrip || !renderTiles) return;
+
+    const visibleKinds = availableRenderKinds(media);
+    if (!media.revealed || visibleKinds.length <= 1) {
+      renderStrip.hidden = true;
+      return;
+    }
+
+    renderStrip.hidden = false;
+
+    for (const [kind, entry] of renderTiles.entries()) {
+      if (!visibleKinds.includes(kind)) {
+        entry.btn.remove();
+        renderTiles.delete(kind);
+      }
+    }
+
+    let cursor = 0;
+    for (const kind of visibleKinds) {
+      let entry = renderTiles.get(kind);
+      if (!entry) {
+        entry = createRenderTile(panelRefs, kind);
+        renderTiles.set(kind, entry);
+      }
+
+      const thumbUrl =
+        kind === 'video' ? media.renders.studio || media.renders.scene : media.renders[kind];
+      if (thumbUrl) {
+        const nextSrc = stageUrl(thumbUrl, 320);
+        if (entry.tileImg.getAttribute('src') !== nextSrc) {
+          entry.tileImg.hidden = false;
+          entry.tileImg.setAttribute('src', nextSrc);
+        }
+      } else {
+        entry.tileImg.removeAttribute('src');
+        entry.tileImg.hidden = true;
+      }
+
+      const isSelected = !media.stageSwapped && media.activeRender === kind;
+      entry.btn.classList.toggle('is-selected', isSelected);
+      entry.btn.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+      entry.newTag.hidden = !media.newRenderTags.has(kind);
+
+      const currentChild = renderStrip.children[cursor];
+      if (currentChild !== entry.btn) {
+        renderStrip.insertBefore(entry.btn, currentChild || null);
+      }
+      cursor += 1;
+
+      if (newlyArrivedKind === kind && !prefersReducedMotion()) {
+        entry.btn.classList.add('is-tile-entering');
+        void entry.btn.offsetWidth;
+        requestAnimationFrame(() => {
+          if (state.view === 'picked' && activePickedRefs === panelRefs) {
+            entry.btn.classList.remove('is-tile-entering');
+          }
+        });
+      }
+    }
+  }
+
+  function applyStageState(
+    panelRefs,
+    media,
+    { deferReveal = false, fadeRender = false, newlyArrivedKind = null } = {}
+  ) {
     const {
       stagePanel,
       boardLayer,
       boardFrame,
       collageImg,
       tryOnImg,
+      stageVideo,
+      videoPlayBtn,
+      lookLabel,
       stageCaption,
       thumbBtn,
       thumbImg,
@@ -1992,19 +2388,60 @@ export function mountStore(root, { onTalk } = {}) {
       resetBoardFrameAspect(boardFrame);
     }
 
+    // Resolve which render is active once revealed; fall back cleanly if a render is unavailable
+    let activeKind = null;
+    if (media.revealed) {
+      if (
+        media.activeRender &&
+        media.renders[media.activeRender] &&
+        !(media.activeRender === 'video' && media.videoFailed)
+      ) {
+        activeKind = media.activeRender;
+      } else {
+        activeKind = pickRenderKind(media);
+        media.activeRender = activeKind;
+      }
+    }
+
     // Try-on stays hidden until reveal; on reveal it takes the main stage unless swapped
-    const hasReveal = Boolean(media.revealed && media.tryOnUrl);
+    const hasReveal = Boolean(media.revealed && activeKind);
     const showingTryOn = hasReveal && !media.stageSwapped;
 
-    if (hasReveal) {
-      const nextTryOn = stageUrl(media.tryOnUrl, 900);
-      tryOnImg.hidden = false;
+    if (!hasReveal) {
+      tryOnImg.removeAttribute('src');
+      tryOnImg.hidden = true;
+      tryOnImg.classList.remove('is-media-entering');
+      releaseStageVideo(panelRefs);
+      stageVideo.hidden = true;
+    } else if (activeKind === 'video') {
+      tryOnImg.removeAttribute('src');
+      tryOnImg.hidden = true;
+      tryOnImg.classList.remove('is-media-entering');
+      if (showingTryOn) {
+        mountStageVideo(panelRefs, media, media.renders.video, { fade: fadeRender });
+      } else {
+        try {
+          stageVideo.pause();
+        } catch {
+          // Ignore pause errors when swapped to flat lay
+        }
+        videoPlayBtn.hidden = true;
+      }
+    } else {
+      releaseStageVideo(panelRefs);
+      stageVideo.hidden = true;
+      const nextTryOn = stageUrl(media.renders[activeKind], 900);
+      tryOnImg.hidden = media.failedUrls.has(nextTryOn);
+      tryOnImg.alt =
+        activeKind === 'scene' ? `${lookLabel} on location` : `${lookLabel} try-on`;
       if (tryOnImg.getAttribute('src') !== nextTryOn) {
         tryOnImg.setAttribute('src', nextTryOn);
       }
-    } else {
-      tryOnImg.removeAttribute('src');
-      tryOnImg.hidden = true;
+      if (showingTryOn && fadeRender) {
+        triggerMediaFade(tryOnImg, panelRefs);
+      } else {
+        tryOnImg.classList.remove('is-media-entering');
+      }
     }
 
     if (showingTryOn) {
@@ -2028,14 +2465,16 @@ export function mountStore(root, { onTalk } = {}) {
       stagePanel.classList.remove('is-showing-tryon');
     }
 
-    stageCaption.textContent = showingTryOn ? 'On you' : 'The flat lay';
+    stageCaption.textContent = showingTryOn
+      ? RENDER_CAPTIONS[activeKind] || 'On you'
+      : 'The flat lay';
 
     // Corner swap thumbnail appears once revealed so the shopper can toggle between try-on and flat lay
     if (hasReveal) {
       thumbBtn.hidden = false;
       if (showingTryOn) {
         thumbBtn.classList.add('is-thumb-collage');
-        thumbBtn.classList.remove('is-thumb-tryon');
+        thumbBtn.classList.remove('is-thumb-tryon', 'is-thumb-video');
         thumbBtn.setAttribute('aria-label', 'Show the flat lay');
         thumbLabel.textContent = 'Flat lay';
         if (media.collageUrl) {
@@ -2049,14 +2488,25 @@ export function mountStore(root, { onTalk } = {}) {
           thumbImg.hidden = true;
         }
       } else {
+        const isVideo = activeKind === 'video';
         thumbBtn.classList.add('is-thumb-tryon');
         thumbBtn.classList.remove('is-thumb-collage');
-        thumbBtn.setAttribute('aria-label', 'Show on you');
-        thumbLabel.textContent = 'On you';
-        const thumbSrc = stageUrl(media.tryOnUrl, 900);
-        thumbImg.hidden = false;
-        if (thumbImg.getAttribute('src') !== thumbSrc) {
-          thumbImg.setAttribute('src', thumbSrc);
+        thumbBtn.classList.toggle('is-thumb-video', isVideo);
+        const captionText = RENDER_CAPTIONS[activeKind] || 'On you';
+        thumbBtn.setAttribute('aria-label', `Show ${captionText.toLowerCase()}`);
+        thumbLabel.textContent = activeKind === 'studio' ? 'On you' : RENDER_LABELS[activeKind];
+        const previewUrl = isVideo
+          ? media.renders.studio || media.renders.scene
+          : media.renders[activeKind];
+        if (previewUrl) {
+          const thumbSrc = stageUrl(previewUrl, 900);
+          thumbImg.hidden = false;
+          if (thumbImg.getAttribute('src') !== thumbSrc) {
+            thumbImg.setAttribute('src', thumbSrc);
+          }
+        } else {
+          thumbImg.removeAttribute('src');
+          thumbImg.hidden = true;
         }
       }
       requestAnimationFrame(() => {
@@ -2065,18 +2515,20 @@ export function mountStore(root, { onTalk } = {}) {
         }
       });
     } else {
-      thumbBtn.classList.remove('is-thumb-visible', 'is-thumb-collage', 'is-thumb-tryon');
+      thumbBtn.classList.remove('is-thumb-visible', 'is-thumb-collage', 'is-thumb-tryon', 'is-thumb-video');
       thumbBtn.hidden = true;
       thumbImg.removeAttribute('src');
       thumbImg.hidden = true;
     }
+
+    syncRenderStrip(panelRefs, media, { newlyArrivedKind });
 
     // One-line try-on status below the bag control (nothing when failed or already revealed)
     tryOnStatusEl.classList.remove('is-rendering', 'is-ready');
     if (hasReveal) {
       tryOnStatusEl.textContent = '';
       tryOnStatusEl.hidden = true;
-    } else if (media.tryOnStatus === 'ready' && media.tryOnUrl) {
+    } else if (!media.revealed && media.tryOnStatus === 'ready' && hasAnyRender(media)) {
       tryOnStatusEl.textContent = "Try-on ready: say 'show me'";
       tryOnStatusEl.classList.add('is-ready');
       tryOnStatusEl.hidden = false;
@@ -2101,8 +2553,10 @@ export function mountStore(root, { onTalk } = {}) {
   }
 
   let activePickedRefs = null;
+  let activeStageVideo = null;
 
   function renderPickedView({ deferReveal = false } = {}) {
+    releaseStageVideo();
     boutiqueRefs = null;
     const look = state.outfits.get(state.pickedOutfit);
     if (!look) {
@@ -2174,10 +2628,111 @@ export function mountStore(root, { onTalk } = {}) {
       decoding: 'async',
       hidden: true,
       onError: () => {
+        const brokenSrc = tryOnImg.getAttribute('src');
+        if (!brokenSrc) return;
+        media.failedUrls.add(brokenSrc);
         tryOnImg.hidden = true;
+        const altKind =
+          media.activeRender === 'scene'
+            ? 'studio'
+            : media.activeRender === 'studio'
+              ? 'scene'
+              : null;
+        if (
+          altKind &&
+          media.renders[altKind] &&
+          !media.failedUrls.has(stageUrl(media.renders[altKind], 900)) &&
+          state.view === 'picked' &&
+          activePickedRefs &&
+          activePickedRefs.outfit === look.number
+        ) {
+          media.activeRender = altKind;
+          media.tryOnUrl = media.renders[altKind];
+          applyStageState(activePickedRefs, media);
+        }
       },
     });
-    const tryOnLayer = el('div', { className: 'stage-tryon-layer' }, tryOnImg);
+
+    const stageVideo = el('video', {
+      className: 'stage-tryon-video',
+      muted: true,
+      loop: true,
+      playsinline: true,
+      preload: 'auto',
+      hidden: true,
+      'aria-label': `${lookLabel} in motion`,
+      onPlay: () => {
+        if (activePickedRefs && activePickedRefs.outfit === look.number) {
+          syncVideoPlayButton(activePickedRefs);
+        }
+      },
+      onPause: () => {
+        if (activePickedRefs && activePickedRefs.outfit === look.number) {
+          syncVideoPlayButton(activePickedRefs);
+        }
+      },
+      onError: () => {
+        const failedUrl = stageVideo.dataset.activeSrc;
+        if (!failedUrl) return;
+        if (activePickedRefs && activePickedRefs.outfit === look.number) {
+          handleVideoFailure(activePickedRefs, media, failedUrl);
+        }
+      },
+    });
+    stageVideo.muted = true;
+    stageVideo.defaultMuted = true;
+    stageVideo.playsInline = true;
+    stageVideo.loop = true;
+    stageVideo.controls = false;
+
+    const videoPlayLabel = el('span', null, 'Play');
+    const videoPlayBtn = el(
+      'button',
+      {
+        type: 'button',
+        className: 'stage-video-play-btn',
+        hidden: true,
+        'aria-label': 'Play video',
+        'aria-pressed': 'false',
+        onClick: () => {
+          const activeUrl = stageVideo.dataset.activeSrc;
+          if (!activeUrl) return;
+          if (stageVideo.paused) {
+            try {
+              const p = stageVideo.play();
+              if (p && typeof p.catch === 'function') {
+                p.catch((err) => {
+                  if (err && err.name === 'AbortError') return;
+                  if (activePickedRefs && activePickedRefs.outfit === look.number) {
+                    handleVideoFailure(activePickedRefs, media, activeUrl);
+                  }
+                });
+              }
+            } catch {
+              if (activePickedRefs && activePickedRefs.outfit === look.number) {
+                handleVideoFailure(activePickedRefs, media, activeUrl);
+              }
+            }
+          } else {
+            try {
+              stageVideo.pause();
+            } catch {
+              // Ignore pause errors
+            }
+          }
+        },
+      },
+      el('span', { className: 'stage-video-play-icon', 'aria-hidden': 'true' }),
+      videoPlayLabel
+    );
+
+    const tryOnLayer = el(
+      'div',
+      { className: 'stage-tryon-layer' },
+      tryOnImg,
+      stageVideo,
+      videoPlayBtn
+    );
 
     const thumbImg = el('img', {
       className: 'stage-thumb-img',
@@ -2188,6 +2743,7 @@ export function mountStore(root, { onTalk } = {}) {
         thumbImg.hidden = true;
       },
     });
+    const thumbPlay = el('span', { className: 'stage-thumb-play', 'aria-hidden': 'true' });
     const thumbLabel = el('span', { className: 'stage-thumb-label' }, 'Flat lay');
     const thumbBtn = el(
       'button',
@@ -2197,7 +2753,7 @@ export function mountStore(root, { onTalk } = {}) {
         hidden: true,
         'aria-label': 'Show the flat lay',
         onClick: () => {
-          if (!media.revealed || !media.tryOnUrl) return;
+          if (!media.revealed || !pickRenderKind(media)) return;
           media.stageSwapped = !media.stageSwapped;
           if (activePickedRefs && activePickedRefs.outfit === look.number) {
             applyStageState(activePickedRefs, media);
@@ -2205,6 +2761,7 @@ export function mountStore(root, { onTalk } = {}) {
         },
       },
       thumbImg,
+      thumbPlay,
       thumbLabel
     );
 
@@ -2223,10 +2780,17 @@ export function mountStore(root, { onTalk } = {}) {
     );
 
     const stageCaption = el('figcaption', { className: 'stage-caption' }, 'The flat lay');
+    const renderStrip = el('div', {
+      className: 'stage-render-strip',
+      role: 'group',
+      'aria-label': 'Look renders',
+      hidden: true,
+    });
     const visualCol = el(
       'div',
       { className: 'stage-visual-col' },
-      el('figure', { className: 'stage-figure' }, stagePanel, stageCaption)
+      el('figure', { className: 'stage-figure' }, stagePanel, stageCaption),
+      renderStrip
     );
 
     let hasActiveRow = false;
@@ -2333,13 +2897,19 @@ export function mountStore(root, { onTalk } = {}) {
 
     activePickedRefs = {
       outfit: look.number,
+      lookLabel,
       stagePanel,
       boardLayer,
       boardFrame,
       collageImg,
       pointerRing,
       tryOnImg,
+      stageVideo,
+      videoPlayBtn,
+      videoPlayLabel,
       stageCaption,
+      renderStrip,
+      renderTiles: new Map(),
       thumbBtn,
       thumbImg,
       thumbLabel,
@@ -2395,7 +2965,10 @@ export function mountStore(root, { onTalk } = {}) {
     }
   }
 
-  function syncMediaInCurrentView(outfitNumber, { deferReveal = false } = {}) {
+  function syncMediaInCurrentView(
+    outfitNumber,
+    { deferReveal = false, fadeRender = false, newlyArrivedKind = null } = {}
+  ) {
     const media = getMedia(outfitNumber);
     if (state.view === 'looks') {
       const escaped = CSS.escape(String(outfitNumber));
@@ -2408,7 +2981,7 @@ export function mountStore(root, { onTalk } = {}) {
         applyLookCardCollage(visualEl, boardLayer, boardImg, media.collageUrl);
       }
     } else if (state.view === 'picked' && activePickedRefs && activePickedRefs.outfit === outfitNumber) {
-      applyStageState(activePickedRefs, media, { deferReveal });
+      applyStageState(activePickedRefs, media, { deferReveal, fadeRender, newlyArrivedKind });
     }
   }
 
@@ -2467,6 +3040,12 @@ export function mountStore(root, { onTalk } = {}) {
     if (sync) syncPanelOpen();
   }
 
+  function hasDrawerContent() {
+    if (state.drawerMode === 'review') return Boolean(state.orderReview);
+    if (state.drawerMode === 'result') return Boolean(state.orderResult);
+    return Boolean(state.bagData);
+  }
+
   function closeBagDrawer() {
     state.bagOpen = false;
     bagLayerEl.classList.remove('is-open');
@@ -2475,7 +3054,7 @@ export function mountStore(root, { onTalk } = {}) {
   }
 
   function openBagDrawer() {
-    if (!state.bagData) return;
+    if (!hasDrawerContent()) return;
     // Opening the bag closes the product page first without flickering panel-open
     closeProductPanel({ sync: false });
     state.bagOpen = true;
@@ -2736,7 +3315,16 @@ export function mountStore(root, { onTalk } = {}) {
     productBodyEl.scrollTop = 0;
   }
 
+  function setBagDrawerHeader(title) {
+    bagTitleEl.textContent = title;
+    bagSheetEl.setAttribute('aria-label', title);
+  }
+
   function renderBagDrawer({ stores, links, total }) {
+    setBagDrawerHeader('Your bag');
+    bagFooterEl.hidden = false;
+    bagBodyEl.classList.remove('bag-panel-body--no-footer');
+
     const linkByStore = new Map();
     for (const link of links) {
       if (link && typeof link.store === 'string' && typeof link.url === 'string') {
@@ -2751,11 +3339,20 @@ export function mountStore(root, { onTalk } = {}) {
     if (stores.length === 0) {
       bagBodyEl.replaceChildren(el('p', { className: 'bag-empty' }, 'Nothing in your bag yet.'));
     } else {
-      const storeNodes = stores.map((storeObj) => {
+      const resolvedStores = stores.map((storeObj) => {
         const storeName =
           typeof storeObj.store === 'string' && storeObj.store.trim()
             ? storeObj.store.trim()
             : 'Store';
+        const checkoutUrl =
+          linkByStore.get(storeName) || linkByStore.get(storeName.toLowerCase()) || null;
+        return { storeObj, storeName, checkoutUrl };
+      });
+
+      const checkoutLinkCount = resolvedStores.filter((entry) => Boolean(entry.checkoutUrl)).length;
+      let linkIndex = 0;
+
+      const storeNodes = resolvedStores.map(({ storeObj, storeName, checkoutUrl }, idx) => {
         const addedLines = Array.isArray(storeObj.added)
           ? storeObj.added.filter((line) => line && typeof line === 'object')
           : [];
@@ -2764,8 +3361,6 @@ export function mountStore(root, { onTalk } = {}) {
           : [];
         const hasSubtotal =
           typeof storeObj.subtotal === 'number' && Number.isFinite(storeObj.subtotal);
-        const checkoutUrl =
-          linkByStore.get(storeName) || linkByStore.get(storeName.toLowerCase()) || null;
 
         const addedList =
           addedLines.length > 0
@@ -2813,8 +3408,37 @@ export function mountStore(root, { onTalk } = {}) {
             )
           : null;
 
-        const checkoutBtn = checkoutUrl
-          ? el(
+        let checkoutBtn = null;
+        if (checkoutUrl) {
+          if (checkoutLinkCount >= 2) {
+            linkIndex += 1;
+            const storeKey = `${idx}::${storeName.toLowerCase()}::${checkoutUrl}`;
+            const openedEl = el(
+              'span',
+              { className: 'bag-checkout-opened', hidden: !state.bagOpenedStores.has(storeKey) },
+              'Opened'
+            );
+            checkoutBtn = el(
+              'div',
+              { className: 'bag-checkout-row' },
+              el(
+                'a',
+                {
+                  className: 'btn-primary bag-checkout-btn',
+                  href: checkoutUrl,
+                  target: '_blank',
+                  rel: 'noopener',
+                  onClick: () => {
+                    state.bagOpenedStores.add(storeKey);
+                    openedEl.hidden = false;
+                  },
+                },
+                `Checkout at ${storeName} · ${linkIndex} of ${checkoutLinkCount}`
+              ),
+              openedEl
+            );
+          } else {
+            checkoutBtn = el(
               'a',
               {
                 className: 'btn-primary bag-checkout-btn',
@@ -2823,8 +3447,9 @@ export function mountStore(root, { onTalk } = {}) {
                 rel: 'noopener',
               },
               `Checkout at ${storeName}`
-            )
-          : null;
+            );
+          }
+        }
 
         const notAddedBox =
           notAddedLines.length > 0
@@ -2879,6 +3504,401 @@ export function mountStore(root, { onTalk } = {}) {
       el('p', { className: 'bag-disclaimer' }, "You check out on each store's own site. Alice never pays.")
     );
     bagBodyEl.scrollTop = 0;
+  }
+
+  function normalizeOrderStore(raw) {
+    const store = typeof raw.store === 'string' && raw.store.trim() ? raw.store.trim() : '';
+    const items = Array.isArray(raw.items)
+      ? raw.items
+          .filter((line) => line && typeof line === 'object')
+          .map((line) => ({
+            title: typeof line.title === 'string' && line.title.trim() ? line.title.trim() : '',
+            image: typeof line.image === 'string' && line.image.trim() ? line.image.trim() : '',
+            price: formatOptionalPrice(line.price),
+            size: typeof line.size === 'string' && line.size.trim() ? line.size.trim() : '',
+          }))
+      : [];
+    const orderNumber =
+      typeof raw.order_number === 'string' && raw.order_number.trim()
+        ? raw.order_number.trim()
+        : typeof raw.order_number === 'number' && Number.isFinite(raw.order_number)
+          ? String(raw.order_number)
+          : '';
+    return {
+      store,
+      items,
+      total: formatOptionalPrice(raw.total),
+      payment_label:
+        typeof raw.payment_label === 'string' && raw.payment_label.trim()
+          ? raw.payment_label.trim()
+          : '',
+      ready: raw.ready !== false,
+      status: typeof raw.status === 'string' ? raw.status.trim().toLowerCase() : '',
+      order_number: orderNumber,
+      continue_url: safeOptionalUrl(raw.continue_url),
+      note: typeof raw.note === 'string' && raw.note.trim() ? raw.note.trim() : '',
+    };
+  }
+
+  function buildOrderLine(line) {
+    const thumbUrl = line.image ? sized(line.image, 160) : '';
+    const hasThumb = Boolean(thumbUrl);
+    return el(
+      'li',
+      { className: `bag-line${hasThumb ? '' : ' bag-line--no-thumb'}` },
+      hasThumb
+        ? el(
+            'div',
+            { className: 'bag-line-thumb' },
+            el('img', {
+              className: 'bag-line-img',
+              src: thumbUrl,
+              alt: line.title || 'Garment',
+              loading: 'lazy',
+              decoding: 'async',
+              onError: (e) => {
+                e.currentTarget.hidden = true;
+              },
+            })
+          )
+        : null,
+      el(
+        'div',
+        { className: 'bag-line-info' },
+        line.title ? el('span', { className: 'bag-line-title' }, line.title) : null,
+        line.size ? el('span', { className: 'bag-line-size' }, `Size ${line.size}`) : null
+      ),
+      line.price ? el('span', { className: 'bag-line-price' }, line.price) : null
+    );
+  }
+
+  function dismissOrderReviewToBag() {
+    state.orderReview = null;
+    state.orderConfirmedId = null;
+    state.drawerMode = 'bag';
+    renderBagDrawer(state.bagData || { stores: [], links: [], total: null });
+  }
+
+  // Update the review footer in place so confirm/undo keeps scroll position
+  function renderOrderReviewFooter() {
+    const order = state.orderReview;
+    if (!order) return;
+
+    const footerNodes = [];
+    if (order.total) {
+      footerNodes.push(
+        el(
+          'div',
+          { className: 'bag-total-row' },
+          el('span', { className: 'bag-total-label' }, 'Total'),
+          el('span', { className: 'bag-total-value' }, order.total)
+        )
+      );
+    }
+
+    if (order.needs_sign_in) {
+      footerNodes.push(
+        el(
+          'div',
+          { className: 'order-review-actions' },
+          el(
+            'button',
+            {
+              type: 'button',
+              className: 'btn-secondary order-cancel-btn order-cancel-btn--full',
+              onClick: () => dismissOrderReviewToBag(),
+            },
+            'Not now'
+          )
+        )
+      );
+    } else if (state.orderConfirmedId === order.order_id) {
+      footerNodes.push(
+        el(
+          'div',
+          { className: 'order-confirmed-box', role: 'status', 'aria-live': 'polite' },
+          el('p', { className: 'order-confirmed-text' }, 'Confirmed. Tell Alice yes to place the order.'),
+          el(
+            'button',
+            {
+              type: 'button',
+              className: 'order-undo-btn',
+              onClick: () => {
+                state.orderConfirmedId = null;
+                renderOrderReviewFooter();
+              },
+            },
+            'Undo'
+          )
+        )
+      );
+    } else {
+      footerNodes.push(
+        el(
+          'div',
+          { className: 'order-review-actions' },
+          el(
+            'button',
+            {
+              type: 'button',
+              className: 'btn-primary order-confirm-btn',
+              onClick: () => {
+                if (
+                  state.drawerMode === 'review' &&
+                  state.orderReview &&
+                  state.orderReview.order_id === order.order_id &&
+                  !state.orderReview.needs_sign_in
+                ) {
+                  state.orderConfirmedId = order.order_id;
+                  renderOrderReviewFooter();
+                }
+              },
+            },
+            'Confirm order'
+          ),
+          el(
+            'button',
+            {
+              type: 'button',
+              className: 'btn-secondary order-cancel-btn',
+              onClick: () => dismissOrderReviewToBag(),
+            },
+            'Not now'
+          )
+        ),
+        el(
+          'p',
+          { className: 'bag-disclaimer order-confirm-note' },
+          'Alice places the order only after you confirm here and tell her yes.'
+        )
+      );
+    }
+
+    bagFooterEl.hidden = footerNodes.length === 0;
+    bagBodyEl.classList.toggle('bag-panel-body--no-footer', footerNodes.length === 0);
+    bagFooterEl.replaceChildren(...footerNodes);
+  }
+
+  function renderOrderReviewDrawer() {
+    const order = state.orderReview;
+    if (!order) return;
+
+    setBagDrawerHeader('Review your order');
+
+    const bodyNodes = [];
+
+    if (order.needs_sign_in) {
+      const signInUrl = order.sign_in ? order.sign_in.url : null;
+      const signInCode = order.sign_in ? order.sign_in.code : '';
+      bodyNodes.push(
+        el(
+          'section',
+          { className: 'order-signin-card', 'aria-label': 'Connect Shop Pay' },
+          el(
+            'p',
+            { className: 'order-signin-copy' },
+            'Sign in to Shop so Alice can place the order for you.'
+          ),
+          signInCode
+            ? el(
+                'div',
+                { className: 'order-signin-code-block' },
+                el('span', { className: 'order-signin-code-label' }, 'Your code'),
+                el('span', { className: 'order-signin-code' }, signInCode)
+              )
+            : null,
+          signInUrl
+            ? el(
+                'a',
+                {
+                  className: 'btn-primary order-signin-btn',
+                  href: signInUrl,
+                  target: '_blank',
+                  rel: 'noopener noreferrer',
+                },
+                'Connect Shop Pay'
+              )
+            : null
+        )
+      );
+    }
+
+    for (const storeObj of order.stores) {
+      const itemsList =
+        storeObj.items.length > 0
+          ? el('ul', { className: 'bag-lines' }, storeObj.items.map((line) => buildOrderLine(line)))
+          : null;
+
+      const storeTotalRow = storeObj.total
+        ? el(
+            'div',
+            { className: 'bag-store-subtotal' },
+            el('span', { className: 'bag-store-subtotal-label' }, 'Store total'),
+            el('span', { className: 'bag-store-subtotal-val' }, storeObj.total)
+          )
+        : null;
+
+      const paymentEl = storeObj.payment_label
+        ? el('p', { className: 'order-store-payment' }, storeObj.payment_label)
+        : null;
+
+      const notReadyNote = !storeObj.ready
+        ? el(
+            'p',
+            { className: 'order-store-note' },
+            storeObj.note || 'This store finishes on its own site.'
+          )
+        : null;
+
+      const notReadyBtn =
+        !storeObj.ready && storeObj.continue_url
+          ? el(
+              'a',
+              {
+                className: 'btn-primary bag-checkout-btn',
+                href: storeObj.continue_url,
+                target: '_blank',
+                rel: 'noopener noreferrer',
+              },
+              storeObj.store ? `Checkout at ${storeObj.store}` : 'Checkout at store'
+            )
+          : null;
+
+      bodyNodes.push(
+        el(
+          'section',
+          { className: 'bag-store-section order-review-section' },
+          storeObj.store ? el('h3', { className: 'bag-store-name' }, storeObj.store) : null,
+          itemsList,
+          storeTotalRow,
+          paymentEl,
+          notReadyNote,
+          notReadyBtn
+        )
+      );
+    }
+
+    if (order.address_label) {
+      bodyNodes.push(
+        el('p', { className: 'order-address' }, `Ships to ${order.address_label}`)
+      );
+    }
+
+    bagBodyEl.replaceChildren(...bodyNodes);
+    bagBodyEl.scrollTop = 0;
+    renderOrderReviewFooter();
+  }
+
+  function renderOrderResultDrawer(result) {
+    const stores = result.stores || [];
+    const allPlaced = stores.length > 0 && stores.every((s) => s.status === 'placed');
+    setBagDrawerHeader(allPlaced ? 'Order placed' : 'Your order');
+
+    const storeNodes = stores.map((storeObj) => {
+      const checkoutLabel = storeObj.store ? `Checkout at ${storeObj.store}` : 'Checkout at store';
+      const checkoutBtn = storeObj.continue_url
+        ? el(
+            'a',
+            {
+              className: 'btn-primary bag-checkout-btn',
+              href: storeObj.continue_url,
+              target: '_blank',
+              rel: 'noopener noreferrer',
+            },
+            checkoutLabel
+          )
+        : null;
+
+      if (storeObj.status === 'placed') {
+        const metaNodes = [];
+        if (storeObj.total) {
+          metaNodes.push(
+            el(
+              'div',
+              { className: 'bag-store-subtotal' },
+              el('span', { className: 'bag-store-subtotal-label' }, 'Total'),
+              el('span', { className: 'bag-store-subtotal-val' }, storeObj.total)
+            )
+          );
+        }
+        if (storeObj.order_number) {
+          metaNodes.push(
+            el('p', { className: 'order-result-number' }, `Order ${storeObj.order_number}`)
+          );
+        }
+        return el(
+          'section',
+          { className: 'bag-store-section order-result-section' },
+          el(
+            'div',
+            { className: 'order-result-head' },
+            storeObj.store ? el('h3', { className: 'bag-store-name' }, storeObj.store) : null,
+            el('span', { className: 'order-status order-status--placed' }, 'Order placed')
+          ),
+          ...metaNodes
+        );
+      }
+
+      if (storeObj.status === 'handoff') {
+        return el(
+          'section',
+          { className: 'bag-store-section order-result-section' },
+          storeObj.store ? el('h3', { className: 'bag-store-name' }, storeObj.store) : null,
+          el(
+            'p',
+            { className: 'order-store-note' },
+            storeObj.note || "Finish this one on the store's site."
+          ),
+          checkoutBtn
+        );
+      }
+
+      if (storeObj.status === 'failed') {
+        return el(
+          'section',
+          { className: 'bag-store-section order-result-section' },
+          el(
+            'div',
+            { className: 'order-result-head' },
+            storeObj.store ? el('h3', { className: 'bag-store-name' }, storeObj.store) : null,
+            el('span', { className: 'order-status order-status--failed' }, 'Not placed')
+          ),
+          storeObj.note ? el('p', { className: 'order-store-note' }, storeObj.note) : null,
+          checkoutBtn
+        );
+      }
+
+      if (storeObj.status === 'placing') {
+        return el(
+          'section',
+          { className: 'bag-store-section order-result-section' },
+          storeObj.store ? el('h3', { className: 'bag-store-name' }, storeObj.store) : null,
+          el('p', { className: 'order-status-placing' }, 'Placing your order…')
+        );
+      }
+
+      return el(
+        'section',
+        { className: 'bag-store-section order-result-section' },
+        storeObj.store ? el('h3', { className: 'bag-store-name' }, storeObj.store) : null,
+        storeObj.total
+          ? el(
+              'div',
+              { className: 'bag-store-subtotal' },
+              el('span', { className: 'bag-store-subtotal-label' }, 'Total'),
+              el('span', { className: 'bag-store-subtotal-val' }, storeObj.total)
+            )
+          : null,
+        storeObj.note ? el('p', { className: 'order-store-note' }, storeObj.note) : null,
+        checkoutBtn
+      );
+    });
+
+    bagBodyEl.replaceChildren(...storeNodes);
+    bagBodyEl.scrollTop = 0;
+    bagFooterEl.replaceChildren();
+    bagFooterEl.hidden = true;
+    bagBodyEl.classList.add('bag-panel-body--no-footer');
   }
 
   function renderSearchView(query, items) {
@@ -3013,6 +4033,10 @@ export function mountStore(root, { onTalk } = {}) {
       leaveSearchView();
 
       if (payload.replace === true) {
+        releaseStageVideo();
+        for (const media of state.media.values()) {
+          clearLookRenders(media);
+        }
         state.outfits.clear();
         state.media.clear();
         state.pickedOutfit = null;
@@ -3103,10 +4127,13 @@ export function mountStore(root, { onTalk } = {}) {
       const updated = normalizeOutfit({ ...payload.data, number: payload.outfit }, payload.outfit);
       state.outfits.set(payload.outfit, updated);
 
-      // Reset try-on to rendering and clear flat-lay, boxes, ring and reveal until a fresh collageReady arrives
+      // Reset try-on to rendering and clear all renders, flat-lay, boxes, ring and reveal
       const media = getMedia(payload.outfit);
+      if (activePickedRefs && activePickedRefs.outfit === payload.outfit) {
+        releaseStageVideo(activePickedRefs);
+      }
+      clearLookRenders(media);
       media.tryOnStatus = 'rendering';
-      media.tryOnUrl = null;
       media.revealed = false;
       media.stageSwapped = false;
       media.collageUrl = null;
@@ -3161,12 +4188,52 @@ export function mountStore(root, { onTalk } = {}) {
         return { ok: false, error: 'tryOnReady requires numeric outfit and image url' };
       }
 
+      const url = payload.url.trim();
+      const kind = normalizeRenderKind(payload.kind);
       const media = getMedia(payload.outfit);
-      media.tryOnStatus = 'ready';
-      media.tryOnUrl = payload.url.trim();
-      preloadImage(media, stageUrl(media.tryOnUrl, 900));
+      const isNewArrival = media.renders[kind] !== url;
 
-      syncMediaInCurrentView(payload.outfit);
+      media.tryOnStatus = 'ready';
+      media.renders[kind] = url;
+      if (kind === 'video' && isNewArrival) {
+        media.videoFailed = false;
+      }
+      if (!media.tryOnUrl || kind === 'studio') {
+        media.tryOnUrl = url;
+      }
+
+      if (kind === 'video') {
+        preloadVideo(media, url);
+      } else {
+        preloadImage(media, stageUrl(url, 900));
+      }
+
+      let newlyArrivedKind = null;
+      let fadeRender = false;
+      if (media.revealed && isNewArrival) {
+        newlyArrivedKind = kind;
+        markRenderNew(payload.outfit, media, kind);
+
+        // Promote scene or video once automatically while the shopper is still on the initial studio still
+        if (
+          !media.stageSwapped &&
+          media.activeRender === 'studio' &&
+          !media.userPickedRender &&
+          (kind === 'scene' || kind === 'video') &&
+          !media.autoAdvancedKinds.has(kind)
+        ) {
+          media.autoAdvancedKinds.add(kind);
+          media.activeRender = kind;
+          media.tryOnUrl = url;
+          fadeRender = true;
+        } else if (!media.activeRender) {
+          media.activeRender = kind;
+          media.tryOnUrl = url;
+          fadeRender = !media.stageSwapped;
+        }
+      }
+
+      syncMediaInCurrentView(payload.outfit, { newlyArrivedKind, fadeRender });
       return { ok: true };
     }),
 
@@ -3191,6 +4258,7 @@ export function mountStore(root, { onTalk } = {}) {
     }),
 
     showAll: safeHandler(() => {
+      releaseStageVideo();
       closeProductPanel();
       leaveSearchView();
       state.pickedOutfit = null;
@@ -3215,20 +4283,40 @@ export function mountStore(root, { onTalk } = {}) {
       }
 
       const media = getMedia(payload.outfit);
+      const hasKind = typeof payload.kind === 'string' && payload.kind.trim().length > 0;
+      const requestedKind = hasKind ? normalizeRenderKind(payload.kind) : null;
+
       if (typeof payload.url === 'string' && payload.url.trim()) {
-        media.tryOnUrl = payload.url.trim();
+        const url = payload.url.trim();
+        const storeKind = requestedKind || 'studio';
+        const isNewUrl = media.renders[storeKind] !== url;
+        media.renders[storeKind] = url;
+        if (storeKind === 'video' && isNewUrl) {
+          media.videoFailed = false;
+        }
+        if (storeKind === 'video') {
+          preloadVideo(media, url);
+        } else {
+          preloadImage(media, stageUrl(url, 900));
+        }
       }
-      if (!media.tryOnUrl) {
+
+      const chosenKind = pickRenderKind(media, requestedKind);
+      if (!chosenKind) {
         return { ok: false, error: `No try-on image ready for outfit ${payload.outfit}` };
       }
 
       leaveSearchView();
       media.tryOnStatus = 'ready';
       const wasAlreadyShowingTryOn = media.revealed && !media.stageSwapped;
+      const prevKind = media.activeRender;
       media.revealed = true;
       media.stageSwapped = false;
+      media.activeRender = chosenKind;
+      media.tryOnUrl = media.renders[chosenKind];
       setHasProducts();
 
+      const renderChanged = wasAlreadyShowingTryOn && prevKind !== chosenKind;
       const needsPick = state.view !== 'picked' || state.pickedOutfit !== payload.outfit;
       if (needsPick) {
         state.view = 'picked';
@@ -3237,7 +4325,10 @@ export function mountStore(root, { onTalk } = {}) {
         renderPickedView({ deferReveal: !wasAlreadyShowingTryOn });
         window.scrollTo({ top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
       } else {
-        syncMediaInCurrentView(payload.outfit, { deferReveal: !wasAlreadyShowingTryOn });
+        syncMediaInCurrentView(payload.outfit, {
+          deferReveal: !wasAlreadyShowingTryOn,
+          fadeRender: renderChanged,
+        });
         if (activePickedRefs && activePickedRefs.stagePanel && !isElementInView(activePickedRefs.stagePanel)) {
           const rect = activePickedRefs.stagePanel.getBoundingClientRect();
           const headerH = headerEl.offsetHeight || 0;
@@ -3265,6 +4356,11 @@ export function mountStore(root, { onTalk } = {}) {
       const total =
         typeof payload.total === 'number' && Number.isFinite(payload.total) ? payload.total : null;
 
+      state.orderReview = null;
+      state.orderConfirmedId = null;
+      state.orderResult = null;
+      state.drawerMode = 'bag';
+      state.bagOpenedStores = new Set();
       state.bagData = { stores, links, total };
       state.bagCount = stores.reduce(
         (sum, s) => sum + (Array.isArray(s.added) ? s.added.length : 0),
@@ -3273,6 +4369,89 @@ export function mountStore(root, { onTalk } = {}) {
       updateBagBadge();
       setHasProducts();
       renderBagDrawer(state.bagData);
+      openBagDrawer();
+      return { ok: true };
+    }),
+
+    showOrderReview: safeHandler((payload) => {
+      const raw =
+        payload && payload.order && typeof payload.order === 'object' && !Array.isArray(payload.order)
+          ? payload.order
+          : null;
+      if (
+        !raw ||
+        typeof raw.order_id !== 'string' ||
+        !raw.order_id.trim() ||
+        !Array.isArray(raw.stores)
+      ) {
+        return { ok: false, error: 'showOrderReview requires order with order_id and stores array' };
+      }
+
+      const rawSignIn = raw.sign_in && typeof raw.sign_in === 'object' ? raw.sign_in : null;
+      const signInCode =
+        rawSignIn && typeof rawSignIn.code === 'string' && rawSignIn.code.trim()
+          ? rawSignIn.code.trim()
+          : rawSignIn && typeof rawSignIn.code === 'number' && Number.isFinite(rawSignIn.code)
+            ? String(rawSignIn.code)
+            : '';
+
+      state.orderReview = {
+        order_id: raw.order_id,
+        stores: raw.stores.filter((s) => s && typeof s === 'object').map((s) => normalizeOrderStore(s)),
+        total: formatOptionalPrice(raw.total),
+        address_label:
+          typeof raw.address_label === 'string' && raw.address_label.trim()
+            ? raw.address_label.trim()
+            : '',
+        needs_sign_in: raw.needs_sign_in === true,
+        sign_in: rawSignIn
+          ? {
+              url: safeOptionalUrl(rawSignIn.url),
+              code: signInCode,
+            }
+          : null,
+      };
+      state.orderConfirmedId = null;
+      state.orderResult = null;
+      state.drawerMode = 'review';
+
+      setHasProducts();
+      renderOrderReviewDrawer();
+      openBagDrawer();
+      return { ok: true };
+    }),
+
+    confirmOrder: safeHandler((payload) => {
+      const orderId = payload && typeof payload.order_id === 'string' ? payload.order_id : '';
+      const confirmed = Boolean(
+        orderId &&
+          state.drawerMode === 'review' &&
+          state.orderReview &&
+          state.orderReview.order_id === orderId &&
+          state.orderConfirmedId === orderId
+      );
+      return { ok: true, confirmed };
+    }),
+
+    orderPlaced: safeHandler((payload) => {
+      if (!payload || !Array.isArray(payload.stores)) {
+        return { ok: false, error: 'orderPlaced requires a stores array' };
+      }
+
+      const stores = payload.stores
+        .filter((s) => s && typeof s === 'object')
+        .map((s) => normalizeOrderStore(s));
+
+      state.orderReview = null;
+      state.orderConfirmedId = null;
+      state.orderResult = {
+        order_id: typeof payload.order_id === 'string' ? payload.order_id : '',
+        stores,
+      };
+      state.drawerMode = 'result';
+
+      setHasProducts();
+      renderOrderResultDrawer(state.orderResult);
       openBagDrawer();
       return { ok: true };
     }),

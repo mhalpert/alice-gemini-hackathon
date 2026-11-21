@@ -5,24 +5,33 @@ import path from 'node:path';
 import { after, describe, it } from 'node:test';
 import { estimateCostUsd, ledgerTotal, recordCost } from '../src/ledger.ts';
 import { mediaRequest, mediaStatus, stopMedia } from '../src/media/client.ts';
-import { outfitCollage, productShot, setCallRoom, warmMedia } from '../src/media/index.ts';
+import { outfitBoard, outfitCollage, productShot, setCallRoom, warmMedia } from '../src/media/index.ts';
 import {
+  BOARD_H,
+  BOARD_W,
   TRYON_NAME_RE,
   boardFileName,
   buildGateCorrection,
+  buildSetting,
   classifyShotSource,
   collectImageUrls,
+  computeBoardBoxes,
   cropRawRgb,
   decideCrop,
+  layoutBoardCells,
   newTryonId,
   parseInspectorReply,
   parsePickReply,
+  placeBoardPieces,
   resolvePick,
+  runTryOnExtrasLoop,
   runTryOnVerifyLoop,
+  sceneFileName,
   shotFileName,
   sortPiecesForTryOn,
   stripHtml,
   tryonFileName,
+  videoFileName,
   whitenBackground,
   withWidth,
 } from '../src/media/pure.ts';
@@ -496,6 +505,89 @@ describe('sortPiecesForTryOn', () => {
   });
 });
 
+describe('board layout and box math (pure)', () => {
+  function assertNoOverlap(boxes: Record<string, [number, number, number, number]>): void {
+    const entries = Object.entries(boxes);
+    for (let i = 0; i < entries.length; i++) {
+      const [slotA, [ax, ay, aw, ah]] = entries[i];
+      assert.ok(ax >= 0 && ay >= 0 && aw > 0 && ah > 0, `box ${slotA} must be positive`);
+      assert.ok(ax + aw <= 1.0001 && ay + ah <= 1.0001, `box ${slotA} must stay within 0..1`);
+      for (let j = i + 1; j < entries.length; j++) {
+        const [slotB, [bx, by, bw, bh]] = entries[j];
+        const sepX = ax + aw <= bx || bx + bw <= ax;
+        const sepY = ay + ah <= by || by + bh <= ay;
+        assert.ok(sepX || sepY, `boxes ${slotA} and ${slotB} overlap`);
+      }
+    }
+  }
+
+  it('places hero on the left half and 1 column on the right for 2-3 pieces with no overlap', () => {
+    const { cells, boxes } = placeBoardPieces([
+      { slot: 'top', width: 600, height: 900 },
+      { slot: 'bottom', width: 500, height: 800 },
+      { slot: 'shoes', width: 800, height: 400 },
+    ]);
+
+    assert.equal(cells.length, 3);
+    // Hero sits entirely in the left half
+    assert.ok(cells[0].x + cells[0].w <= BOARD_W / 2);
+    // Right column pieces share the same x and sit in the right half
+    assert.ok(cells[1].x >= BOARD_W / 2);
+    assert.equal(cells[1].x, cells[2].x);
+    assert.ok(cells[2].y > cells[1].y + cells[1].h);
+
+    assert.deepEqual(Object.keys(boxes), ['top', 'bottom', 'shoes']);
+    assert.ok(boxes.top[0] + boxes.top[2] <= 0.5);
+    assert.ok(boxes.bottom[0] >= 0.5);
+    assert.ok(boxes.shoes[0] >= 0.5);
+    assertNoOverlap(boxes);
+  });
+
+  it('places hero on the left half and 2 columns on the right for 4-5 pieces with no overlap', () => {
+    const { cells, boxes } = placeBoardPieces([
+      { slot: 'dress', width: 500, height: 900 },
+      { slot: 'layer', width: 700, height: 700 },
+      { slot: 'shoes', width: 900, height: 450 },
+      { slot: 'bag', width: 600, height: 600 },
+      { slot: 'jewelry', width: 400, height: 400 },
+    ]);
+
+    assert.equal(cells.length, 5);
+    assert.ok(cells[0].x + cells[0].w <= BOARD_W / 2);
+    // Row 0 on right has 2 distinct columns (cells[1] left, cells[2] right)
+    assert.ok(cells[1].x >= BOARD_W / 2);
+    assert.ok(cells[2].x > cells[1].x + cells[1].w);
+    assert.equal(cells[1].y, cells[2].y);
+    // Row 1 on right has 2 distinct columns (cells[3] left, cells[4] right)
+    assert.ok(cells[4].x > cells[3].x + cells[3].w);
+    assert.equal(cells[3].y, cells[4].y);
+    assert.ok(cells[3].y > cells[1].y + cells[1].h);
+
+    assertNoOverlap(boxes);
+  });
+
+  it('computes rounded 4-decimal fractional boxes and suffixes duplicate slot names (slot#2)', () => {
+    const boxes = computeBoardBoxes(
+      [
+        { slot: 'accessory', left: 60, top: 90, width: 300, height: 450 },
+        { slot: 'accessory', left: 600, top: 90, width: 300, height: 225 },
+        { slot: 'accessory', left: 600, top: 450, width: 200, height: 200 },
+      ],
+      BOARD_W,
+      BOARD_H,
+    );
+
+    assert.deepEqual(Object.keys(boxes), ['accessory', 'accessory#2', 'accessory#3']);
+    assert.deepEqual(boxes.accessory, [0.05, 0.1, 0.25, 0.5]);
+    assert.deepEqual(boxes['accessory#2'], [0.5, 0.1, 0.25, 0.25]);
+    assert.deepEqual(boxes['accessory#3'], [0.5, 0.5, 0.1667, 0.2222]);
+    assertNoOverlap(boxes);
+
+    assert.deepEqual(layoutBoardCells(0), []);
+    assert.equal(layoutBoardCells(1).length, 1);
+  });
+});
+
 describe('ledger', () => {
   it('estimates USD correctly across known and unknown models', () => {
     assert.ok(
@@ -536,6 +628,9 @@ describe('ledger', () => {
     );
     assert.ok(
       Math.abs(estimateCostUsd({ model: 'gemini-nano-banana-2.1', images: 3 }) - 0.15) < 1e-9,
+    );
+    assert.ok(
+      Math.abs(estimateCostUsd({ model: 'gemini-omni-1.2-flash', images: 1 }) - 0.6) < 1e-9,
     );
     assert.equal(estimateCostUsd({ model: 'some-unknown-model', input_tokens: 1000 }), 0);
     assert.equal(estimateCostUsd({ model: 'some-unknown-model', usd: 0.42 }), 0.42);
@@ -612,6 +707,7 @@ describe('media IPC client, warmMedia, call-log events, and fallback behavior', 
     await fs.promises.writeFile(
       echoChildPath,
       [
+        'let collageCalls = 0;',
         "process.on('message', (msg) => {",
         "  if (!msg || typeof msg !== 'object') return;",
         '  const { id, op, args } = msg;',
@@ -619,6 +715,14 @@ describe('media IPC client, warmMedia, call-log events, and fallback behavior', 
         '    process.send({ id, ok: true, result: { pong: true, pid: process.pid } });',
         "  } else if (op === 'echo') {",
         '    process.send({ id, ok: true, result: { args, pid: process.pid } });',
+        "  } else if (op === 'collage') {",
+        '    collageCalls += 1;',
+        '    const callNum = collageCalls;',
+        '    setTimeout(() => {',
+        "      if (process.connected) process.send({ id, ok: true, result: { url: '/tryon/board-test-' + callNum + '.jpg', path: '/tmp/board-test-' + callNum + '.jpg', boxes: { top: [0.05, 0.05, 0.4, 0.85], shoes: [0.55, 0.1, 0.4, 0.35] } } });",
+        '    }, 40);',
+        "  } else if (op === 'collageCount') {",
+        '    process.send({ id, ok: true, result: collageCalls });',
         "  } else if (op === 'slow') {",
         '    setTimeout(() => {',
         "      if (process.connected) process.send({ id, ok: true, result: 'late' });",
@@ -671,6 +775,34 @@ describe('media IPC client, warmMedia, call-log events, and fallback behavior', 
     assert.notEqual(res2.pid, res1.pid);
     assert.ok(mediaStatus().restarts > prevRestarts);
 
+    // 3b. outfitCollage returns string, outfitBoard returns { url, boxes }, and concurrent calls share ONE build
+    const boardOutfit: Outfit = {
+      number: 1,
+      name: 'Board Share Look',
+      difference: 'd',
+      story: 's',
+      pieces: [
+        { slot: 'top', why: 'w', item: makeItem({ id: 'b-top', variant_id: 'bv-top' }) },
+        { slot: 'shoes', why: 'w', item: makeItem({ id: 'b-shoes', variant_id: 'bv-shoes' }) },
+      ],
+      total: 116,
+    };
+    const [collageUrl, boardRes] = await Promise.all([
+      outfitCollage(boardOutfit, 'shared'),
+      outfitBoard(boardOutfit, 'shared'),
+    ]);
+    assert.equal(typeof collageUrl, 'string');
+    assert.equal(collageUrl, '/tryon/board-test-1.jpg');
+    assert.deepEqual(boardRes, {
+      url: '/tryon/board-test-1.jpg',
+      boxes: {
+        top: [0.05, 0.05, 0.4, 0.85],
+        shoes: [0.55, 0.1, 0.4, 0.35],
+      },
+    });
+    const collageCallsAfterShare = await mediaRequest<number>('collageCount', undefined, 5000);
+    assert.equal(collageCallsAfterShare, 1, 'outfitCollage + outfitBoard must share one in-flight build');
+
     // 4. productShot with a crashing child returns the store-image fallback and emits media_shot
     stopMedia();
     process.env.ALICE_MEDIA_CHILD = crashChildPath;
@@ -684,7 +816,7 @@ describe('media IPC client, warmMedia, call-log events, and fallback behavior', 
     });
     assert.ok(events.some((e) => e.ev === 'media_shot' && e.data?.source === 'original'));
 
-    // 5. outfitCollage with crashing child degrades to null and emits media_board
+    // 5. outfitCollage and outfitBoard with crashing child degrade to null and emit media_board
     const outfit: Outfit = {
       number: 1,
       name: 'Test Look',
@@ -695,6 +827,8 @@ describe('media IPC client, warmMedia, call-log events, and fallback behavior', 
     };
     const board = await outfitCollage(outfit);
     assert.equal(board, null);
+    const boardObj = await outfitBoard(outfit, 'crash-obj');
+    assert.equal(boardObj, null);
     assert.ok(events.some((e) => e.ev === 'media_board' && e.data?.ok === false));
 
     // 6. ALICE_CLEAN_SHOTS=off returns original without spawning child
@@ -1009,6 +1143,132 @@ describe('try-on verify loop, gate correction, and inspector parser', () => {
     assert.equal(out.check.path, 'pass');
     assert.equal(out.check.attempts, 1);
     assert.equal(out.check.passed, true);
+  });
+});
+
+describe('try-on extras: buildSetting, filenames, and parallel orchestrator', () => {
+  const delay = (ms: number): Promise<void> =>
+    new Promise((resolve) => {
+      setTimeout(resolve, ms);
+    });
+
+  it('buildSetting formats occasion, where, when, and weather naturally', () => {
+    assert.equal(
+      buildSetting({
+        occasion: "a friend's rooftop birthday",
+        where: 'New York',
+        when: 'Saturday evening',
+        weather: 'cool, overcast',
+      }),
+      "a friend's rooftop birthday in New York on a cool, overcast Saturday evening, city lights behind",
+    );
+    assert.equal(
+      buildSetting({
+        occasion: 'a beach wedding',
+        where: 'Malibu',
+        when: 'Sunday afternoon',
+        weather: 'overcast, breezy',
+      }),
+      'a beach wedding in Malibu on an overcast, breezy Sunday afternoon, soft ocean light and shoreline behind',
+    );
+    assert.equal(
+      buildSetting({ occasion: 'a gallery opening', where: 'Chelsea' }),
+      'a gallery opening in Chelsea',
+    );
+    assert.equal(buildSetting({ occasion: 'date night' }), 'date night');
+  });
+
+  it('generates server-safe scene and video filenames matching TRYON_NAME_RE', () => {
+    const id = newTryonId();
+    assert.match(sceneFileName(id), TRYON_NAME_RE);
+    assert.match(videoFileName(id), TRYON_NAME_RE);
+    assert.ok(videoFileName(id).endsWith('.mp4'));
+  });
+
+  it('starts scene and video in parallel and invokes onRender in arrival order', async () => {
+    const events: string[] = [];
+    const arrivals: Array<{ kind: 'scene' | 'video'; ok: boolean; url?: string }> = [];
+
+    const out = await runTryOnExtrasLoop({
+      setting: 'rooftop dinner in New York',
+      sceneEnabled: true,
+      videoEnabled: true,
+      runScene: async () => {
+        events.push('scene_start');
+        await delay(25);
+        events.push('scene_end');
+        return { url: '/tryon/scene-1.jpg', path: '/tmp/scene-1.jpg', ms: 25 };
+      },
+      runVideo: async () => {
+        events.push('video_start');
+        await delay(70);
+        events.push('video_end');
+        return { url: '/tryon/video-1.mp4', path: '/tmp/video-1.mp4', ms: 70 };
+      },
+      onRender: (r) => {
+        arrivals.push({ kind: r.kind, ok: r.ok, url: r.url });
+      },
+    });
+
+    // Both started before either finished
+    assert.deepEqual(events.slice(0, 2), ['scene_start', 'video_start']);
+    // Scene arrived first, then video
+    assert.deepEqual(arrivals, [
+      { kind: 'scene', ok: true, url: '/tryon/scene-1.jpg' },
+      { kind: 'video', ok: true, url: '/tryon/video-1.mp4' },
+    ]);
+    assert.equal(out.scene?.url, '/tryon/scene-1.jpg');
+    assert.equal(out.video?.url, '/tryon/video-1.mp4');
+    assert.equal(out.setting, 'rooftop dinner in New York');
+  });
+
+  it('degrades a failed part to null while returning the other part without throwing', async () => {
+    const arrivals: Array<{ kind: 'scene' | 'video'; ok: boolean }> = [];
+    const out = await runTryOnExtrasLoop({
+      setting: 'dinner in SoHo',
+      sceneEnabled: true,
+      videoEnabled: true,
+      runScene: async () => {
+        throw new Error('scene boom');
+      },
+      runVideo: async () => {
+        await delay(20);
+        return { url: '/tryon/video-2.mp4', path: '/tmp/video-2.mp4', ms: 20 };
+      },
+      onRender: (r) => {
+        arrivals.push({ kind: r.kind, ok: r.ok });
+      },
+    });
+
+    assert.equal(out.scene, null);
+    assert.equal(out.video?.url, '/tryon/video-2.mp4');
+    assert.deepEqual(arrivals, [
+      { kind: 'scene', ok: false },
+      { kind: 'video', ok: true },
+    ]);
+  });
+
+  it('honors sceneEnabled / videoEnabled switches without calling disabled renders', async () => {
+    let sceneCalls = 0;
+    let videoCalls = 0;
+    const out = await runTryOnExtrasLoop({
+      setting: 'coffee walk',
+      sceneEnabled: false,
+      videoEnabled: false,
+      runScene: async () => {
+        sceneCalls += 1;
+        return { url: '/tryon/scene-x.jpg', path: '/tmp/x.jpg', ms: 10 };
+      },
+      runVideo: async () => {
+        videoCalls += 1;
+        return { url: '/tryon/video-x.mp4', path: '/tmp/x.mp4', ms: 10 };
+      },
+    });
+
+    assert.equal(sceneCalls, 0);
+    assert.equal(videoCalls, 0);
+    assert.equal(out.scene, null);
+    assert.equal(out.video, null);
   });
 });
 
