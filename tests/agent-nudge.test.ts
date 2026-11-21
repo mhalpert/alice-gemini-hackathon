@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type { TimerHandle } from '../src/agent/context.ts';
 import {
   DEFAULT_RESULT_NUDGE_DELAY_MS,
+  buildNudgeInstruction,
   createToolResultNudger,
   isPreResultAddingLine,
 } from '../src/agent/nudge.ts';
@@ -357,4 +358,12 @@ test('add_to_bag nudge is not cancelled by pre-result speech or a short "adding 
   assert.equal(nudger.hasPending, false);
   clock.advance(10_000);
   assert.equal(replies.length, 3);
+
+  // Case 6: show_on_me nudge preserves "do not ask for sizes yet" when more reveal beats are coming.
+  const studioNudge = buildNudgeInstruction(
+    'show_on_me',
+    'Try-on for Look 1 is now revealed on screen. React to the studio shot in ONE short line, and do not ask for sizes yet—more views are coming.',
+  );
+  assert.match(studioNudge ?? '', /ONE short line/i);
+  assert.match(studioNudge ?? '', /do not ask for sizes yet/i);
 });

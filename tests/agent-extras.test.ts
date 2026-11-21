@@ -10,16 +10,18 @@ import type {
 } from '../src/types.ts';
 import type { TimerHandle } from '../src/agent/context.ts';
 import {
-  DEFAULT_EXTRA_ANNOUNCE_MAX_WAIT_MS,
-  buildExtraAnnounceInstruction,
-  createExtraAnnouncer,
+  DEFAULT_EXTRA_WAIT_TIMEOUT_MS,
+  DEFAULT_SCENE_HOLD_MS,
+  DEFAULT_SIZES_FALLBACK_MS,
+  DEFAULT_STUDIO_HOLD_MS,
+  buildSceneRevealInstruction,
+  buildVideoRevealInstruction,
+  createRevealSequencer,
   shortenSettingPhrase,
 } from '../src/agent/extras.ts';
 import type { PageSender } from '../src/agent/page.ts';
 import { createCallStateStore } from '../src/agent/state.ts';
 import {
-  DEFAULT_SCENE_REVEAL_DELAY_MS,
-  DEFAULT_VIDEO_REVEAL_DELAY_MS,
   createAgentTools,
   resolveTryOnExtras,
   type TimerLike,
@@ -75,12 +77,12 @@ function createFakeClock(start = 10_000) {
   };
 
   const advance = async (ms: number): Promise<void> => {
-    now += ms;
+    const target = now + ms;
     while (true) {
       let nextKey: number | undefined;
       let nextAt = Infinity;
       for (const [k, entry] of timers.entries()) {
-        if (entry.fireAt <= now && entry.fireAt < nextAt) {
+        if (entry.fireAt <= target && entry.fireAt < nextAt) {
           nextAt = entry.fireAt;
           nextKey = k;
         }
@@ -88,10 +90,12 @@ function createFakeClock(start = 10_000) {
       if (nextKey === undefined) break;
       const entry = timers.get(nextKey)!;
       timers.delete(nextKey);
+      now = Math.max(now, entry.fireAt);
       entry.fn();
       await Promise.resolve();
       await Promise.resolve();
     }
+    now = target;
   };
 
   return { now: () => now, setTimeoutFn, clearTimeoutFn, advance, activeTimers: () => timers.size };
@@ -130,8 +134,21 @@ function makeThreeOutfits(): Outfit[] {
       name: 'Rooftop Silk',
       difference: 'Bias-cut silk midi with strappy heels.',
       story: 'Effortless rooftop polish.',
-      pieces: [{ slot: 'dress', why: 'Moves cleanly in the breeze.', item: makeItem() }],
-      total: 120,
+      pieces: [
+        { slot: 'dress', why: 'Moves cleanly in the breeze.', item: makeItem() },
+        {
+          slot: 'shoes',
+          why: 'Strappy heel lengthens the leg.',
+          item: makeItem({
+            id: 'item-1-sh',
+            variant_id: 'var-1-sh',
+            title: 'Strappy Sandal - Gold',
+            price: 90,
+            sizes: ['7', '8', '9'],
+          }),
+        },
+      ],
+      total: 210,
     },
     {
       number: 2,
@@ -222,10 +239,11 @@ test('resolveTryOnExtras guards missing export and absent function is a clean no
 
   const revealRes = await tools.show_on_me.execute({ outfit: 1 }, fakeToolOpts('s1'));
   assert.match(revealRes, /revealed on screen/i);
-  assert.doesNotMatch(revealRes, /on-location|video/i);
+  assert.match(revealRes, /ask for their top and shoe sizes in one question/i);
+  assert.doesNotMatch(revealRes, /do not ask for sizes yet/i);
 
   assert.equal(
-    logs.some((l) => l.ev === 'tryon_extras_start' || l.ev === 'tryon_extra' || l.ev === 'extra_announce'),
+    logs.some((l) => l.ev === 'tryon_extras_start' || l.ev === 'tryon_extra'),
     false,
     'absent tryOnExtras must log nothing per call',
   );
@@ -287,10 +305,8 @@ test('tryOnExtras starts once on pick when studio is done, on studio completion 
   );
   await flushMicrotasks();
 
-  // Studio finished for Look 1 and Look 3, still pending for Look 2; nothing picked -> zero extras started.
   assert.equal(startedCalls.length, 0, 'must never start extras for unpicked looks');
 
-  // 1) Pick Look 1 (studio already done) -> starts immediately without blocking pick_outfit.
   await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
   assert.equal(startedCalls.length, 1);
   assert.equal(startedCalls[0]!.outfitNum, 1);
@@ -300,16 +316,13 @@ test('tryOnExtras starts once on pick when studio is done, on studio completion 
   assert.equal(startedCalls[0]!.opts.when, 'Saturday');
   assert.equal(startedCalls[0]!.opts.weather, '72F and clear in Brooklyn Saturday evening');
 
-  // Picking Look 1 again later (past duplicate window) must NOT start extras a second time.
   await clock.advance(2_000);
   await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1-again'));
   assert.equal(startedCalls.length, 1, 'must start extras at most once per picked look');
 
-  // 2) Pick Look 2 while studio try-on is still rendering -> does NOT start yet, does NOT block pick_outfit.
   await tools.pick_outfit.execute({ outfit: 2 }, fakeToolOpts('p2'));
   assert.equal(startedCalls.length, 1, 'must wait for Look 2 studio try-on to finish');
 
-  // Complete Look 2 studio try-on -> extras start immediately for Look 2.
   resolveStudio2({
     url: 'https://media.local/studio-2.jpg',
     path: '/tmp/studio-2.jpg',
@@ -321,13 +334,7 @@ test('tryOnExtras starts once on pick when studio is done, on studio completion 
   assert.equal(startedCalls.length, 2);
   assert.equal(startedCalls[1]!.outfitNum, 2);
   assert.equal(startedCalls[1]!.studioPath, '/tmp/studio-2.jpg');
-
-  // Look 3 was never picked -> never started.
-  assert.equal(
-    startedCalls.some((c) => c.outfitNum === 3),
-    false,
-    'unpicked Look 3 must never start extras',
-  );
+  assert.equal(startedCalls.some((c) => c.outfitNum === 3), false);
 
   const startLogs = logs.filter((l) => l.ev === 'tryon_extras_start');
   assert.deepEqual(
@@ -336,192 +343,19 @@ test('tryOnExtras starts once on pick when studio is done, on studio completion 
   );
 });
 
-test('pre-reveal extras send tryOnReady with kind, stay silent before studio reveal, appear in show_on_me result, and reveal at +6s and +8s', async () => {
-  const clock = createFakeClock();
+test('sequencer plays studio -> scene (>=5s & after studio line) -> video (>=6s & after scene line) -> sizes once', async () => {
+  const clock = createFakeClock(10_000);
   const logs: RecordedLog[] = [];
   const replies: Array<{ instructions: string }> = [];
   const { page, calls } = createFakePage();
-  const state = createCallStateStore({ roomName: 'r-pre', log: () => {} });
+  const state = createCallStateStore({ roomName: 'r-seq-ready', log: () => {} });
 
-  const announcer = createExtraAnnouncer({
-    room: 'r-pre',
-    initialAgentState: 'listening',
+  const sequencer = createRevealSequencer({
+    room: 'r-seq-ready',
+    sendReveal: (payload) => page.send('reveal', payload),
     generateReply: (opts) => replies.push(opts),
-    log: (room, ev, data) => logs.push({ room, ev, data }),
-    now: clock.now,
-    setTimeoutFn: clock.setTimeoutFn,
-    clearTimeoutFn: clock.clearTimeoutFn,
-  });
-
-  let capturedOnRender: TryOnExtrasOptions['onRender'];
-  const tools = createAgentTools({
-    room: 'r-pre',
-    log: (room, ev, data) => logs.push({ room, ev, data }),
-    now: clock.now,
-    setTimeoutFn: clock.setTimeoutFn,
-    clearTimeoutFn: clock.clearTimeoutFn,
-    page,
-    state,
-    onExtraLanded: (ev) => announcer.announce(ev),
-    deps: makeBaseDeps({
-      async tryOnExtras(_studio, _outfit, opts) {
-        capturedOnRender = opts.onRender;
-        return new Promise<TryOnExtrasResult>(() => {});
-      },
-    }),
-  });
-
-  await tools.set_department.execute({ department: 'women' }, fakeToolOpts('d1'));
-  await tools.build_outfits.execute({ occasion: 'SoHo gallery opening', budget_usd: 300 }, fakeToolOpts('b1'));
-  await flushMicrotasks();
-  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
-  calls.length = 0;
-
-  // Scene and video both land BEFORE show_on_me.
-  capturedOnRender!({
-    kind: 'scene',
-    ok: true,
-    url: 'https://media.local/scene-1.jpg',
-    ms: 12_000,
-  });
-  capturedOnRender!({
-    kind: 'video',
-    ok: true,
-    url: 'https://media.local/video-1.mp4',
-    ms: 28_000,
-  });
-  await flushMicrotasks();
-
-  // Only tryOnReady sent (with kind); NO reveal, NO spoken announce before studio reveal.
-  assert.deepEqual(calls, [
-    {
-      action: 'tryOnReady',
-      payload: { outfit: 1, url: 'https://media.local/scene-1.jpg', kind: 'scene' },
-    },
-    {
-      action: 'tryOnReady',
-      payload: { outfit: 1, url: 'https://media.local/video-1.mp4', kind: 'video' },
-    },
-  ]);
-  assert.equal(replies.length, 0, 'nothing spoken before studio reveal');
-
-  // Recorded in state and summarized as short flags without URLs.
-  assert.equal(state.get().tryOnExtras[1]?.scene, 'https://media.local/scene-1.jpg');
-  assert.equal(state.get().tryOnExtras[1]?.video, 'https://media.local/video-1.mp4');
-  const summary = state.summarize();
-  assert.match(summary, /scene ready/);
-  assert.match(summary, /video ready/);
-  assert.doesNotMatch(summary, /media\.local/);
-
-  // Logged tryon_extra for both renders.
-  const extraLogs = logs.filter((l) => l.ev === 'tryon_extra');
-  assert.deepEqual(
-    extraLogs.map((l) => l.data),
-    [
-      { outfit: 1, kind: 'scene', ok: true, ms: 12_000 },
-      { outfit: 1, kind: 'video', ok: true, ms: 28_000 },
-    ],
-  );
-
-  // Now show_on_me reveals studio -> result mentions both ready extras, then reveals scene at +6s and video +8s after scene.
-  calls.length = 0;
-  const showRes = await tools.show_on_me.execute({ outfit: 1 }, fakeToolOpts('s1'));
-  assert.match(showRes, /on-location still and a short video/i);
-  assert.match(showRes, /bringing up the on-location shot/i);
-
-  // Immediately after show_on_me: only studio reveal was sent.
-  const reveals = () => calls.filter((c) => c.action === 'reveal');
-  assert.deepEqual(reveals(), [
-    { action: 'reveal', payload: { outfit: 1, url: 'https://media.local/studio-1.jpg' } },
-  ]);
-
-  // At 5.999s: scene not revealed yet.
-  await clock.advance(DEFAULT_SCENE_REVEAL_DELAY_MS - 1);
-  assert.equal(reveals().length, 1);
-
-  // At 6.000s: scene revealed with kind: 'scene'.
-  await clock.advance(1);
-  assert.deepEqual(reveals().at(-1), {
-    action: 'reveal',
-    payload: { outfit: 1, kind: 'scene' },
-  });
-
-  // 7.999s after scene: video not revealed yet.
-  await clock.advance(DEFAULT_VIDEO_REVEAL_DELAY_MS - 1);
-  assert.equal(reveals().length, 2);
-
-  // 8.000s after scene: video revealed with kind: 'video'.
-  await clock.advance(1);
-  assert.deepEqual(reveals().at(-1), {
-    action: 'reveal',
-    payload: { outfit: 1, kind: 'video' },
-  });
-  assert.equal(replies.length, 0, 'pre-ready reveals rely on show_on_me tool result');
-});
-
-test('show_on_me mentions only scene when video has not landed yet (never promises unlanded video)', async () => {
-  const clock = createFakeClock();
-  const { page, calls } = createFakePage();
-  const state = createCallStateStore({ roomName: 'r-scene-only', log: () => {} });
-
-  let capturedOnRender: TryOnExtrasOptions['onRender'];
-  const tools = createAgentTools({
-    room: 'r-scene-only',
-    log: () => {},
-    now: clock.now,
-    setTimeoutFn: clock.setTimeoutFn,
-    clearTimeoutFn: clock.clearTimeoutFn,
-    page,
-    state,
-    deps: makeBaseDeps({
-      async tryOnExtras(_studio, _outfit, opts) {
-        capturedOnRender = opts.onRender;
-        return new Promise<TryOnExtrasResult>(() => {});
-      },
-    }),
-  });
-
-  await tools.set_department.execute({ department: 'women' }, fakeToolOpts('d1'));
-  await tools.build_outfits.execute({ occasion: 'rooftop cocktails', budget_usd: 300 }, fakeToolOpts('b1'));
-  await flushMicrotasks();
-  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
-
-  capturedOnRender!({
-    kind: 'scene',
-    ok: true,
-    url: 'https://media.local/scene-1.jpg',
-    ms: 11_000,
-  });
-  await flushMicrotasks();
-  calls.length = 0;
-
-  const showRes = await tools.show_on_me.execute({ outfit: 1 }, fakeToolOpts('s1'));
-  assert.match(showRes, /on-location still/i);
-  assert.doesNotMatch(showRes, /video/i, 'must never promise a video before it lands');
-
-  await clock.advance(DEFAULT_SCENE_REVEAL_DELAY_MS);
-  assert.deepEqual(calls.at(-1), { action: 'reveal', payload: { outfit: 1, kind: 'scene' } });
-
-  // No video reveal fires after 8s because video never landed.
-  await clock.advance(DEFAULT_VIDEO_REVEAL_DELAY_MS + 5_000);
-  assert.equal(
-    calls.some((c) => c.action === 'reveal' && (c.payload as PageActions['reveal']).kind === 'video'),
-    false,
-  );
-});
-
-test('late-landing extra after studio reveal sends tryOnReady, reveal, and announces once when idle, or waits/skips while speaking', async () => {
-  const clock = createFakeClock();
-  const logs: RecordedLog[] = [];
-  const replies: Array<{ instructions: string }> = [];
-  const { page, calls } = createFakePage();
-  const state = createCallStateStore({ roomName: 'r-late', log: () => {} });
-
-  const announcer = createExtraAnnouncer({
-    room: 'r-late',
     initialAgentState: 'listening',
     initialUserState: 'listening',
-    generateReply: (opts) => replies.push(opts),
     log: (room, ev, data) => logs.push({ room, ev, data }),
     now: clock.now,
     setTimeoutFn: clock.setTimeoutFn,
@@ -529,178 +363,396 @@ test('late-landing extra after studio reveal sends tryOnReady, reveal, and annou
   });
 
   let capturedOnRender: TryOnExtrasOptions['onRender'];
-  let resolveExtras!: (res: TryOnExtrasResult) => void;
-  const extrasGate = new Promise<TryOnExtrasResult>((r) => {
-    resolveExtras = r;
-  });
-
   const tools = createAgentTools({
-    room: 'r-late',
+    room: 'r-seq-ready',
     log: (room, ev, data) => logs.push({ room, ev, data }),
     now: clock.now,
     setTimeoutFn: clock.setTimeoutFn,
     clearTimeoutFn: clock.clearTimeoutFn,
     page,
     state,
-    onToolStart: (ev) => announcer.onToolStart(ev.callId),
-    onToolEnd: (ev) => announcer.onToolEnd(ev.callId),
-    onExtraLanded: (ev) => announcer.announce(ev),
+    revealSequencer: sequencer,
     deps: makeBaseDeps({
       async tryOnExtras(_studio, _outfit, opts) {
         capturedOnRender = opts.onRender;
-        return extrasGate;
+        return new Promise<TryOnExtrasResult>(() => {});
       },
     }),
   });
 
   await tools.set_department.execute({ department: 'women' }, fakeToolOpts('d1'));
   await tools.build_outfits.execute(
-    { occasion: 'sunset rooftop bar', budget_usd: 300, where: 'Manhattan' },
+    { occasion: 'beach wedding', where: 'Capri', budget_usd: 300 },
     fakeToolOpts('b1'),
   );
   await flushMicrotasks();
   await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+  calls.length = 0;
 
-  // Studio reveal happens BEFORE extras land.
+  // Both scene and video land BEFORE show_on_me.
+  capturedOnRender!({ kind: 'scene', ok: true, url: 'https://media.local/scene-1.jpg', ms: 12_000 });
+  capturedOnRender!({ kind: 'video', ok: true, url: 'https://media.local/video-1.mp4', ms: 24_000 });
+  await flushMicrotasks();
+
+  // Only tryOnReady sent before studio reveal; zero reveals, zero speech.
+  assert.deepEqual(calls, [
+    { action: 'tryOnReady', payload: { outfit: 1, url: 'https://media.local/scene-1.jpg', kind: 'scene' } },
+    { action: 'tryOnReady', payload: { outfit: 1, url: 'https://media.local/video-1.mp4', kind: 'video' } },
+  ]);
+  assert.equal(replies.length, 0);
+
+  // Beat 1: studio reveal via show_on_me -> tells Alice ONE short line, do NOT ask for sizes yet.
+  calls.length = 0;
   const showRes = await tools.show_on_me.execute({ outfit: 1 }, fakeToolOpts('s1'));
-  assert.doesNotMatch(showRes, /Also ready:/);
-  calls.length = 0;
+  assert.match(showRes, /ONE short line/i);
+  assert.match(showRes, /do not ask for sizes yet/i);
+  assert.equal(sequencer.isActive, true);
 
-  // 1) Scene lands while idle -> tryOnReady, then reveal, then ONE spoken announce!
-  capturedOnRender!({
-    kind: 'scene',
-    ok: true,
-    url: 'https://media.local/scene-1.jpg',
-    ms: 13_000,
-  });
+  const reveals = () => calls.filter((c) => c.action === 'reveal');
+  assert.deepEqual(reveals(), [
+    { action: 'reveal', payload: { outfit: 1, url: 'https://media.local/studio-1.jpg' } },
+  ]);
+
+  // Alice speaks her studio line from +500ms to +6500ms (past the 5s minimum hold!).
+  await clock.advance(500);
+  sequencer.onAgentStateChanged('speaking');
+  await clock.advance(DEFAULT_STUDIO_HOLD_MS); // now at +5500ms, still speaking!
+  assert.equal(reveals().length, 1, 'Beat 2 must wait until Alice finishes her studio line');
+  assert.equal(replies.length, 0);
+
+  // Alice finishes studio line at +6500ms -> Beat 2 (scene) fires immediately!
+  await clock.advance(1_000);
+  sequencer.onAgentStateChanged('listening');
   await flushMicrotasks();
 
-  assert.deepEqual(calls, [
-    {
-      action: 'tryOnReady',
-      payload: { outfit: 1, url: 'https://media.local/scene-1.jpg', kind: 'scene' },
-    },
-    {
-      action: 'reveal',
-      payload: { outfit: 1, kind: 'scene' },
-    },
-  ]);
+  assert.deepEqual(reveals().at(-1), { action: 'reveal', payload: { outfit: 1, kind: 'scene' } });
   assert.equal(replies.length, 1);
-  assert.match(replies[0]!.instructions, /on-location shot/i);
-  assert.match(replies[0]!.instructions, /Manhattan sunset rooftop bar/i);
+  assert.match(replies[0]!.instructions, /beach wedding in Capri/i);
   assert.match(replies[0]!.instructions, /do not ask a question/i);
-  assert.deepEqual(
-    logs.filter((l) => l.ev === 'extra_announce').map((l) => l.data),
-    [{ outfit: 1, kind: 'scene', spoken: true }],
-  );
+  assert.match(replies[0]!.instructions, /do not invent/i);
 
-  // 2) Video lands while Alice is speaking -> still sends tryOnReady + reveal, NO announce while speaking!
-  calls.length = 0;
-  announcer.onAgentStateChanged('speaking');
-  capturedOnRender!({
-    kind: 'video',
-    ok: true,
-    url: 'https://media.local/video-1.mp4',
-    ms: 30_000,
-  });
-  resolveExtras({
-    scene: { url: 'https://media.local/scene-1.jpg', path: '/tmp/scene-1.jpg', ms: 13_000 },
-    video: { url: 'https://media.local/video-1.mp4', path: '/tmp/video-1.mp4', ms: 30_000 },
-    setting: 'a candlelit Manhattan rooftop terrace at dusk',
-  });
-  await flushMicrotasks();
+  // Alice speaks her scene line from +500ms to +2500ms (finishes BEFORE 6s scene hold).
+  await clock.advance(500);
+  sequencer.onAgentStateChanged('speaking');
+  await clock.advance(2_000);
+  sequencer.onAgentStateChanged('listening');
 
-  assert.deepEqual(calls, [
-    {
-      action: 'tryOnReady',
-      payload: { outfit: 1, url: 'https://media.local/video-1.mp4', kind: 'video' },
-    },
-    {
-      action: 'reveal',
-      payload: { outfit: 1, kind: 'video' },
-    },
-  ]);
-  assert.equal(replies.length, 1, 'must not announce while Alice is speaking');
-
-  // Still speaking for the entire 10s window -> skips spoken line and logs spoken: false.
-  await clock.advance(DEFAULT_EXTRA_ANNOUNCE_MAX_WAIT_MS);
-  assert.equal(replies.length, 1, 'must skip speech after 10s timeout');
-  assert.deepEqual(
-    logs.filter((l) => l.ev === 'extra_announce').map((l) => l.data),
-    [
-      { outfit: 1, kind: 'scene', spoken: true },
-      { outfit: 1, kind: 'video', spoken: false },
-    ],
-  );
-
-  // Even when Alice later returns to listening, expired announce must not fire.
-  announcer.onAgentStateChanged('listening');
-  await clock.advance(5_000);
+  // At +5999ms after scene reveal: video must NOT fire yet (6s minimum hold).
+  await clock.advance(DEFAULT_SCENE_HOLD_MS - 2_501);
+  assert.equal(reveals().length, 2, 'Beat 3 must respect 6s minimum hold on scene');
   assert.equal(replies.length, 1);
+
+  // At +6000ms after scene reveal: Beat 3 (video) fires!
+  await clock.advance(1);
+  assert.deepEqual(reveals().at(-1), { action: 'reveal', payload: { outfit: 1, kind: 'video' } });
+  assert.equal(replies.length, 2);
+  assert.match(replies[1]!.instructions, /in motion/i);
+  assert.match(replies[1]!.instructions, /do not ask a question/i);
+
+  // Alice speaks her video line, then finishes -> sizes question fires ONCE!
+  await clock.advance(400);
+  sequencer.onAgentStateChanged('speaking');
+  await clock.advance(2_200);
+  assert.equal(replies.length, 2, 'sizes prompt must wait until video line finishes');
+
+  sequencer.onAgentStateChanged('listening');
+  assert.equal(replies.length, 3, 'sizes prompt must fire once after last beat line');
+  assert.match(replies[2]!.instructions, /top and shoe sizes in one question/i);
+  assert.equal(sequencer.isActive, false);
+
+  // Advancing further fires nothing else (sizes asked strictly once).
+  await clock.advance(30_000);
+  assert.equal(replies.length, 3);
+
+  const beatLogs = logs.filter((l) => l.ev === 'reveal_beat').map((l) => l.data);
+  assert.deepEqual(beatLogs, [
+    { outfit: 1, kind: 'studio', spoken: true, waited_ms: 0 },
+    { outfit: 1, kind: 'scene', spoken: true, waited_ms: 6_500 },
+    { outfit: 1, kind: 'video', spoken: true, waited_ms: 6_000 },
+  ]);
 });
 
-test('extraAnnouncer retries while shopper speaks or a tool runs, speaks once idle within 10s, and disposes cleanly', async () => {
-  const clock = createFakeClock();
+test('late-landing scene waits up to 20s and video landing 0.3s later still holds scene for 6s minimum', async () => {
+  const clock = createFakeClock(20_000);
   const logs: RecordedLog[] = [];
   const replies: Array<{ instructions: string }> = [];
+  const { page, calls } = createFakePage();
+  const state = createCallStateStore({ roomName: 'r-late-hold', log: () => {} });
 
-  const announcer = createExtraAnnouncer({
-    room: 'r-ann',
-    initialAgentState: 'listening',
-    initialUserState: 'speaking',
+  const sequencer = createRevealSequencer({
+    room: 'r-late-hold',
+    sendReveal: (payload) => page.send('reveal', payload),
     generateReply: (opts) => replies.push(opts),
+    initialAgentState: 'listening',
+    initialUserState: 'listening',
     log: (room, ev, data) => logs.push({ room, ev, data }),
     now: clock.now,
     setTimeoutFn: clock.setTimeoutFn,
     clearTimeoutFn: clock.clearTimeoutFn,
   });
 
-  // Shopper is speaking -> queued, not spoken yet.
-  announcer.announce({
-    outfit: 1,
-    kind: 'video',
-    setting: 'a warm candlelit trattoria in SoHo',
+  let capturedOnRender: TryOnExtrasOptions['onRender'];
+  const tools = createAgentTools({
+    room: 'r-late-hold',
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+    page,
+    state,
+    revealSequencer: sequencer,
+    deps: makeBaseDeps({
+      async tryOnExtras(_studio, _outfit, opts) {
+        capturedOnRender = opts.onRender;
+        return new Promise<TryOnExtrasResult>(() => {});
+      },
+    }),
   });
-  assert.equal(replies.length, 0);
-  assert.equal(announcer.hasPending, true);
 
-  // 3s later shopper stops speaking, but a tool is running -> still waits.
-  announcer.onToolStart('call-swap');
-  await clock.advance(3_000);
-  announcer.onUserStateChanged('listening');
-  assert.equal(replies.length, 0, 'must not speak while a tool is running');
+  await tools.set_department.execute({ department: 'women' }, fakeToolOpts('d1'));
+  await tools.build_outfits.execute(
+    { occasion: 'rooftop gala', where: 'Manhattan', budget_usd: 300 },
+    fakeToolOpts('b1'),
+  );
+  await flushMicrotasks();
+  await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
+  calls.length = 0;
 
-  // 2s later tool finishes (5s total < 10s) -> speaks once!
-  await clock.advance(2_000);
-  announcer.onToolEnd('call-swap');
+  // Extras are still rendering when show_on_me runs -> studio tells Alice NOT to ask for sizes yet.
+  const showRes = await tools.show_on_me.execute({ outfit: 1 }, fakeToolOpts('s1'));
+  assert.match(showRes, /do not ask for sizes yet/i);
+
+  // Alice finishes studio line at +2.5s.
+  await clock.advance(300);
+  sequencer.onAgentStateChanged('speaking');
+  await clock.advance(2_200);
+  sequencer.onAgentStateChanged('listening');
+
+  // Scene lands late at +9s (past 5s studio hold, within 20s timeout) -> reveals immediately!
+  await clock.advance(6_500); // total +9000ms
+  capturedOnRender!({ kind: 'scene', ok: true, url: 'https://media.local/scene-1.jpg', ms: 9_000 });
+  await flushMicrotasks();
+
+  const reveals = () => calls.filter((c) => c.action === 'reveal');
+  assert.equal(reveals().length, 2);
+  assert.deepEqual(reveals().at(-1), { action: 'reveal', payload: { outfit: 1, kind: 'scene' } });
   assert.equal(replies.length, 1);
-  assert.match(replies[0]!.instructions, /short video/i);
-  assert.match(replies[0]!.instructions, /warm candlelit trattoria/i);
-  assert.equal(announcer.hasPending, false);
-  assert.deepEqual(logs.at(-1)?.data, { outfit: 1, kind: 'video', spoken: true });
 
-  // Disposing clears pending timers and suppresses future announcements.
-  announcer.onAgentStateChanged('speaking');
-  announcer.announce({ outfit: 2, kind: 'scene', setting: 'Brooklyn loft party' });
-  assert.equal(clock.activeTimers(), 1);
-  announcer.dispose();
-  assert.equal(clock.activeTimers(), 0);
-  assert.equal(announcer.hasPending, false);
-  await clock.advance(15_000);
+  // Video lands just 0.3s later (reproducing the real-call bug!) -> MUST NOT replace scene yet!
+  await clock.advance(300);
+  capturedOnRender!({ kind: 'video', ok: true, url: 'https://media.local/video-1.mp4', ms: 9_300 });
+  await flushMicrotasks();
+  assert.equal(reveals().length, 2, 'video landing 0.3s after scene must NOT replace scene early');
+
+  // Even after Alice finishes her scene line at +2.5s, scene stays held until 6s total.
+  sequencer.onAgentStateChanged('speaking');
+  await clock.advance(2_200);
+  sequencer.onAgentStateChanged('listening');
+  await clock.advance(DEFAULT_SCENE_HOLD_MS - 2_501);
+  assert.equal(reveals().length, 2, 'scene still held at 5.999s');
+
+  await clock.advance(1);
+  assert.equal(reveals().length, 3);
+  assert.deepEqual(reveals().at(-1), { action: 'reveal', payload: { outfit: 1, kind: 'video' } });
+  assert.equal(replies.length, 2);
+
+  const beatLogs = logs.filter((l) => l.ev === 'reveal_beat').map((l) => l.data);
+  assert.deepEqual(beatLogs, [
+    { outfit: 1, kind: 'studio', spoken: true, waited_ms: 0 },
+    { outfit: 1, kind: 'scene', spoken: true, waited_ms: 9_000 },
+    { outfit: 1, kind: 'video', spoken: true, waited_ms: 6_000 },
+  ]);
+});
+
+test('failed scene goes studio -> video cleanly without mentioning scene, and timed-out renders skip silently', async () => {
+  const clock = createFakeClock(30_000);
+  const logs: RecordedLog[] = [];
+  const replies: Array<{ instructions: string }> = [];
+  const reveals: Array<{ outfit: number; kind: string }> = [];
+
+  const seq = createRevealSequencer({
+    room: 'r-fail-skip',
+    sendReveal: (p) => reveals.push(p),
+    generateReply: (opts) => replies.push(opts),
+    initialAgentState: 'listening',
+    initialUserState: 'listening',
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+  });
+
+  // 1) Scene fails while video is ready -> holds studio 5s, goes straight to video, then sizes once.
+  seq.startStudio({
+    outfit: 1,
+    setting: 'cocktail party',
+    scene: 'pending',
+    video: 'ready',
+    getSizesInstruction: () => 'Ask for their top and shoe sizes in one question.',
+  });
+  seq.onAgentStateChanged('speaking');
+  await clock.advance(2_000);
+  seq.onAgentStateChanged('listening');
+  seq.onExtraFailed(1, 'scene');
+
+  // Still inside 5s studio hold.
+  await clock.advance(DEFAULT_STUDIO_HOLD_MS - 2_001);
+  assert.equal(reveals.length, 0);
+
+  // At 5s: video reveals straight after studio!
+  await clock.advance(1);
+  assert.deepEqual(reveals, [{ outfit: 1, kind: 'video' }]);
+  assert.equal(replies.length, 1);
+  assert.match(replies[0]!.instructions, /in motion/i);
+  assert.doesNotMatch(replies[0]!.instructions, /failed|missing|scene/i);
+
+  // Even if Alice stays silent after video beat, fallback fires sizes instruction ONCE after 3s.
+  await clock.advance(DEFAULT_SIZES_FALLBACK_MS);
+  assert.equal(replies.length, 2);
+  assert.match(replies[1]!.instructions, /top and shoe sizes/i);
+  assert.equal(seq.isActive, false);
+
+  // 2) Both pending and never arrive -> times out at 20s and asks sizes ONCE without mentioning missing renders.
+  reveals.length = 0;
+  replies.length = 0;
+  seq.startStudio({
+    outfit: 2,
+    setting: 'rooftop dinner',
+    scene: 'pending',
+    video: 'pending',
+    getSizesInstruction: () => 'Offer to add it to their bag in those sizes.',
+  });
+  seq.onAgentStateChanged('speaking');
+  await clock.advance(2_000);
+  seq.onAgentStateChanged('listening');
+
+  await clock.advance(DEFAULT_EXTRA_WAIT_TIMEOUT_MS - 2_001);
+  assert.equal(replies.length, 0, 'still waiting for pending renders before 20s');
+
+  await clock.advance(1);
+  assert.equal(reveals.length, 0, 'no scene or video reveals on timeout');
+  assert.equal(replies.length, 1, 'sizes/bag instruction fires once on timeout');
+  assert.match(replies[0]!.instructions, /offer to add it to their bag/i);
+  assert.equal(seq.isActive, false);
+});
+
+test('both extras absent asks sizes once after studio line (and never duplicates if already prompted)', async () => {
+  const clock = createFakeClock(40_000);
+  const replies: Array<{ instructions: string }> = [];
+  const reveals: Array<{ outfit: number; kind: string }> = [];
+
+  const seq = createRevealSequencer({
+    room: 'r-both-absent',
+    sendReveal: (p) => reveals.push(p),
+    generateReply: (opts) => replies.push(opts),
+    initialAgentState: 'listening',
+    initialUserState: 'listening',
+    log: () => {},
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+  });
+
+  // Case A: sizes not prompted in studio -> fires once after Alice finishes studio line.
+  seq.startStudio({
+    outfit: 1,
+    setting: 'gallery opening',
+    scene: 'absent',
+    video: 'absent',
+    getSizesInstruction: () => 'Ask for their top, bottom, and shoe sizes in one question.',
+  });
+  seq.onAgentStateChanged('speaking');
+  await clock.advance(1_800);
+  assert.equal(replies.length, 0);
+  seq.onAgentStateChanged('listening');
+  assert.equal(replies.length, 1);
+  assert.match(replies[0]!.instructions, /top, bottom, and shoe sizes/i);
+  assert.equal(reveals.length, 0);
+  assert.equal(seq.isActive, false);
+
+  // Case B: sizesAlreadyPrompted = true -> zero extra generateReply calls.
+  seq.startStudio({
+    outfit: 1,
+    setting: 'gallery opening',
+    scene: 'absent',
+    video: 'absent',
+    sizesAlreadyPrompted: true,
+    getSizesInstruction: () => 'Should not fire.',
+  });
+  assert.equal(seq.isActive, false);
+  await clock.advance(30_000);
   assert.equal(replies.length, 1);
 });
 
-test('failed extra part produces no page action, no state entry, and no speech; empty studio path skips extras', async () => {
+test('shopper speaking during sequence keeps page reveals on schedule but skips remaining spoken lines', async () => {
+  const clock = createFakeClock(50_000);
+  const logs: RecordedLog[] = [];
+  const replies: Array<{ instructions: string }> = [];
+  const reveals: Array<{ outfit: number; kind: string }> = [];
+
+  const seq = createRevealSequencer({
+    room: 'r-shopper-speaks',
+    sendReveal: (p) => reveals.push(p),
+    generateReply: (opts) => replies.push(opts),
+    initialAgentState: 'listening',
+    initialUserState: 'listening',
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+  });
+
+  seq.startStudio({
+    outfit: 1,
+    setting: 'beach wedding in Capri',
+    scene: 'ready',
+    video: 'ready',
+    getSizesInstruction: () => 'Ask for sizes.',
+  });
+
+  // Shopper speaks at +2s (e.g. gives sizes or asks a question).
+  await clock.advance(2_000);
+  seq.onUserStateChanged('speaking');
+  seq.onShopperSpoke();
+  await clock.advance(1_000);
+  seq.onUserStateChanged('listening');
+  // Alice starts answering the shopper.
+  seq.onAgentStateChanged('speaking');
+
+  // At +5s: scene page reveal STILL fires on schedule, with spoken: false!
+  await clock.advance(2_000);
+  assert.deepEqual(reveals, [{ outfit: 1, kind: 'scene' }]);
+  assert.equal(replies.length, 0, 'must skip scene spoken line after shopper spoke');
+
+  // At +11s (+6s after scene): video page reveal STILL fires on schedule, with spoken: false!
+  await clock.advance(DEFAULT_SCENE_HOLD_MS);
+  assert.deepEqual(reveals, [
+    { outfit: 1, kind: 'scene' },
+    { outfit: 1, kind: 'video' },
+  ]);
+  assert.equal(replies.length, 0, 'must skip video spoken line and sizes question after shopper spoke');
+  assert.equal(seq.isActive, false);
+
+  const beatLogs = logs.filter((l) => l.ev === 'reveal_beat').map((l) => l.data);
+  assert.deepEqual(beatLogs, [
+    { outfit: 1, kind: 'studio', spoken: true, waited_ms: 0 },
+    { outfit: 1, kind: 'scene', spoken: false, waited_ms: 5_000 },
+    { outfit: 1, kind: 'video', spoken: false, waited_ms: 6_000 },
+  ]);
+});
+
+test('failed extra part produces no page action, no state entry, and empty studio path skips extras', async () => {
   const clock = createFakeClock();
   const logs: RecordedLog[] = [];
   const replies: Array<{ instructions: string }> = [];
   const { page, calls } = createFakePage();
   const state = createCallStateStore({ roomName: 'r-fail', log: () => {} });
 
-  const announcer = createExtraAnnouncer({
+  const sequencer = createRevealSequencer({
     room: 'r-fail',
-    initialAgentState: 'listening',
+    sendReveal: (payload) => page.send('reveal', payload),
     generateReply: (opts) => replies.push(opts),
+    initialAgentState: 'listening',
     log: (room, ev, data) => logs.push({ room, ev, data }),
     now: clock.now,
     setTimeoutFn: clock.setTimeoutFn,
@@ -717,11 +769,10 @@ test('failed extra part produces no page action, no state entry, and no speech; 
     clearTimeoutFn: clock.clearTimeoutFn,
     page,
     state,
-    onExtraLanded: (ev) => announcer.announce(ev),
+    revealSequencer: sequencer,
     deps: makeBaseDeps({
       async tryOn(_jpeg, outfit) {
         if (outfit.number === 2) {
-          // Simulates camera-off / no local studio path produced.
           return { url: 'https://media.local/studio-2.jpg', path: '', ms: 20, id: 'st-2' };
         }
         return {
@@ -747,20 +798,26 @@ test('failed extra part produces no page action, no state entry, and no speech; 
   await tools.pick_outfit.execute({ outfit: 2 }, fakeToolOpts('p2'));
   assert.equal(extrasCalls, 0);
 
-  // Pick Look 1 and reveal studio first.
+  // Pick Look 1 and reveal studio first while extras are still rendering.
   await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
   assert.equal(extrasCalls, 1);
-  await tools.show_on_me.execute({ outfit: 1 }, fakeToolOpts('s1'));
+  const showRes = await tools.show_on_me.execute({ outfit: 1 }, fakeToolOpts('s1'));
+  assert.match(showRes, /do not ask for sizes yet/i);
   calls.length = 0;
 
-  // Both parts fail.
+  // Alice finishes studio line, then both parts fail -> zero extra page actions, sizes prompt fires once!
+  sequencer.onAgentStateChanged('speaking');
+  await clock.advance(1_500);
+  sequencer.onAgentStateChanged('listening');
+
   capturedOnRender!({ kind: 'scene', ok: false, ms: 9_000 });
   capturedOnRender!({ kind: 'video', ok: true, url: '/local/bad/path.mp4', ms: 15_000 });
   await flushMicrotasks();
 
   assert.equal(calls.length, 0, 'failed part must produce no page action');
-  assert.equal(replies.length, 0, 'failed part must produce no speech');
   assert.equal(state.get().tryOnExtras[1], undefined, 'failed part must not be stored in state');
+  assert.equal(replies.length, 1, 'sizes prompt fires once after both extras fail');
+  assert.match(replies[0]!.instructions, /top and shoe sizes/i);
   assert.deepEqual(
     logs.filter((l) => l.ev === 'tryon_extra').map((l) => l.data),
     [
@@ -770,11 +827,22 @@ test('failed extra part produces no page action, no state entry, and no speech; 
   );
 });
 
-test('aborting session signal disposes pending scene/video reveal timers cleanly', async () => {
+test('aborting session signal cancels active sequencer and clears timers cleanly', async () => {
   const clock = createFakeClock();
   const { page, calls } = createFakePage();
   const state = createCallStateStore({ roomName: 'r-abort', log: () => {} });
   const abort = new AbortController();
+
+  const sequencer = createRevealSequencer({
+    room: 'r-abort',
+    sendReveal: (payload) => page.send('reveal', payload),
+    generateReply: () => {},
+    initialAgentState: 'listening',
+    log: () => {},
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+  });
 
   let capturedOnRender: TryOnExtrasOptions['onRender'];
   const tools = createAgentTools({
@@ -786,6 +854,7 @@ test('aborting session signal disposes pending scene/video reveal timers cleanly
     page,
     state,
     signal: abort.signal,
+    revealSequencer: sequencer,
     deps: makeBaseDeps({
       async tryOnExtras(_studio, _outfit, opts) {
         capturedOnRender = opts.onRender;
@@ -798,41 +867,40 @@ test('aborting session signal disposes pending scene/video reveal timers cleanly
   await tools.build_outfits.execute({ occasion: 'rooftop', budget_usd: 300 }, fakeToolOpts('b1'));
   await flushMicrotasks();
   await tools.pick_outfit.execute({ outfit: 1 }, fakeToolOpts('p1'));
-  // Let the 1-piece highlight walk finish so only the extra reveal timer remains after show_on_me.
-  await clock.advance(3_000);
+  await clock.advance(6_000);
 
-  capturedOnRender!({
-    kind: 'scene',
-    ok: true,
-    url: 'https://media.local/scene-1.jpg',
-    ms: 10_000,
-  });
+  capturedOnRender!({ kind: 'scene', ok: true, url: 'https://media.local/scene-1.jpg', ms: 10_000 });
   await flushMicrotasks();
 
   await tools.show_on_me.execute({ outfit: 1 }, fakeToolOpts('s1'));
   calls.length = 0;
 
+  assert.equal(sequencer.isActive, true);
   assert.equal(clock.activeTimers(), 1, 'scene reveal timer must be armed');
   abort.abort();
-  assert.equal(clock.activeTimers(), 0, 'abort must clear all pending extra reveal timers');
+  assert.equal(sequencer.isActive, false);
+  assert.equal(clock.activeTimers(), 0, 'abort must clear all pending sequencer timers');
 
   await clock.advance(30_000);
   assert.equal(calls.length, 0);
 });
 
-test('shortenSettingPhrase and buildExtraAnnounceInstruction format concise setting without questions', () => {
+test('shortenSettingPhrase, buildSceneRevealInstruction, and buildVideoRevealInstruction format concisely without questions', () => {
   assert.equal(shortenSettingPhrase('a candlelit Italian trattoria in SoHo'), 'candlelit Italian trattoria');
+  assert.equal(shortenSettingPhrase('a beach wedding in Capri'), 'beach wedding in Capri');
   assert.equal(shortenSettingPhrase('rooftop bar at sunset'), 'rooftop bar at sunset');
   assert.equal(shortenSettingPhrase(''), '');
 
-  const sceneInstr = buildExtraAnnounceInstruction('scene', 'a candlelit Italian trattoria in SoHo');
+  const sceneInstr = buildSceneRevealInstruction('a beach wedding in Capri');
   assert.match(sceneInstr, /on-location shot/i);
-  assert.match(sceneInstr, /candlelit Italian trattoria/);
+  assert.match(sceneInstr, /beach wedding in Capri/);
+  assert.match(sceneInstr, /do not invent/i);
   assert.match(sceneInstr, /do not ask a question/i);
   assert.equal(sceneInstr.includes('?'), false);
 
-  const videoInstr = buildExtraAnnounceInstruction('video', 'rooftop bar at sunset');
+  const videoInstr = buildVideoRevealInstruction('a beach wedding in Capri');
   assert.match(videoInstr, /short video/i);
-  assert.match(videoInstr, /rooftop bar at sunset/);
+  assert.match(videoInstr, /in motion/i);
+  assert.match(videoInstr, /do not ask a question/i);
   assert.equal(videoInstr.includes('?'), false);
 });

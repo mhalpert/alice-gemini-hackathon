@@ -31,7 +31,11 @@ import {
   createBitPicker,
   formatWorkingNoteWithBit,
 } from './bits.ts';
-import type { TryOnExtraKind } from './extras.ts';
+import type {
+  ExtraAssetStatus,
+  RevealSequencer,
+  TryOnExtraKind,
+} from './extras.ts';
 import { loadConfig } from './config.ts';
 import { DEFAULT_FILLER_INITIAL_DELAY_MS } from './filler.ts';
 import {
@@ -69,8 +73,6 @@ export const MAX_BUDGET_USD = 10_000;
 export const DEFAULT_TRYON_WAIT_MS = 45_000;
 export const DEFAULT_HIGHLIGHT_WALK_MS = 2_200;
 export const DEFAULT_WEATHER_TIMEOUT_MS = 2_500;
-export const DEFAULT_SCENE_REVEAL_DELAY_MS = 6_000;
-export const DEFAULT_VIDEO_REVEAL_DELAY_MS = 8_000;
 
 export const SLOW_TOOL_NOTES: Readonly<Record<string, string>> = {
   build_outfits: 'Pulling three killer outfits together now.',
@@ -268,19 +270,17 @@ export interface ToolRuntimeOptions {
   walkIntervalMs?: number;
   weatherTimeoutMs?: number;
   workingNoteDelayMs?: number;
-  sceneRevealDelayMs?: number;
-  videoRevealDelayMs?: number;
   purchaseEnabled?: boolean;
   purchaseMaxUsd?: number;
   orderController?: OrderController;
   bitPicker?: BitPicker;
+  revealSequencer?: RevealSequencer;
   sendWorkingNote?: (params: WorkingNoteParams) => boolean | void;
   onToolStart?: (params: { name: string; callId: string }) => void;
   onToolEnd?: (params: { name: string; callId: string }) => void;
   onSlowToolStart?: (params: { name: string; callId: string; baseNote: string }) => void;
   onSlowToolEnd?: (params: { name: string; callId: string }) => void;
   onToolResult?: (params: { name: string; callId: string; text: string }) => void;
-  onExtraLanded?: (params: { outfit: number; kind: TryOnExtraKind; setting: string }) => void;
   getShopperTurns?: () => readonly string[];
   getSnapshot?: () => CameraSnapshot | null;
   page?: PageSender;
@@ -686,9 +686,80 @@ function deriveFallbackSetting(occasion: string, where?: string): string {
   const occ = occasion.trim();
   const loc = where?.trim() ?? '';
   if (loc && occ && !occ.toLowerCase().includes(loc.toLowerCase())) {
-    return `${loc} ${occ}`;
+    return `${occ} in ${loc}`;
   }
   return occ || loc;
+}
+
+const HERO_DETAIL_SIGNAL_RE =
+  /%|\b(?:silk|wool|merino|cashmere|linen|cotton|leather|suede|satin|velvet|denim|tweed|crepe|chiffon|knit|ribbed|poplin|twill|jersey|chambray|nylon|viscose|modal|tencel|lyocell|spandex|elastane|polyester|faux|patent|mesh|lace|sequin|pleat(?:ed)?|tailored|drape|bias|cropped|oversized|relaxed|slim|structured|double-breasted|lapel|collar|cuff|hem|heel|sole|footbed|strap|buckle|zip|button|pocket|lined|embroid\w*|braided|woven|quilted|stitch\w*|full-grain|stretch|breathable|lightweight|heavyweight|high-rise|wide-leg|tapered|midi|maxi|mini|wrap|v-neck|crewneck|mock-neck|cupsole|lug|loafer|oxford|chelsea|stiletto)\b/i;
+
+const HERO_BOILERPLATE_RE =
+  /^(?:model\s+is\b|imported\b|machine\s+wash\b|dry\s+clean\b|hand\s+wash\b|style\s*(?:#|no\.?)?\b|sku\b|free\s+shipping\b|item\s*#)/i;
+
+/**
+ * Picks one or two hero pieces to spotlight for a picked outfit:
+ * 1) the layer or dress if present, else the top (fallback: first piece);
+ * 2) the shoes if present among remaining pieces, else the most expensive remaining piece.
+ */
+export function selectHeroPieces(pieces: readonly Piece[]): Piece[] {
+  if (!Array.isArray(pieces) || pieces.length === 0) return [];
+
+  const first =
+    pieces.find((p) => normalizeSlotKey(p.slot) === 'layer') ??
+    pieces.find((p) => normalizeSlotKey(p.slot) === 'dress') ??
+    pieces.find((p) => normalizeSlotKey(p.slot) === 'top') ??
+    pieces[0]!;
+
+  const remaining = pieces.filter((p) => p !== first);
+  if (remaining.length === 0) return [first];
+
+  const shoes = remaining.find((p) => normalizeSlotKey(p.slot) === 'shoes');
+  if (shoes) return [first, shoes];
+
+  let priciest = remaining[0]!;
+  let bestPrice = Number.isFinite(priciest.item.price) ? priciest.item.price : -Infinity;
+  for (let i = 1; i < remaining.length; i++) {
+    const candidate = remaining[i]!;
+    const price = Number.isFinite(candidate.item.price) ? candidate.item.price : -Infinity;
+    if (price > bestPrice) {
+      bestPrice = price;
+      priciest = candidate;
+    }
+  }
+  return [first, priciest];
+}
+
+/**
+ * Extracts one concrete styling fact (fabric, cut, or construction detail) strictly
+ * from the item's store description; falls back to the piece's stylist note (`why`)
+ * when no description exists. Never invents materials.
+ */
+export function extractHeroFact(piece: Piece): string {
+  const desc =
+    typeof piece.item.description === 'string'
+      ? piece.item.description.replace(/\s+/g, ' ').trim()
+      : '';
+
+  if (desc.length > 0) {
+    const clauses = desc
+      .split(/(?:\.\s+|;\s+|\|\s+|\s+[•·]\s+|\n+)/)
+      .map((c) => c.trim().replace(/[.!?]+$/, '').trim())
+      .filter((c) => c.length >= 6);
+
+    const nonBoilerplate = clauses.filter((c) => !HERO_BOILERPLATE_RE.test(c));
+    const pool = nonBoilerplate.length > 0 ? nonBoilerplate : clauses;
+    const preferred = pool.find((c) => HERO_DETAIL_SIGNAL_RE.test(c)) ?? pool[0] ?? desc;
+    const trimmed = preferred.replace(/[.!?]+$/, '').trim();
+    return trimmed.length > 140 ? `${trimmed.slice(0, 137).trimEnd()}...` : trimmed;
+  }
+
+  const why = typeof piece.why === 'string' ? piece.why.replace(/\s+/g, ' ').trim() : '';
+  if (why.length > 0) {
+    return why.replace(/[.!?]+$/, '').trim();
+  }
+
+  return `${formatPrice(piece.item.price)} at ${piece.item.store}`;
 }
 
 const NOOP_PAGE_SENDER: PageSender = {
@@ -721,7 +792,10 @@ function formatMissingSizesPhrase(slots: string[]): string {
   return `${labels.slice(0, -1).join(', ')}, and ${labels[labels.length - 1]} sizes`;
 }
 
-function buildShowOnMeSizeNextStep(outfit: Outfit, rememberedSizes: Record<string, string>): string {
+function resolveShowOnMeSizeState(
+  outfit: Outfit,
+  rememberedSizes: Record<string, string>,
+): { missing: CoreSizeSlot[]; knownSummary: string } {
   const knownByKey = new Map<string, string>();
   const missingSet = new Set<CoreSizeSlot>();
   const hasBottomPiece = outfit.pieces.some((p) => normalizeSlotKey(p.slot) === 'bottom');
@@ -778,18 +852,48 @@ function buildShowOnMeSizeNextStep(outfit: Outfit, rememberedSizes: Record<strin
     .map(([slot, size]) => `${slot} ${size}`)
     .join(', ');
 
+  return { missing, knownSummary };
+}
+
+function buildShowOnMeSizeNextStep(outfit: Outfit, rememberedSizes: Record<string, string>): string {
+  const { missing, knownSummary } = resolveShowOnMeSizeState(outfit, rememberedSizes);
+
   if (missing.length === 0) {
     if (knownSummary) {
-      return `React with loud, hype New York friend energy in a punchy line or two. You already have all sizes needed for this look (${knownSummary}); do not ask for sizes again—offer to add it to their bag in those sizes.`;
+      return `React to the studio shot in ONE short line with loud, hype New York friend energy. You already have all sizes needed for this look (${knownSummary}); do not ask for sizes again—offer to add it to their bag in those sizes.`;
     }
-    return 'React with loud, hype New York friend energy in a punchy line or two, then offer to add this look to their bag.';
+    return 'React to the studio shot in ONE short line with loud, hype New York friend energy, then offer to add this look to their bag.';
   }
 
   const missingPhrase = formatMissingSizesPhrase(missing);
   if (knownSummary) {
-    return `React with loud, hype New York friend energy in a punchy line or two. You already have ${knownSummary}; ask only for their ${missingPhrase} in one question.`;
+    return `React to the studio shot in ONE short line with loud, hype New York friend energy. You already have ${knownSummary}; ask only for their ${missingPhrase} in one question.`;
   }
-  return `React with loud, hype New York friend energy in a punchy line or two, then ask for their ${missingPhrase} in one question.`;
+  return `React to the studio shot in ONE short line with loud, hype New York friend energy, then ask for their ${missingPhrase} in one question.`;
+}
+
+/**
+ * Builds the end-of-reveal-sequence sizes/bag prompt instruction delivered once
+ * after the last reveal beat finishes (or when extras fail/time out).
+ */
+export function buildShowOnMeSizesOnlyInstruction(
+  outfit: Outfit,
+  rememberedSizes: Record<string, string>,
+): string {
+  const { missing, knownSummary } = resolveShowOnMeSizeState(outfit, rememberedSizes);
+
+  if (missing.length === 0) {
+    if (knownSummary) {
+      return `You already have all sizes needed for this look (${knownSummary}); do not ask for sizes again—in one short line as Alice, offer to add it to their bag in those sizes.`;
+    }
+    return 'In one short line as Alice, offer to add this look to their bag.';
+  }
+
+  const missingPhrase = formatMissingSizesPhrase(missing);
+  if (knownSummary) {
+    return `You already have ${knownSummary}; in one short line as Alice, ask only for their ${missingPhrase} in one question so you can add this look to their bag.`;
+  }
+  return `In one short line as Alice, ask for their ${missingPhrase} in one question so you can add this look to their bag.`;
 }
 
 function findPieceInOutfit(outfit: Outfit, rawSlot: string): Piece | undefined {
@@ -939,14 +1043,6 @@ export function createAgentTools(options: ToolRuntimeOptions) {
   const tryOnTimeoutMs = options.tryOnTimeoutMs ?? DEFAULT_TRYON_WAIT_MS;
   const walkIntervalMs = options.walkIntervalMs ?? DEFAULT_HIGHLIGHT_WALK_MS;
   const weatherTimeoutMs = options.weatherTimeoutMs ?? DEFAULT_WEATHER_TIMEOUT_MS;
-  const sceneRevealDelayMs = Math.max(
-    0,
-    options.sceneRevealDelayMs ?? DEFAULT_SCENE_REVEAL_DELAY_MS,
-  );
-  const videoRevealDelayMs = Math.max(
-    0,
-    options.videoRevealDelayMs ?? DEFAULT_VIDEO_REVEAL_DELAY_MS,
-  );
   const workingNoteDelayMs = Math.max(
     0,
     options.workingNoteDelayMs ?? DEFAULT_FILLER_INITIAL_DELAY_MS,
@@ -1014,9 +1110,11 @@ export function createAgentTools(options: ToolRuntimeOptions) {
   const pickedLookVersions = new Set<string>();
   const extrasStartedVersions = new Set<string>();
   const extrasHandledKinds = new Map<string, Set<TryOnExtraKind>>();
-  const extrasRevealedKinds = new Map<string, Set<TryOnExtraKind>>();
+  const extrasStatusByVersion = new Map<
+    string,
+    { scene: ExtraAssetStatus; video: ExtraAssetStatus }
+  >();
   const extrasSettingByVersion = new Map<string, string>();
-  const extraRevealTimers = new Set<TimerLike>();
   const baggedResults = new Map<string, string>();
   const baggedLookTotals = new Map<string, number>();
   const pendingBagReservations = new Map<symbol, { key: string; amount: number }>();
@@ -1107,30 +1205,12 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     };
   }
 
-  function cancelExtraRevealTimers(): void {
-    for (const handle of extraRevealTimers) {
-      clearTimeoutFn(handle);
-      activeTimers.delete(handle);
-    }
-    extraRevealTimers.clear();
-  }
-
-  function scheduleExtraRevealTimer(fn: () => void, ms: number): TimerLike {
-    let handle!: TimerLike;
-    handle = scheduleTimer(() => {
-      extraRevealTimers.delete(handle);
-      fn();
-    }, ms);
-    extraRevealTimers.add(handle);
-    return handle;
-  }
-
   if (options.signal) {
     options.signal.addEventListener(
       'abort',
       () => {
         cancelWalk();
-        cancelExtraRevealTimers();
+        options.revealSequencer?.cancel();
         for (const handle of activeTimers) {
           clearTimeoutFn(handle);
         }
@@ -1179,6 +1259,12 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     if (extrasStartedVersions.has(key)) return;
     extrasStartedVersions.add(key);
 
+    const statusEntry: { scene: ExtraAssetStatus; video: ExtraAssetStatus } = {
+      scene: 'pending',
+      video: 'pending',
+    };
+    extrasStatusByVersion.set(key, statusEntry);
+
     const st = stateStore.get();
     const occasion = st.occasion ?? '';
     const where = st.where ?? undefined;
@@ -1187,6 +1273,12 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     const fallbackSetting = deriveFallbackSetting(occasion, where);
 
     logFn(options.room, 'tryon_extras_start', { outfit: lookNumber });
+
+    const markKindFailed = (kind: TryOnExtraKind): void => {
+      if (statusEntry[kind] === 'ready' || statusEntry[kind] === 'failed') return;
+      statusEntry[kind] = 'failed';
+      options.revealSequencer?.onExtraFailed(lookNumber, kind, { version: job.version });
+    };
 
     const handleRender = async (
       r: TryOnExtraRenderEvent,
@@ -1210,7 +1302,12 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         ms,
       });
 
-      if (!ok || !cleanUrl) return;
+      if (!ok || !cleanUrl) {
+        markKindFailed(r.kind);
+        return;
+      }
+
+      statusEntry[r.kind] = 'ready';
 
       stateStore.dispatch({
         type: 'set_tryon_extra',
@@ -1221,16 +1318,6 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       await page.send('tryOnReady', { outfit: lookNumber, url: cleanUrl, kind: r.kind });
       if (!isCurrentMediaVersion(lookNumber, job.version)) return;
 
-      // Before the studio reveal has happened: only send tryOnReady and stay silent.
-      if (!stateStore.get().revealsDone.includes(lookNumber)) return;
-
-      const revealed = getOrCreateKindSet(extrasRevealedKinds, key);
-      if (revealed.has(r.kind)) return;
-      revealed.add(r.kind);
-
-      await page.send('reveal', { outfit: lookNumber, kind: r.kind });
-      if (!isCurrentMediaVersion(lookNumber, job.version)) return;
-
       const extraSetting =
         explicitSetting?.trim() ||
         (typeof (r as { setting?: unknown }).setting === 'string'
@@ -1239,9 +1326,12 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         extrasSettingByVersion.get(key) ||
         fallbackSetting;
 
-      options.onExtraLanded?.({
-        outfit: lookNumber,
-        kind: r.kind,
+      if (extraSetting) {
+        extrasSettingByVersion.set(key, extraSetting);
+      }
+
+      options.revealSequencer?.onExtraReady(lookNumber, r.kind, {
+        version: job.version,
         setting: extraSetting,
       });
     };
@@ -1270,17 +1360,27 @@ export function createAgentTools(options: ToolRuntimeOptions) {
               { kind: 'scene', ok: true, url: res.scene.url, ms: res.scene.ms },
               setting,
             );
+          } else if (!handled?.has('scene')) {
+            markKindFailed('scene');
           }
           if (res?.video?.url && !handled?.has('video')) {
             void handleRender(
               { kind: 'video', ok: true, url: res.video.url, ms: res.video.ms },
               setting,
             );
+          } else if (!handled?.has('video')) {
+            markKindFailed('video');
           }
         })
-        .catch(() => {});
+        .catch(() => {
+          if (!isCurrentMediaVersion(lookNumber, job.version)) return;
+          const handled = extrasHandledKinds.get(key);
+          if (!handled?.has('scene')) markKindFailed('scene');
+          if (!handled?.has('video')) markKindFailed('video');
+        });
     } catch {
-      // tryOnExtras is guaranteed never to throw, but guard defensively.
+      markKindFailed('scene');
+      markKindFailed('video');
     }
   }
 
@@ -1591,7 +1691,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       execute: wrapper.wrap('set_department', async ({ department }) => {
         stateStore.dispatch({ type: 'set_department', department });
         wrapper.invalidate('set_department');
-        return `Department set to ${department}. Drop it casually with a quick New York aside so they can correct you, then keep moving without repeating a question you just asked.`;
+        return `Department set to ${department}.`;
       }),
     }),
 
@@ -1725,13 +1825,13 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             const numbered: Outfit = { ...rawOutfit, number: lookNumber };
             const replace = shownOutfits.length === 0;
             if (replace) {
-              cancelExtraRevealTimers();
+              options.revealSequencer?.cancel();
               outfitsByNumber.clear();
               tryOnJobs.clear();
               pickedLookVersions.clear();
               extrasStartedVersions.clear();
               extrasHandledKinds.clear();
-              extrasRevealedKinds.clear();
+              extrasStatusByVersion.clear();
               extrasSettingByVersion.clear();
               orderController.invalidateReview();
             }
@@ -1898,22 +1998,32 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           tryOnText = 'Try-on failed for this look.';
         }
 
-        const pieceLines = outfit.pieces.map(
+        const heroes = selectHeroPieces(outfit.pieces);
+        const heroSet = new Set(heroes);
+        const heroLines = heroes.map(
           (p) =>
-            `- ${p.slot}: ${p.item.title} (${formatPrice(p.item.price)}, ${p.item.store}) — ${p.why}`,
+            `- HERO (${p.slot}): ${p.item.title} (${formatPrice(p.item.price)}, ${p.item.store}) — Detail: ${extractHeroFact(p)}`,
         );
+        const otherPieces = outfit.pieces.filter((p) => !heroSet.has(p));
+        const otherLine =
+          otherPieces.length > 0
+            ? `Other pieces already on screen (do not list them): ${otherPieces.map((p) => `${p.slot}: ${p.item.title}`).join('; ')}.`
+            : null;
 
         const statusLine = reply.ok
           ? `Look ${lookNumber} — ${outfit.name} (${formatPrice(outfit.total)}) is highlighted on screen.`
           : `Look ${lookNumber} — ${outfit.name} (${formatPrice(outfit.total)}) was selected, though the page did not confirm highlighting it.`;
 
+        const lookIdea = outfit.story?.trim() || outfit.difference?.trim() || outfit.name;
         const swapNote = formatCritiqueSwapNote(st.critiques[lookNumber]);
 
         return [
           `${statusLine} ${tryOnText}`,
-          ...pieceLines,
+          `Look idea: ${lookIdea}`,
+          ...heroLines,
+          ...(otherLine ? [otherLine] : []),
           ...(swapNote ? [swapNote] : []),
-          'Walk order is listed above; keep it to two or three short sentences (about 12 seconds) using words from the piece titles—if it is the weaker look, push back once before hyping it up.',
+          "Give one line naming the look's idea, then make the one or two hero pieces sound special with that real detail in a sentence each—do not list the other pieces (they are on screen)—then ask about seeing it on them. Total about ten seconds. Never invent materials. If it is the weaker look, push back once before backing their choice.",
         ].join('\n');
       }),
     }),
@@ -1961,67 +2071,55 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         if (tryOnInfo?.status === 'ready' && tryOnInfo.url) {
           const reply = await page.send('reveal', { outfit: lookNum, url: tryOnInfo.url });
           if (reply.ok) {
-            cancelExtraRevealTimers();
             stateStore.dispatch({ type: 'mark_revealed', look: lookNum });
 
             const currentVer = mediaVersionByLook.get(lookNum);
             const verKey = currentVer !== undefined ? lookVersionKey(lookNum, currentVer) : null;
-            const alreadyRevealed = verKey ? extrasRevealedKinds.get(verKey) : undefined;
-            const extrasNow = stateStore.get().tryOnExtras[lookNum];
-            const sceneReady = Boolean(extrasNow?.scene && !alreadyRevealed?.has('scene'));
-            const videoReady = Boolean(extrasNow?.video && !alreadyRevealed?.has('video'));
+            const stNow = stateStore.get();
+            const tracked = verKey ? extrasStatusByVersion.get(verKey) : undefined;
+            const extrasNow = stNow.tryOnExtras[lookNum];
 
-            let extrasNote = '';
-            if (sceneReady && videoReady) {
-              extrasNote =
-                ' Also ready: an on-location still and a short video of them in this look; after reacting to the studio shot, tell them you are bringing up the on-location shot.';
-            } else if (sceneReady) {
-              extrasNote =
-                ' Also ready: an on-location still of them in this look; after reacting to the studio shot, tell them you are bringing up the on-location shot.';
-            } else if (videoReady) {
-              extrasNote =
-                ' Also ready: a short video of them in this look; after reacting to the studio shot, tell them you are bringing up the video.';
-            }
+            const sceneStatus: ExtraAssetStatus =
+              tracked?.scene ?? (extrasNow?.scene ? 'ready' : 'absent');
+            const videoStatus: ExtraAssetStatus =
+              tracked?.video ?? (extrasNow?.video ? 'ready' : 'absent');
 
-            if (currentVer !== undefined && verKey && (sceneReady || videoReady)) {
-              if (sceneReady) {
-                scheduleExtraRevealTimer(() => {
-                  if (!isCurrentMediaVersion(lookNum, currentVer)) return;
-                  const revealed = getOrCreateKindSet(extrasRevealedKinds, verKey);
-                  if (!revealed.has('scene')) {
-                    revealed.add('scene');
-                    void page.send('reveal', { outfit: lookNum, kind: 'scene' });
-                  }
-                  if (
-                    stateStore.get().tryOnExtras[lookNum]?.video &&
-                    !revealed.has('video')
-                  ) {
-                    scheduleExtraRevealTimer(() => {
-                      if (!isCurrentMediaVersion(lookNum, currentVer)) return;
-                      if (!revealed.has('video')) {
-                        revealed.add('video');
-                        void page.send('reveal', { outfit: lookNum, kind: 'video' });
-                      }
-                    }, videoRevealDelayMs);
-                  }
-                }, sceneRevealDelayMs);
-              } else if (videoReady) {
-                scheduleExtraRevealTimer(() => {
-                  if (!isCurrentMediaVersion(lookNum, currentVer)) return;
-                  const revealed = getOrCreateKindSet(extrasRevealedKinds, verKey);
-                  if (!revealed.has('video')) {
-                    revealed.add('video');
-                    void page.send('reveal', { outfit: lookNum, kind: 'video' });
-                  }
-                }, sceneRevealDelayMs);
+            const moreBeatsComing =
+              sceneStatus === 'ready' ||
+              sceneStatus === 'pending' ||
+              videoStatus === 'ready' ||
+              videoStatus === 'pending';
+
+            const setting =
+              (verKey ? extrasSettingByVersion.get(verKey) : '') ||
+              deriveFallbackSetting(stNow.occasion ?? '', stNow.where ?? undefined);
+
+            options.revealSequencer?.startStudio({
+              outfit: lookNum,
+              version: currentVer,
+              setting,
+              scene: sceneStatus,
+              video: videoStatus,
+              sizesAlreadyPrompted: !moreBeatsComing,
+              getSizesInstruction: () =>
+                buildShowOnMeSizesOnlyInstruction(
+                  outfitsByNumber.get(lookNum) ?? outfit,
+                  stateStore.get().sizes,
+                ),
+            });
+
+            if (moreBeatsComing) {
+              if (renderedOnModel) {
+                return `Look ${lookNum} (${outfit.name}) is now revealed on screen on a model because the camera is off. Say the look is on screen on a model and that turning the camera on lets you show it on them; never say you cannot overlay it. React to the studio shot in ONE short line with loud New York friend energy, and do not ask for sizes yet—more views of this look are coming right up.`;
               }
+              return `Try-on for Look ${lookNum} (${outfit.name}) is now revealed on screen. React to the studio shot in ONE short line with loud New York friend energy, and do not ask for sizes yet—more views of this look are coming right up.`;
             }
 
-            const sizeNextStep = buildShowOnMeSizeNextStep(outfit, stateStore.get().sizes);
+            const sizeNextStep = buildShowOnMeSizeNextStep(outfit, stNow.sizes);
             if (renderedOnModel) {
-              return `Look ${lookNum} (${outfit.name}) is now revealed on screen on a model because the camera is off. Say the look is on screen on a model and that turning the camera on lets you show it on them; never say you cannot overlay it. ${sizeNextStep}${extrasNote}`;
+              return `Look ${lookNum} (${outfit.name}) is now revealed on screen on a model because the camera is off. Say the look is on screen on a model and that turning the camera on lets you show it on them; never say you cannot overlay it. ${sizeNextStep}`;
             }
-            return `Try-on for Look ${lookNum} (${outfit.name}) is now revealed on screen. ${sizeNextStep}${extrasNote}`;
+            return `Try-on for Look ${lookNum} (${outfit.name}) is now revealed on screen. ${sizeNextStep}`;
           }
           return renderedOnModel
             ? `Try-on for Look ${lookNum} (on a model because the camera is off) is ready, but the page did not confirm revealing it.`
@@ -2072,7 +2170,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             slot: targetSlot,
           });
 
-          cancelExtraRevealTimers();
+          options.revealSequencer?.cancel(lookNum);
           startBackgroundMediaForLook(updatedOutfit);
           const swappedVer = mediaVersionByLook.get(lookNum);
           if (swappedVer !== undefined && stateStore.get().pickedLook === lookNum) {
@@ -2207,6 +2305,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       description: 'Return the screen to showing all three looks side by side.',
       execute: wrapper.wrap('show_all_looks', async () => {
         cancelWalk();
+        options.revealSequencer?.cancel();
         stateStore.dispatch({ type: 'pick_look', look: null });
         const reply = await page.send('showAll', {});
         return reply.ok

@@ -34,9 +34,13 @@ import {
   sendRealtimeContext,
 } from './context.ts';
 import { createBitPicker } from './bits.ts';
-import { createExtraAnnouncer } from './extras.ts';
+import { createRevealSequencer } from './extras.ts';
 import { createToolFiller } from './filler.ts';
-import { applyRealtimeSessionPatches, sendInterimToolNote } from './patches.ts';
+import {
+  applyRealtimeSessionPatches,
+  createRepeatDetector,
+  sendInterimToolNote,
+} from './patches.ts';
 import { createToolResultNudger } from './nudge.ts';
 import { createOrderController } from './order.ts';
 import { createPageSender } from './page.ts';
@@ -587,12 +591,18 @@ export default defineAgent({
       log: calllog,
     });
 
-    const extraAnnouncer = createExtraAnnouncer({
+    const revealSequencer = createRevealSequencer({
       room: roomName,
+      sendReveal: (payload) => page.send('reveal', payload),
       generateReply: (opts) => {
         silenceCheckInRef?.onExternalReply();
         return sessionRef?.generateReply(opts);
       },
+      log: calllog,
+    });
+
+    const repeatDetector = createRepeatDetector({
+      room: roomName,
       log: calllog,
     });
 
@@ -611,7 +621,7 @@ export default defineAgent({
       room: roomName,
       generateReply: (opts) => sessionRef?.generateReply(opts),
       isSuppressed: () =>
-        resultNudger.hasPending || toolFiller.isRunning || extraAnnouncer.hasPending,
+        resultNudger.hasPending || toolFiller.isRunning || revealSequencer.isActive,
       log: calllog,
     });
     silenceCheckInRef = silenceCheckIn;
@@ -639,19 +649,19 @@ export default defineAgent({
       purchaseEnabled: config.purchase,
       purchaseMaxUsd: config.purchaseMaxUsd,
       orderController,
+      revealSequencer,
       sendWorkingNote: (params) => sendInterimToolNote(activeRealtimeSession, params),
       onToolStart: (ev) => {
         silenceCheckIn.onToolStart(ev.callId);
-        extraAnnouncer.onToolStart(ev.callId);
+        revealSequencer.onToolStart(ev.callId, ev.name);
       },
       onToolEnd: (ev) => {
         silenceCheckIn.onToolEnd(ev.callId);
-        extraAnnouncer.onToolEnd(ev.callId);
+        revealSequencer.onToolEnd(ev.callId);
       },
       onSlowToolStart: (ev) => toolFiller.onToolStart(ev),
       onSlowToolEnd: (ev) => toolFiller.onToolEnd(ev.callId),
       onToolResult: (ev) => resultNudger.onToolResult(ev),
-      onExtraLanded: (ev) => extraAnnouncer.announce(ev),
       getSnapshot: () => vision?.latest() ?? null,
     });
 
@@ -674,7 +684,7 @@ export default defineAgent({
     session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev) => {
       appContext.setAgentState(ev.newState);
       resultNudger.onAgentStateChanged(ev.newState);
-      extraAnnouncer.onAgentStateChanged(ev.newState);
+      revealSequencer.onAgentStateChanged(ev.newState);
       toolFiller.onAgentStateChanged(ev.newState);
       silenceCheckIn.onAgentStateChanged(ev.newState);
       calllog(roomName, 'agent_state', { old: ev.oldState, state: ev.newState });
@@ -682,7 +692,7 @@ export default defineAgent({
 
     session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => {
       resultNudger.onUserStateChanged(ev.newState);
-      extraAnnouncer.onUserStateChanged(ev.newState);
+      revealSequencer.onUserStateChanged(ev.newState);
       toolFiller.onUserStateChanged(ev.newState);
       silenceCheckIn.onUserStateChanged(ev.newState);
       calllog(roomName, 'user_state', { old: ev.oldState, state: ev.newState });
@@ -692,6 +702,7 @@ export default defineAgent({
       if (ev.isFinal && ev.transcript) {
         callState.recordShopperTurn(ev.transcript, ev.itemId);
         silenceCheckIn.onShopperActivity();
+        revealSequencer.onShopperSpoke();
         if (ev.itemId) {
           loggedUserItemIds.add(ev.itemId);
         }
@@ -703,13 +714,16 @@ export default defineAgent({
       if (ev.item.type === 'message' && ev.item.role === 'assistant') {
         const text = ev.item.textContent ?? '';
         resultNudger.onAssistantMessage(text);
+        revealSequencer.onAssistantMessage();
         silenceCheckIn.onAssistantMessage(text, { interrupted: ev.item.interrupted });
+        repeatDetector.onAssistantMessage(text);
         calllog(roomName, 'alice_said', { text, interrupted: ev.item.interrupted });
       } else if (ev.item.type === 'message' && ev.item.role === 'user') {
         const text = ev.item.textContent ?? '';
         if (text.trim().length > 0) {
           callState.recordShopperTurn(text, ev.item.id);
           silenceCheckIn.onShopperActivity();
+          revealSequencer.onShopperSpoke();
           if (!ev.item.id || !loggedUserItemIds.has(ev.item.id)) {
             if (ev.item.id) {
               loggedUserItemIds.add(ev.item.id);
@@ -770,7 +784,7 @@ export default defineAgent({
       });
       toolAbort.abort();
       resultNudger.dispose();
-      extraAnnouncer.dispose();
+      revealSequencer.dispose();
       toolFiller.dispose();
       silenceCheckIn.dispose();
       cleanupTavusWatcher?.();
@@ -784,7 +798,7 @@ export default defineAgent({
       endCallCleanup.cleanup();
       toolAbort.abort();
       resultNudger.dispose();
-      extraAnnouncer.dispose();
+      revealSequencer.dispose();
       toolFiller.dispose();
       silenceCheckIn.dispose();
       cleanupCameraWatcher?.();
