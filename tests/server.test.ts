@@ -1319,8 +1319,15 @@ describe('Storefront, product, search, and looks API', () => {
         assert.equal(longQ.status, 400);
         assert.deepEqual(await longQ.json(), { error: 'bad_query' });
 
-        // 4. GET only -> 405 on POST for all five browse routes
-        for (const p of ['/api/storefront', '/api/product', '/api/search', '/api/looks', '/api/occasions']) {
+        // 4. GET only -> 405 on POST for all six browse routes
+        for (const p of [
+          '/api/storefront',
+          '/api/product',
+          '/api/search',
+          '/api/looks',
+          '/api/occasions',
+          '/api/occasions/match',
+        ]) {
           const postRes = await fetch(`${url}${p}`, { method: 'POST' });
           assert.equal(postRes.status, 405, `expected 405 for POST ${p}`);
           assert.equal(postRes.headers.get('allow'), 'GET');
@@ -1555,12 +1562,17 @@ describe('Storefront, product, search, and looks API', () => {
                       label: 'Sunday brunch',
                     },
                   ],
+            occasionMenu: async (gender: Gender) =>
+              gender === 'men'
+                ? [{ key: 'rooftop-birthday', keyword: 'Birthday Party' }]
+                : [{ key: 'brunch', keyword: 'Brunch' }],
           }),
         },
         async (url) => {
           const menOcc = await fetch(`${url}/api/occasions?department=men`);
           assert.equal(menOcc.status, 200);
           assert.equal(menOcc.headers.get('cache-control'), 'no-store');
+          assert.equal(menOcc.headers.get('x-content-type-options'), 'nosniff');
           assert.deepEqual(await menOcc.json(), {
             department: 'men',
             occasions: [
@@ -1570,6 +1582,7 @@ describe('Storefront, product, search, and looks API', () => {
                 label: 'Rooftop birthday',
               },
             ],
+            menu: [{ key: 'rooftop-birthday', keyword: 'Birthday Party' }],
             source: 'library',
           });
 
@@ -1584,6 +1597,7 @@ describe('Storefront, product, search, and looks API', () => {
                 label: 'Sunday brunch',
               },
             ],
+            menu: [{ key: 'brunch', keyword: 'Brunch' }],
             source: 'library',
           });
         },
@@ -1608,6 +1622,7 @@ describe('Storefront, product, search, and looks API', () => {
           const body = (await res.json()) as {
             department: string;
             occasions: Array<{ key: string; occasion: string; label: string }>;
+            menu: Array<{ key: string; keyword: string }>;
             source: string;
           };
           assert.deepEqual(body, {
@@ -1619,6 +1634,7 @@ describe('Storefront, product, search, and looks API', () => {
                 label: "A friend's rooftop birthday party",
               },
             ],
+            menu: [],
             source: 'sets',
           });
 
@@ -1663,6 +1679,7 @@ describe('Storefront, product, search, and looks API', () => {
                 label: 'Sunday brunch with friends',
               },
             ],
+            menu: [],
             source: 'sets',
           });
         },
@@ -1680,6 +1697,7 @@ describe('Storefront, product, search, and looks API', () => {
           assert.deepEqual(await res.json(), {
             department: 'men',
             occasions: [],
+            menu: [],
             source: 'none',
           });
         },
@@ -1905,13 +1923,180 @@ describe('Storefront, product, search, and looks API', () => {
         assert.ok(lks.ms < 1550, `/api/looks exceeded budget: ${lks.ms}ms`);
 
         assert.equal(occ.status, 200);
-        assert.deepEqual(occ.body, { department: 'men', occasions: [], source: 'none' });
+        assert.deepEqual(occ.body, { department: 'men', occasions: [], menu: [], source: 'none' });
         assert.ok(occ.ms < 1550, `/api/occasions exceeded budget: ${occ.ms}ms`);
       },
     );
   });
 
-  it('enforces a shared 90 requests/minute rate limit across all four browse routes', async () => {
+  it('serves /api/occasions menu and /api/occasions/match with validation, truncation, error handling, and zero looks calls', async () => {
+    const matchCalls: Array<{ gender: Gender; text: string }> = [];
+    let looksCalls = 0;
+    let storeCalls = 0;
+
+    // 1. Menu for both departments + match route behavior (valid, empty, >120 chars cut, bad department, no looks/store calls)
+    await withServer(
+      {
+        store: {
+          storefront: async () => {
+            storeCalls += 1;
+            throw new Error('storefront must not be called');
+          },
+          search: async () => {
+            storeCalls += 1;
+            throw new Error('search must not be called');
+          },
+          searchMixed: async () => {
+            storeCalls += 1;
+            throw new Error('searchMixed must not be called');
+          },
+          getProduct: async () => {
+            storeCalls += 1;
+            throw new Error('getProduct must not be called');
+          },
+        },
+        loadLibrary: async () => ({
+          libraryLooks: async () => {
+            looksCalls += 1;
+            throw new Error('libraryLooks must not be called by /api/occasions/match');
+          },
+          libraryOccasions: async (gender: Gender) => [
+            {
+              key: gender === 'men' ? 'rooftop-birthday' : 'gala',
+              occasion: gender === 'men' ? 'rooftop birthday' : 'black tie gala',
+              label: gender === 'men' ? 'Rooftop birthday' : 'Black tie gala',
+            },
+          ],
+          occasionMenu: async (gender: Gender) =>
+            gender === 'men'
+              ? [
+                  { key: 'rooftop-birthday', keyword: 'Birthday Party' },
+                  { key: 'festival', keyword: 'Festival' },
+                ]
+              : [
+                  { key: 'gala', keyword: 'Gala' },
+                  { key: 'brunch', keyword: 'Brunch' },
+                ],
+          matchOccasionWords: async (gender: Gender, text: string) => {
+            matchCalls.push({ gender, text });
+            if (text === 'bday dinner') {
+              return { key: 'rooftop-birthday', label: 'Rooftop birthday', score: 0.92 };
+            }
+            if (text === 'zzzz') {
+              return null;
+            }
+            return { key: 'festival', label: 'Festival', score: 0.75 };
+          },
+        }),
+      },
+      async (url) => {
+        // Menu present for both departments
+        const menOcc = await fetch(`${url}/api/occasions?department=men`);
+        assert.equal(menOcc.status, 200);
+        const menBody = (await menOcc.json()) as {
+          department: string;
+          menu: Array<{ key: string; keyword: string }>;
+        };
+        assert.deepEqual(menBody.menu, [
+          { key: 'rooftop-birthday', keyword: 'Birthday Party' },
+          { key: 'festival', keyword: 'Festival' },
+        ]);
+
+        const womenOcc = await fetch(`${url}/api/occasions?department=women`);
+        assert.equal(womenOcc.status, 200);
+        const womenBody = (await womenOcc.json()) as {
+          department: string;
+          menu: Array<{ key: string; keyword: string }>;
+        };
+        assert.deepEqual(womenBody.menu, [
+          { key: 'gala', keyword: 'Gala' },
+          { key: 'brunch', keyword: 'Brunch' },
+        ]);
+
+        // Match returns function result with nosniff + no-store
+        const matchRes = await fetch(`${url}/api/occasions/match?department=men&q=bday+dinner`);
+        assert.equal(matchRes.status, 200);
+        assert.equal(matchRes.headers.get('cache-control'), 'no-store');
+        assert.equal(matchRes.headers.get('x-content-type-options'), 'nosniff');
+        assert.deepEqual(await matchRes.json(), {
+          match: { key: 'rooftop-birthday', label: 'Rooftop birthday', score: 0.92 },
+        });
+
+        // Unmatched query -> { match: null }
+        const missRes = await fetch(`${url}/api/occasions/match?department=women&q=zzzz`);
+        assert.equal(missRes.status, 200);
+        assert.deepEqual(await missRes.json(), { match: null });
+
+        // Empty / whitespace q -> { match: null } without invoking matchOccasionWords
+        const callsBeforeEmpty = matchCalls.length;
+        const emptyRes = await fetch(`${url}/api/occasions/match?department=men&q=%20%20%20`);
+        assert.equal(emptyRes.status, 200);
+        assert.deepEqual(await emptyRes.json(), { match: null });
+        assert.equal(matchCalls.length, callsBeforeEmpty);
+
+        // q longer than 120 chars is trimmed and cut to 120 before calling matchOccasionWords
+        const longQuery = `  ${'x'.repeat(145)}  `;
+        const longRes = await fetch(
+          `${url}/api/occasions/match?department=women&q=${encodeURIComponent(longQuery)}`,
+        );
+        assert.equal(longRes.status, 200);
+        assert.equal(matchCalls[matchCalls.length - 1].gender, 'women');
+        assert.equal(matchCalls[matchCalls.length - 1].text.length, 120);
+        assert.equal(matchCalls[matchCalls.length - 1].text, 'x'.repeat(120));
+
+        // Missing or bad department -> 400 { error: 'bad_department' }
+        for (const badPath of [
+          '/api/occasions/match?q=tux',
+          '/api/occasions/match?department=&q=tux',
+          '/api/occasions/match?department=kids&q=tux',
+        ]) {
+          const badRes = await fetch(`${url}${badPath}`);
+          assert.equal(badRes.status, 400, `expected 400 for ${badPath}`);
+          assert.equal(badRes.headers.get('cache-control'), 'no-store');
+          assert.equal(badRes.headers.get('x-content-type-options'), 'nosniff');
+          assert.deepEqual(await badRes.json(), { error: 'bad_department' });
+        }
+
+        // Must never touch looks/embedding or store dependencies
+        assert.equal(looksCalls, 0);
+        assert.equal(storeCalls, 0);
+      },
+    );
+
+    // 2. Throwing occasionMenu leaves rest of /api/occasions intact with menu: []; throwing matchOccasionWords -> { match: null }
+    await withServer(
+      {
+        loadLibrary: async () => ({
+          libraryOccasions: async () => [
+            { key: 'brunch', occasion: 'sunday brunch', label: 'Sunday brunch' },
+          ],
+          occasionMenu: async () => {
+            throw new Error('menu exploded');
+          },
+          matchOccasionWords: async () => {
+            throw new Error('matcher exploded');
+          },
+        }),
+      },
+      async (url) => {
+        const occRes = await fetch(`${url}/api/occasions?department=women`);
+        assert.equal(occRes.status, 200);
+        assert.deepEqual(await occRes.json(), {
+          department: 'women',
+          occasions: [{ key: 'brunch', occasion: 'sunday brunch', label: 'Sunday brunch' }],
+          menu: [],
+          source: 'library',
+        });
+
+        const matchRes = await fetch(`${url}/api/occasions/match?department=women&q=brunch`);
+        assert.equal(matchRes.status, 200);
+        assert.equal(matchRes.headers.get('cache-control'), 'no-store');
+        assert.deepEqual(await matchRes.json(), { match: null });
+      },
+    );
+  });
+
+  it('enforces a shared 90 requests/minute rate limit across all browse routes including /api/occasions/match', async () => {
     await withServer(
       {
         store: {
@@ -1924,7 +2109,9 @@ describe('Storefront, product, search, and looks API', () => {
           searchMixed: async () => ({ items: [], source: 'empty', ms: 1 }),
           getProduct: async () => null,
         },
-        loadLibrary: async () => null,
+        loadLibrary: async () => ({
+          matchOccasionWords: async () => null,
+        }),
       },
       async (url) => {
         const routes = [
@@ -1932,12 +2119,13 @@ describe('Storefront, product, search, and looks API', () => {
           '/api/search?q=hat',
           '/api/looks',
           '/api/product?variant_id=gid%3A%2F%2Fshopify%2FProductVariant%2F1',
+          '/api/occasions/match?department=men&q=tux',
         ];
         for (let i = 0; i < 90; i += 1) {
           const res = await fetch(`${url}${routes[i % routes.length]}`);
           assert.notEqual(res.status, 429, `unexpected 429 on request #${i + 1}`);
         }
-        const blocked = await fetch(`${url}/api/storefront`);
+        const blocked = await fetch(`${url}/api/occasions/match?department=men&q=tux`);
         assert.equal(blocked.status, 429);
         assert.equal(blocked.headers.get('cache-control'), 'no-store');
         assert.ok(Number(blocked.headers.get('retry-after')) >= 1);
