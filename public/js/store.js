@@ -5573,10 +5573,13 @@ export function mountStore(root, { onTalk } = {}) {
         payload && payload.order && typeof payload.order === 'object' && !Array.isArray(payload.order)
           ? payload.order
           : null;
+      // Before the shopper has signed in there is no order yet: the review arrives with an
+      // empty order_id and only the sign-in link, and is shown as the connect step
+      const awaitingSignIn = Boolean(raw) && raw.needs_sign_in === true;
       if (
         !raw ||
         typeof raw.order_id !== 'string' ||
-        !raw.order_id.trim() ||
+        (!raw.order_id.trim() && !awaitingSignIn) ||
         !Array.isArray(raw.stores)
       ) {
         return { ok: false, error: 'showOrderReview requires order with order_id and stores array' };
