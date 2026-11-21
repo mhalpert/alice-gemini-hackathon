@@ -902,7 +902,7 @@ describe('addToBag', () => {
     assert.equal(res.carts[0].added.length, 0);
     assert.equal(res.carts[0].not_added.length, 1);
     const na = res.carts[0].not_added[0] as BagLineNotAdded;
-    assert.equal(na.reason, "size 11 isn't in stock (sizes left: M 7)");
+    assert.equal(na.reason, "11 isn't in stock (sizes left: M 7)");
     assert.equal(na.asked_size, 'size 11');
     assert.equal(na.size_converted, undefined);
   });
@@ -1537,5 +1537,383 @@ describe('call logging integration', () => {
       setCallLogSink(null);
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('spoken and decorated size normalization', () => {
+  const waistList = ['29', '30', '31', '32', '33', '34', '36', '38'];
+  const wideWaistList = ['20', '21', '28', '29', '30', '32', '34', '36', '40', '42', '49', '50'];
+  const wxlList = ['30x30', '32x30', '34x30', '34x32', '36x32'];
+  const letterList = ['XS', 'S', 'M', 'L', 'XL', 'XXL'];
+  const dressList = ['0', '2', '4', '6', '8', '10', '12', '14', '16'];
+  const shoeList = ['7', '8', '9', '10', '10.5', '11', '11.5', '12'];
+
+  it('matches spoken and decorated waist forms against numeric waist list', () => {
+    const cases: Array<[string, string]> = [
+      ['34 waist', '34'],
+      ['waist 34', '34'],
+      ['a 34', '34'],
+      ['34 inch waist', '34'],
+      ['34 in', '34'],
+      ['34"', '34'],
+      ['34W', '34'],
+      ['W34', '34'],
+      ['size 34', '34'],
+      ['a size 34', '34'],
+      ['34 waist 32 length', '34'],
+      ['34 by 32', '34'],
+      ['34x32', '34'],
+      ['thirty four', '34'],
+      ['thirty-four waist', '34'],
+      ['a thirty four waist', '34'],
+      ['thirty four waist thirty two length', '34'],
+    ];
+
+    for (const [input, expected] of cases) {
+      assert.equal(
+        matchSizeLabel(input, waistList, { slot: 'bottom', gender: 'men' }),
+        expected,
+        `expected "${input}" to match "${expected}"`,
+      );
+      assert.equal(
+        isSizeConverted(input, expected),
+        false,
+        `expected isSizeConverted("${input}", "${expected}") to be false`,
+      );
+    }
+  });
+
+  it('matches number words from twenty to fifty against waist list', () => {
+    const cases: Array<[string, string]> = [
+      ['twenty', '20'],
+      ['twenty one', '21'],
+      ['twenty-eight waist', '28'],
+      ['twenty nine', '29'],
+      ['thirty', '30'],
+      ['thirty-two', '32'],
+      ['thirty four', '34'],
+      ['thirty-six inch waist', '36'],
+      ['forty', '40'],
+      ['forty-two waist', '42'],
+      ['forty nine', '49'],
+      ['fifty', '50'],
+    ];
+
+    for (const [input, expected] of cases) {
+      assert.equal(
+        matchSizeLabel(input, wideWaistList, { slot: 'bottom', gender: 'men' }),
+        expected,
+        `expected "${input}" to match "${expected}"`,
+      );
+    }
+  });
+
+  it('matches Waist + Length forms against WxL labels and separate Waist + Length product options', async () => {
+    const wxlCases: Array<[string, string]> = [
+      ['34 waist 32 length', '34x32'],
+      ['34 by 32', '34x32'],
+      ['34x32', '34x32'],
+      ['thirty four waist thirty two length', '34x32'],
+      ['thirty-four by thirty-two', '34x32'],
+      ['34 inch waist 32 inch length', '34x32'],
+      ['34 waist', '34x32'],
+      ['thirty-four waist', '34x32'],
+    ];
+
+    for (const [input, expected] of wxlCases) {
+      assert.equal(
+        matchSizeLabel(input, wxlList, { slot: 'bottom', gender: 'men' }),
+        expected,
+        `expected "${input}" to match "${expected}"`,
+      );
+    }
+
+    // Separate Waist + Length options via addToBag
+    const jean = makeItem({
+      id: 'gid://shopify/p/jean-wl',
+      variant_id: 'gid://shopify/ProductVariant/jean-30-30',
+      title: 'Selvedge Straight Jean',
+      price: 88,
+      store: 'Everlane',
+      store_domain: 'm34kzg-ke.myshopify.com',
+    });
+
+    const receivedCalls: Array<{ size: string; inseam?: string }> = [];
+    const deps: BagStoreDeps = {
+      async getProduct() {
+        return {
+          id: jean.id,
+          title: jean.title,
+          store: jean.store,
+          store_domain: jean.store_domain,
+          variant: {
+            id: jean.variant_id,
+            available: true,
+            price: jean.price,
+            image: jean.image,
+            url: jean.url,
+            options: [
+              { name: 'Waist', label: '30' },
+              { name: 'Length', label: '30' },
+            ],
+          },
+          options: [
+            {
+              name: 'Waist',
+              values: ['30', '32', '34', '36'].map((label) => ({
+                label,
+                available: true,
+                exists: true,
+              })),
+            },
+            {
+              name: 'Length',
+              values: ['30', '32', '34'].map((label) => ({
+                label,
+                available: true,
+                exists: true,
+              })),
+            },
+          ],
+          selected: [
+            { name: 'Waist', label: '30' },
+            { name: 'Length', label: '30' },
+          ],
+          images: [jean.image],
+        };
+      },
+      async sizeVariant(_vid, size, opts) {
+        receivedCalls.push({ size, inseam: opts?.inseam });
+        return {
+          ok: true,
+          variant_id: `gid://shopify/ProductVariant/jean-${size}-${opts?.inseam ?? '32'}`,
+          size,
+          length: opts?.inseam ?? '32',
+          available: true,
+          sizes_available: ['30', '32', '34', '36'],
+          nearest: null,
+        };
+      },
+      async createCart(_domain, lines) {
+        return {
+          cart_id: 'cart-wl',
+          continue_url: 'https://example.com/cart/wl',
+          total_usd: 88,
+          line_items: lines.map((l) => ({
+            variant_id: l.variant_id,
+            title: jean.title,
+            quantity: l.quantity,
+            price: jean.price,
+          })),
+          messages: [],
+          ms: 5,
+        };
+      },
+    };
+
+    const { addToBag } = createBag(deps);
+    const outfit: Outfit = {
+      name: 'Look',
+      difference: 'Clean',
+      story: 'Clean',
+      total: 88,
+      pieces: [{ slot: 'bottom', why: 'jeans', item: jean }],
+    };
+
+    const res = await addToBag(outfit, { bottom: '34 waist 32 length' }, 'men');
+    assert.equal(res.carts[0].added.length, 1);
+    assert.equal(res.carts[0].added[0].size, '34');
+    assert.equal(res.carts[0].added[0].size_converted, undefined);
+    assert.deepEqual(receivedCalls, [{ size: '34', inseam: '32' }]);
+  });
+
+  it('matches spoken letter sizes, dress sizes zero..sixteen, and shoe sizes with halves', () => {
+    const letterCases: Array<[string, string]> = [
+      ['large', 'L'],
+      ['a large', 'L'],
+      ['size large', 'L'],
+      ['extra large', 'XL'],
+      ['x large', 'XL'],
+      ['double xl', 'XXL'],
+      ['medium', 'M'],
+      ['small', 'S'],
+      ['extra small', 'XS'],
+    ];
+    for (const [input, expected] of letterCases) {
+      assert.equal(matchSizeLabel(input, letterList), expected, `letter "${input}"`);
+      assert.equal(isSizeConverted(input, expected), false, `letter converted "${input}"`);
+    }
+
+    const dressCases: Array<[string, string]> = [
+      ['zero', '0'],
+      ['size two', '2'],
+      ['a four', '4'],
+      ['six', '6'],
+      ['size eight', '8'],
+      ['ten', '10'],
+      ['twelve', '12'],
+      ['fourteen', '14'],
+      ['sixteen', '16'],
+    ];
+    for (const [input, expected] of dressCases) {
+      assert.equal(
+        matchSizeLabel(input, dressList, { slot: 'dress', gender: 'women' }),
+        expected,
+        `dress "${input}"`,
+      );
+    }
+
+    const shoeCases: Array<[string, string]> = [
+      ['size eleven', '11'],
+      ['eleven and a half', '11.5'],
+      ['ten and a half', '10.5'],
+      ['a size 11', '11'],
+      ['a 10', '10'],
+      ['seven', '7'],
+      ['eight', '8'],
+      ['twelve', '12'],
+    ];
+    for (const [input, expected] of shoeCases) {
+      assert.equal(
+        matchSizeLabel(input, shoeList, { slot: 'shoes', gender: 'men' }),
+        expected,
+        `shoe "${input}"`,
+      );
+      assert.equal(isSizeConverted(input, expected), false, `shoe converted "${input}"`);
+    }
+
+    // Shoe wide widths (< 20 with trailing W) must still work
+    assert.equal(
+      matchSizeLabel('8.5W', ['8', '8.5', '8.5 W', '9'], { slot: 'shoes', gender: 'women' }),
+      '8.5 W',
+    );
+    assert.equal(matchSizeLabel('One Size', ['One Size']), 'One Size');
+  });
+
+  it('enforces negative guards: no substring/prefix looseness and waist never matches shoes', () => {
+    // "34" must never match "134", "3", "340", or "34.5"
+    assert.equal(matchSizeLabel('34', ['134', '3', '340', '34.5']), null);
+    assert.equal(matchSizeLabel('34 waist', ['134', '3', '340', '34.5']), null);
+    assert.equal(matchSizeLabel('thirty four', ['134', '3', '340', '34.5']), null);
+
+    // A waist must NEVER match a shoe size list (both with slot: 'shoes' and shoe-labeled lists)
+    const waistInputs = [
+      '34 waist',
+      'waist 34',
+      '34 inch waist',
+      '34 in',
+      '34"',
+      '34W',
+      'W34',
+      'thirty-four waist',
+      'a thirty four waist',
+      '34 waist 32 length',
+      '34 by 32',
+      '34x32',
+    ];
+    const euShoePlain = ['34', '35', '36', '37', '38', '39', '40'];
+    const euShoeLabeled = ['34 EU', '35 EU', '36 EU', '37 EU', '38 EU'];
+    const usShoeHalf = ['8', '8.5', '9', '9.5', '10', '10.5', '11', '11.5', '12'];
+
+    for (const input of waistInputs) {
+      assert.equal(
+        matchSizeLabel(input, euShoePlain, { slot: 'shoes', gender: 'women' }),
+        null,
+        `"${input}" must not match EU shoe list with slot=shoes`,
+      );
+      assert.equal(
+        matchSizeLabel(input, euShoePlain),
+        null,
+        `"${input}" must not match EU shoe run without slot`,
+      );
+      assert.equal(
+        matchSizeLabel(input, euShoeLabeled),
+        null,
+        `"${input}" must not match labeled EU shoe list`,
+      );
+      assert.equal(
+        matchSizeLabel(input, usShoeHalf, { slot: 'shoes', gender: 'men' }),
+        null,
+        `"${input}" must not match US shoe list`,
+      );
+    }
+  });
+
+  it('echoes the normalised size in not-in-stock messages, never the raw spoken phrase', async () => {
+    const jeans = makeItem({
+      id: 'gid://shopify/p/jeans-oos',
+      variant_id: 'gid://shopify/ProductVariant/jeans-32',
+      title: 'Relaxed Fit Jeans',
+      price: 49,
+      store: 'Fashion Nova',
+      store_domain: 'fnova.myshopify.com',
+    });
+
+    const makeBagWithSizes = (labels: string[], optionName = 'Size') =>
+      createBag({
+        async getProduct() {
+          return makeDetail(
+            jeans,
+            optionName,
+            labels.map((label) => ({ label })),
+          );
+        },
+        async sizeVariant() {
+          throw new Error('should not call sizeVariant');
+        },
+        async createCart() {
+          throw new Error('should not create cart');
+        },
+      });
+
+    const outfit: Outfit = {
+      name: 'Look',
+      difference: 'Clean',
+      story: 'Clean',
+      total: 49,
+      pieces: [{ slot: 'bottom', why: 'jeans', item: jeans }],
+    };
+
+    const { addToBag: addJeans } = makeBagWithSizes(['29', '30', '32', '36']);
+
+    const cases: Array<[string, string]> = [
+      ['34 waist', "34 isn't in stock (sizes left: 29, 30, 32, 36)"],
+      ['a thirty four waist', "34 isn't in stock (sizes left: 29, 30, 32, 36)"],
+      ['thirty-four waist', "34 isn't in stock (sizes left: 29, 30, 32, 36)"],
+      ['W34', "34 isn't in stock (sizes left: 29, 30, 32, 36)"],
+      ['34"', "34 isn't in stock (sizes left: 29, 30, 32, 36)"],
+      ['34 waist 32 length', "34x32 isn't in stock (sizes left: 29, 30, 32, 36)"],
+    ];
+
+    for (const [asked, expectedReason] of cases) {
+      const res = await addJeans(outfit, { bottom: asked }, 'men');
+      assert.equal(res.carts[0].added.length, 0);
+      assert.equal(res.carts[0].not_added.length, 1);
+      assert.equal(res.carts[0].not_added[0].reason, expectedReason);
+    }
+
+    // Shoes: spoken half size
+    const shoeOutfit: Outfit = {
+      name: 'Look',
+      difference: 'Clean',
+      story: 'Clean',
+      total: 49,
+      pieces: [{ slot: 'shoes', why: 'shoes', item: jeans }],
+    };
+    const { addToBag: addShoes } = makeBagWithSizes(['8', '9', '10']);
+    const shoeRes = await addShoes(shoeOutfit, { shoes: 'eleven and a half' }, 'men');
+    assert.equal(shoeRes.carts[0].not_added[0].reason, "11.5 isn't in stock (sizes left: 8, 9, 10)");
+
+    // Letter size spoken out
+    const topOutfit: Outfit = {
+      name: 'Look',
+      difference: 'Clean',
+      story: 'Clean',
+      total: 49,
+      pieces: [{ slot: 'top', why: 'top', item: jeans }],
+    };
+    const { addToBag: addTop } = makeBagWithSizes(['S', 'M']);
+    const topRes = await addTop(topOutfit, { top: 'a large' }, 'men');
+    assert.equal(topRes.carts[0].not_added[0].reason, "L isn't in stock (sizes left: S, M)");
   });
 });
