@@ -53,8 +53,21 @@ export interface BuildOptions { onOutfit?(outfit: Outfit, index: number): void; 
 // ALICE_BRAIN=live runs the real builder (plan + store search + pick); anything else serves the mock.
 export async function buildOutfits(brief: Brief, opts: BuildOptions = {}): Promise<BuildResult> {
   if ((process.env.ALICE_BRAIN ?? '').toLowerCase() === 'live') {
+    try {
+      const { serveLibrary } = await import('../library/index.ts');
+      const lib = await serveLibrary(brief, opts);
+      if (lib) return lib;
+    } catch { /* fall through to live build */ }
     const { buildLive } = await import('./build.ts');
-    return buildLive(brief, opts);
+    const live = await buildLive(brief, opts);
+    if (live.outfits.length === 0) {
+      try {
+        const { serveLibrary } = await import('../library/index.ts');
+        const rescue = await serveLibrary(brief, { ...opts, anyMatch: true });
+        if (rescue && rescue.outfits.length > 0) return rescue;
+      } catch { /* keep the empty live result */ }
+    }
+    return live;
   }
   return buildMock(brief, opts);
 }
