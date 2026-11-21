@@ -63,30 +63,62 @@ const STOPWORDS = new Set([
 ]);
 
 const GENERIC_TOKENS = new Set([
-  'party', 'dinner', 'night', 'day', 'weekend', 'trip', 'event',
+  'formal', 'work', 'office', 'job', 'party', 'dinner', 'night', 'day', 'weekend', 'trip', 'event',
 ]);
 
-const SYNONYM_GROUPS: readonly (readonly string[])[] = [
-  ['wedding', 'marriage', 'reception'],
-  ['interview', 'job'],
-  ['date', 'dinner'],
-  ['club', 'party', 'clubbing', 'nightclub'],
-  ['gala', 'formal', 'black tie', 'tux', 'tuxedo'],
-  ['beach', 'vacation', 'resort', 'miami'],
-  ['brunch', 'lunch'],
-  ['festival', 'coachella'],
-  ['office', 'work'],
-  ['goldman', 'jpmorgan', 'morgan', 'bank', 'banking', 'finance', 'financial', 'wall street', 'investment', 'hedge fund'],
+interface SynonymGroup {
+  readonly canonical: readonly string[];
+  readonly members: readonly string[];
+  readonly targets?: readonly string[];
+}
+
+const SYNONYM_GROUPS: readonly SynonymGroup[] = [
+  { canonical: ['wedding'], members: ['wedding', 'marriage', 'reception'] },
+  { canonical: ['interview'], members: ['interview', 'job'] },
+  { canonical: ['date'], members: ['date', 'dinner'] },
+  { canonical: ['club'], members: ['club', 'party', 'clubbing', 'nightclub'] },
+  {
+    canonical: ['gala', 'black tie'],
+    members: ['gala', 'black tie', 'tux', 'tuxedo'],
+    targets: ['gala', 'black tie'],
+  },
+  { canonical: ['beach'], members: ['beach', 'vacation', 'resort', 'miami'] },
+  { canonical: ['brunch'], members: ['brunch', 'lunch'] },
+  { canonical: ['festival'], members: ['festival', 'coachella'] },
+  { canonical: ['office'], members: ['office', 'work'] },
+  {
+    canonical: ['bank', 'finance'],
+    members: [
+      'bank', 'finance', 'goldman', 'jpmorgan', 'morgan',
+      'banking', 'financial', 'wall street', 'investment', 'hedge fund',
+    ],
+  },
 ];
 
 const QUERY_PHRASES: readonly (readonly [string, string])[] = [
   ['wall', 'street'],
   ['hedge', 'fund'],
+  ['black', 'tie'],
 ];
 
 const ONE_WAY_SYNONYMS: Record<string, readonly string[]> = {
   bday: ['birthday'],
 };
+
+const CANONICAL_WORDS: Set<string> = (() => {
+  const set = new Set<string>();
+  for (const group of SYNONYM_GROUPS) {
+    for (const word of group.canonical) {
+      if (!GENERIC_TOKENS.has(word)) set.add(word);
+    }
+  }
+  for (const targets of Object.values(ONE_WAY_SYNONYMS)) {
+    for (const word of targets) {
+      if (!GENERIC_TOKENS.has(word)) set.add(word);
+    }
+  }
+  return set;
+})();
 
 const SYNONYM_MAP: Map<string, readonly string[]> = (() => {
   const map = new Map<string, Set<string>>();
@@ -99,8 +131,10 @@ const SYNONYM_MAP: Map<string, readonly string[]> = (() => {
     set.add(to);
   };
   for (const group of SYNONYM_GROUPS) {
-    for (const a of group) {
-      for (const b of group) {
+    const targets = group.targets ?? group.members;
+    for (const a of group.members) {
+      add(a, a);
+      for (const b of targets) {
         add(a, b);
       }
     }
@@ -200,8 +234,31 @@ function buildSetVocab(gender: Gender, key: string, occasion: string): Set<strin
   return vocab;
 }
 
+function buildSetCategoryWords(gender: Gender, key: string): Set<string> {
+  const identity = new Set<string>();
+  addTextToVocab(key, identity);
+  addTextToVocab(MENU_KEYWORD_BY_GENDER[gender].get(key), identity);
+
+  const categoryWords = new Set<string>();
+  for (const word of identity) {
+    if (CANONICAL_WORDS.has(word)) {
+      categoryWords.add(word);
+    }
+  }
+  return categoryWords;
+}
+
 function expandToken(token: string): readonly string[] {
   return SYNONYM_MAP.get(token) ?? [token];
+}
+
+function tokenMatchesVocab(
+  vocab: Set<string>,
+  token: string,
+  terms: readonly string[],
+): boolean {
+  if (vocab.has(token)) return true;
+  return terms.some((term) => term !== token && !GENERIC_TOKENS.has(term) && vocab.has(term));
 }
 
 export async function occasionMenu(gender: Gender): Promise<MenuEntry[]> {
@@ -232,6 +289,7 @@ export async function matchOccasionWords(
     key: entry.key,
     label: entry.label,
     vocab: buildSetVocab(gender, entry.key, entry.occasion),
+    categoryWords: buildSetCategoryWords(gender, entry.key),
   }));
 
   const setCount = candidates.length;
@@ -239,7 +297,7 @@ export async function matchOccasionWords(
     const terms = expandToken(token);
     let df = 0;
     for (const c of candidates) {
-      if (terms.some((term) => c.vocab.has(term))) {
+      if (tokenMatchesVocab(c.vocab, token, terms)) {
         df += 1;
       }
     }
@@ -261,17 +319,31 @@ export async function matchOccasionWords(
     let matchedWeight = 0;
     let exactMatches = 0;
     let nonGenericMatches = 0;
+    let qualifyingMatches = 0;
 
     for (const q of expanded) {
       const isExact = candidate.vocab.has(q.token);
-      const isMatched = isExact || q.terms.some((term) => candidate.vocab.has(term));
-      if (!isMatched) continue;
+      const isSynMatch =
+        !isExact &&
+        q.terms.some((term) => term !== q.token && !GENERIC_TOKENS.has(term) && candidate.vocab.has(term));
+      if (!isExact && !isSynMatch) continue;
+
       matchedWeight += q.idf;
       if (isExact) exactMatches += 1;
-      if (!q.generic) nonGenericMatches += 1;
+      if (!q.generic) {
+        nonGenericMatches += 1;
+        const isCategorySynMatch =
+          isSynMatch &&
+          q.terms.some(
+            (term) => term !== q.token && !GENERIC_TOKENS.has(term) && candidate.categoryWords.has(term),
+          );
+        if (isExact || isCategorySynMatch) {
+          qualifyingMatches += 1;
+        }
+      }
     }
 
-    if (nonGenericMatches === 0) continue;
+    if (nonGenericMatches === 0 || qualifyingMatches === 0) continue;
     const score = matchedWeight / totalWeight;
     if (score < MIN_MATCH_SCORE) continue;
 

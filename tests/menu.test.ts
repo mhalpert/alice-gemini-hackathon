@@ -198,10 +198,102 @@ test('black tie gala does not false-match interview-bank when gala is not servab
     makeSet('interview-bank', 'men'),
     makeSet('opera-or-ballet-night', 'men'),
     makeSet('funeral-or-memorial', 'men'),
+    makeSet('rooftop-birthday', 'men'),
+    makeSet('office-holiday-party', 'men'),
+    makeSet('club', 'men'),
   ]);
 
-  const res = await matchOccasionWords('men', 'black tie gala');
-  assert.equal(res, null);
+  assert.equal(await matchOccasionWords('men', 'black tie gala'), null);
+  assert.equal(await matchOccasionWords('men', 'tux'), null);
+  assert.equal(await matchOccasionWords('men', 'gala'), null);
+  assert.equal(await matchOccasionWords('men', 'tuxedo party'), null);
+  assert.equal(await matchOccasionWords('men', 'black tie'), null);
+});
+
+test('tux, gala, and tuxedo party match gala when gala is servable', async () => {
+  createTempLibrary([
+    makeSet('interview-bank', 'men'),
+    makeSet('rooftop-birthday', 'men'),
+    makeSet('club', 'men'),
+    makeSet('gala', 'men'),
+  ]);
+
+  const tux = await matchOccasionWords('men', 'tux');
+  assert.ok(tux);
+  assert.equal(tux.key, 'gala');
+
+  const gala = await matchOccasionWords('men', 'gala');
+  assert.ok(gala);
+  assert.equal(gala.key, 'gala');
+
+  const tuxedoParty = await matchOccasionWords('men', 'tuxedo party');
+  assert.ok(tuxedoParty);
+  assert.equal(tuxedoParty.key, 'gala');
+});
+
+test('black tie wedding, Goldman interview, date night, coachella, and beach wedding in Capri match accurately', async () => {
+  const keys = [
+    'rooftop-birthday',
+    'first-date',
+    'summer-wedding',
+    'beach-wedding-guest',
+    'black-tie-wedding',
+    'interview-creative',
+    'interview-bank',
+    'business-casual',
+    'brunch',
+    'club',
+    'festival',
+    'beach',
+    'gala',
+    'upscale-dinner-date',
+    'office-holiday-party',
+  ];
+  createTempLibrary([
+    ...keys.map((k) => makeSet(k, 'women')),
+    ...keys.map((k) => makeSet(k, 'men')),
+  ]);
+
+  const blackTieWedding = await matchOccasionWords('women', 'black tie wedding');
+  assert.ok(blackTieWedding);
+  assert.equal(blackTieWedding.key, 'black-tie-wedding');
+
+  const goldman = await matchOccasionWords('men', 'job interview at Goldman');
+  assert.ok(goldman);
+  assert.equal(goldman.key, 'interview-bank');
+
+  const dateNight = await matchOccasionWords('women', 'date night');
+  assert.ok(dateNight);
+  assert.equal(dateNight.key, 'first-date');
+
+  const menDateNight = await matchOccasionWords('men', 'date night');
+  assert.ok(menDateNight);
+  assert.equal(menDateNight.key, 'first-date');
+
+  const coachella = await matchOccasionWords('women', 'coachella');
+  assert.ok(coachella);
+  assert.equal(coachella.key, 'festival');
+
+  const capri = await matchOccasionWords('women', 'beach wedding in Capri');
+  assert.ok(capri);
+  assert.equal(capri.key, 'beach-wedding-guest');
+
+  for (const generic of ['formal', 'work', 'office', 'job', 'party', 'dinner', 'night', 'formal party', 'office dinner']) {
+    assert.equal(await matchOccasionWords('men', generic), null, `expected null for generic query "${generic}"`);
+  }
+});
+
+test('synonym-only matches through generic words never count', async () => {
+  createTempLibrary([
+    makeSet('rooftop-birthday', 'women'),
+    makeSet('office-holiday-party', 'women'),
+    makeSet('business-casual', 'women'),
+    makeSet('family-holiday-dinner', 'women'),
+  ]);
+
+  assert.equal(await matchOccasionWords('women', 'clubbing'), null);
+  assert.equal(await matchOccasionWords('women', 'interview'), null);
+  assert.equal(await matchOccasionWords('women', 'date'), null);
 });
 
 test('occasionMenu returns at most 15 entries in curated order and only servable keys', async () => {
