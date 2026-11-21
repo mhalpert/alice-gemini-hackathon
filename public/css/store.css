@@ -1946,6 +1946,12 @@ img {
   color: var(--ink);
 }
 
+/* Sections the nav jumps to stop clear of the sticky header */
+.boutique-looks-section,
+.boutique-rail-section {
+  scroll-margin-top: calc(var(--header-h) + 16px);
+}
+
 /* Boutique "Looks by Alice" row */
 
 .boutique-looks-section {

@@ -1,10 +1,9 @@
 // Alice Store — renders the storefront and exposes synchronous page-action handlers.
 
+// Every nav item does something: the departments switch the boutique, the other two jump to a section.
 const NAV_ITEMS = [
-  'New In',
   'Women',
   'Men',
-  'Occasions',
   'Looks by Alice',
   'Stores',
 ];
@@ -476,8 +475,12 @@ export function mountStore(root, { onTalk } = {}) {
               className: 'nav-link',
               onClick: (e) => {
                 e.preventDefault();
-                if (label === 'Looks by Alice' && state.outfits.size > 0) {
-                  handlers.showAll({});
+                if (label === 'Looks by Alice') {
+                  // Alice's own looks from this call if there are any, otherwise the boutique's row of looks
+                  if (state.outfits.size > 0) handlers.showAll({});
+                  else scrollToBoutique('.boutique-looks-section');
+                } else if (label === 'Stores') {
+                  scrollToBoutique('.boutique-rail-section[data-section^="from-"]');
                 }
               },
             },
@@ -1095,6 +1098,7 @@ export function mountStore(root, { onTalk } = {}) {
             {
               className: 'boutique-rail-section',
               'aria-label': section.title || 'Featured pieces',
+              dataset: { section: typeof section.id === 'string' ? section.id : '' },
             },
             section.title
               ? el(
@@ -1215,6 +1219,16 @@ export function mountStore(root, { onTalk } = {}) {
     activePickedRefs = null;
     renderHomeView();
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  // Bring one part of the boutique into view, returning to the boutique first if another view is showing
+  function scrollToBoutique(selector) {
+    if (!hasBoutiqueAvailable()) return;
+    if (state.view !== 'boutique') showBoutique();
+    requestAnimationFrame(() => {
+      const target = mainEl.querySelector(selector);
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
   }
 
   function finishBoutiqueCheck() {
