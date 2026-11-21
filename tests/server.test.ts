@@ -845,18 +845,9 @@ describe('Storefront, product, search, and looks API', () => {
 
     await withServer(
       {
+        env: {},
         store: {
           searchMixed: async (query, gender) => {
-            if (query === "women's trousers" || query === "women's jeans") {
-              return {
-                items: [dup, sampleItem(`only-${query.replace(/\W+/g, '-')}`, gender)],
-                source: 'live',
-                ms: 4,
-              };
-            }
-            if (query === "women's dress") {
-              return { items: [sampleItem('dress-1', gender)], source: 'live', ms: 4 };
-            }
             if (query === 'black loafer') {
               return {
                 items: Array.from({ length: 10 }, (_, i) => sampleItem(`search-${i}`, gender)),
@@ -866,8 +857,32 @@ describe('Storefront, product, search, and looks API', () => {
             }
             return { items: [], source: 'empty', ms: 4 };
           },
-          search: async (_q, gender, opts) => {
-            if (opts?.shops?.[0] === 'everlane.com') {
+          search: async (query, gender, opts) => {
+            if (query === "women's trousers") {
+              return {
+                items: [
+                  dup,
+                  sampleItem('tr-2', gender),
+                  sampleItem('tr-3', gender),
+                  sampleItem('tr-4', gender),
+                ],
+                source: 'live',
+                ms: 4,
+              };
+            }
+            if (query === "women's dress") {
+              return {
+                items: [
+                  sampleItem('dress-1', gender),
+                  sampleItem('dress-2', gender),
+                  sampleItem('dress-3', gender),
+                  sampleItem('dress-4', gender),
+                ],
+                source: 'live',
+                ms: 4,
+              };
+            }
+            if (opts?.shops?.length === 1 && opts.shops[0] === 'everlane.com') {
               return { items: [sampleItem('ev-1', gender)], source: 'live', ms: 4 };
             }
             return { items: [], source: 'empty', ms: 4 };
@@ -888,21 +903,24 @@ describe('Storefront, product, search, and looks API', () => {
           department: string;
           sections: Array<{ id: string; title: string; items: Item[] }>;
           ms: number;
+          storefront: { searches: number; shared: boolean };
           partial?: boolean;
         };
         assert.equal(sf.department, 'women');
         assert.equal(typeof sf.ms, 'number');
+        assert.equal(typeof sf.storefront.searches, 'number');
+        assert.equal(sf.storefront.shared, false);
         assert.equal(sf.partial, undefined);
-        // Empty sections dropped -> only dresses, trousers-denim, from-everlane remain
+        // Empty sections dropped -> only dresses, trousers, from-everlane remain
         assert.deepEqual(
           sf.sections.map((s) => s.id),
-          ['dresses', 'trousers-denim', 'from-everlane'],
+          ['dresses', 'trousers', 'from-everlane'],
         );
-        const td = sf.sections.find((s) => s.id === 'trousers-denim')!;
-        assert.equal(td.items.filter((i) => i.id === 'dup-item').length, 1);
-        assert.equal(td.items[0].url, dup.url);
-        assert.ok(td.items[0].description.length <= 160);
-        assert.deepEqual(td.items[0].variants_by_size, {});
+        const tr = sf.sections.find((s) => s.id === 'trousers')!;
+        assert.equal(tr.items.filter((i) => i.id === 'dup-item').length, 1);
+        assert.equal(tr.items[0].url, dup.url);
+        assert.ok(tr.items[0].description.length <= 160);
+        assert.deepEqual(tr.items[0].variants_by_size, {});
 
         // 2. GET /api/product (by variant_id and by id)
         const prodRes = await fetch(
@@ -1124,110 +1142,234 @@ describe('Storefront, product, search, and looks API', () => {
       },
     );
 
-    // 4. GET /api/occasions across libraryOccasions present, missing, and throwing
-    await withServer(
-      {
-        loadLibrary: async () => ({
-          libraryOccasions: async (gender: Gender) =>
-            gender === 'men'
-              ? [
-                  {
-                    key: 'rooftop-birthday',
-                    occasion: "a friend's rooftop birthday party",
-                    label: 'Rooftop birthday',
-                  },
-                ]
-              : [
-                  {
-                    key: 'brunch',
-                    occasion: 'Sunday brunch with friends',
-                    label: 'Sunday brunch',
-                  },
-                ],
-        }),
-      },
-      async (url) => {
-        const menOcc = await fetch(`${url}/api/occasions?department=men`);
-        assert.equal(menOcc.status, 200);
-        assert.equal(menOcc.headers.get('cache-control'), 'no-store');
-        assert.deepEqual(await menOcc.json(), {
-          department: 'men',
-          occasions: [
-            {
-              key: 'rooftop-birthday',
-              occasion: "a friend's rooftop birthday party",
-              label: 'Rooftop birthday',
-            },
-          ],
-          source: 'library',
-        });
-
-        const womenOcc = await fetch(`${url}/api/occasions?department=women`);
-        assert.equal(womenOcc.status, 200);
-        assert.deepEqual(await womenOcc.json(), {
-          department: 'women',
-          occasions: [
-            {
-              key: 'brunch',
-              occasion: 'Sunday brunch with friends',
-              label: 'Sunday brunch',
-            },
-          ],
-          source: 'library',
-        });
-      },
-    );
-
-    // Missing export -> source: 'none', occasions: []
-    await withServer(
-      {
-        loadLibrary: async () => ({}),
-      },
-      async (url) => {
-        const res = await fetch(`${url}/api/occasions?department=men`);
-        assert.equal(res.status, 200);
-        assert.deepEqual(await res.json(), {
-          department: 'men',
-          occasions: [],
-          source: 'none',
-        });
-      },
-    );
-
-    // Export throws -> source: 'none', occasions: []
-    await withServer(
-      {
-        loadLibrary: async () => ({
-          libraryOccasions: async () => {
-            throw new Error('occasions crashed');
+    // 4. GET /api/occasions across libraryOccasions present, sets.json fallback (missing/throws), and none
+    const tmpSetsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alice-sets-'));
+    const tmpSetsFile = path.join(tmpSetsDir, 'sets.json');
+    fs.writeFileSync(
+      tmpSetsFile,
+      JSON.stringify({
+        version: 1,
+        sets: [
+          {
+            key: 'rooftop-birthday',
+            gender: 'men',
+            occasion: "a friend's rooftop birthday party",
+            outfits: [sampleOutfit('men')],
           },
-        }),
+          {
+            key: 'brunch',
+            gender: 'women',
+            occasion: 'sunday brunch with friends',
+            outfits: [sampleOutfit('women')],
+          },
+        ],
+      }),
+    );
+
+    try {
+      await withServer(
+        {
+          env: { ALICE_LIBRARY_FILE: tmpSetsFile },
+          loadLibrary: async () => ({
+            libraryOccasions: async (gender: Gender) =>
+              gender === 'men'
+                ? [
+                    {
+                      key: 'rooftop-birthday',
+                      occasion: "a friend's rooftop birthday party",
+                      label: 'Rooftop birthday',
+                    },
+                  ]
+                : [
+                    {
+                      key: 'brunch',
+                      occasion: 'Sunday brunch with friends',
+                      label: 'Sunday brunch',
+                    },
+                  ],
+          }),
+        },
+        async (url) => {
+          const menOcc = await fetch(`${url}/api/occasions?department=men`);
+          assert.equal(menOcc.status, 200);
+          assert.equal(menOcc.headers.get('cache-control'), 'no-store');
+          assert.deepEqual(await menOcc.json(), {
+            department: 'men',
+            occasions: [
+              {
+                key: 'rooftop-birthday',
+                occasion: "a friend's rooftop birthday party",
+                label: 'Rooftop birthday',
+              },
+            ],
+            source: 'library',
+          });
+
+          const womenOcc = await fetch(`${url}/api/occasions?department=women`);
+          assert.equal(womenOcc.status, 200);
+          assert.deepEqual(await womenOcc.json(), {
+            department: 'women',
+            occasions: [
+              {
+                key: 'brunch',
+                occasion: 'Sunday brunch with friends',
+                label: 'Sunday brunch',
+              },
+            ],
+            source: 'library',
+          });
+        },
+      );
+
+      // Missing export -> falls back to sets.json with source: 'sets' and slug/capitalised label;
+      // and /api/looks?occasion=<slug> maps the slug back to the occasion text before calling libraryLooks.
+      const mappedSeen: Array<{ gender: Gender; occasion?: string }> = [];
+      await withServer(
+        {
+          env: { ALICE_LIBRARY_FILE: tmpSetsFile },
+          loadLibrary: async () => ({
+            libraryLooks: async (gender: Gender, opts?: { occasion?: string }) => {
+              mappedSeen.push({ gender, occasion: opts?.occasion });
+              return [sampleOutfit(gender)];
+            },
+          }),
+        },
+        async (url) => {
+          const res = await fetch(`${url}/api/occasions?department=men`);
+          assert.equal(res.status, 200);
+          const body = (await res.json()) as {
+            department: string;
+            occasions: Array<{ key: string; occasion: string; label: string }>;
+            source: string;
+          };
+          assert.deepEqual(body, {
+            department: 'men',
+            occasions: [
+              {
+                key: 'a-friends-rooftop-birthday-party',
+                occasion: "a friend's rooftop birthday party",
+                label: "A friend's rooftop birthday party",
+              },
+            ],
+            source: 'sets',
+          });
+
+          const slugKey = body.occasions[0].key;
+          const looksRes = await fetch(
+            `${url}/api/looks?department=men&occasion=${encodeURIComponent(slugKey)}`,
+          );
+          assert.equal(looksRes.status, 200);
+          const looksBody = (await looksRes.json()) as {
+            occasion: string;
+            source: string;
+            looks: Outfit[];
+          };
+          assert.equal(looksBody.source, 'library');
+          assert.equal(looksBody.looks.length, 1);
+          assert.deepEqual(mappedSeen[0], {
+            gender: 'men',
+            occasion: "a friend's rooftop birthday party",
+          });
+        },
+      );
+
+      // Export throws -> falls back to sets.json with source: 'sets'
+      await withServer(
+        {
+          env: { ALICE_LIBRARY_FILE: tmpSetsFile },
+          loadLibrary: async () => ({
+            libraryOccasions: async () => {
+              throw new Error('occasions crashed');
+            },
+          }),
+        },
+        async (url) => {
+          const res = await fetch(`${url}/api/occasions?department=women`);
+          assert.equal(res.status, 200);
+          assert.deepEqual(await res.json(), {
+            department: 'women',
+            occasions: [
+              {
+                key: 'sunday-brunch-with-friends',
+                occasion: 'sunday brunch with friends',
+                label: 'Sunday brunch with friends',
+              },
+            ],
+            source: 'sets',
+          });
+        },
+      );
+
+      // Missing export AND missing sets.json -> source: 'none', occasions: []
+      await withServer(
+        {
+          env: { ALICE_LIBRARY_FILE: path.join(tmpSetsDir, 'missing.json') },
+          loadLibrary: async () => ({}),
+        },
+        async (url) => {
+          const res = await fetch(`${url}/api/occasions?department=men`);
+          assert.equal(res.status, 200);
+          assert.deepEqual(await res.json(), {
+            department: 'men',
+            occasions: [],
+            source: 'none',
+          });
+        },
+      );
+    } finally {
+      fs.rmSync(tmpSetsDir, { recursive: true, force: true });
+    }
+  });
+
+  it('clamps /api/storefront wait=<ms> to 500..6000 with 4000ms default', async () => {
+    const seenBudgets: Array<number | undefined> = [];
+    await withServer(
+      {
+        store: {
+          storefront: async (department, opts) => {
+            seenBudgets.push(opts?.budgetMs);
+            return {
+              department,
+              sections: [],
+              ms: 1,
+              storefront: { searches: 0, shared: false },
+            };
+          },
+        },
       },
       async (url) => {
-        const res = await fetch(`${url}/api/occasions?department=women`);
-        assert.equal(res.status, 200);
-        assert.deepEqual(await res.json(), {
-          department: 'women',
-          occasions: [],
-          source: 'none',
-        });
+        await fetch(`${url}/api/storefront`);
+        await fetch(`${url}/api/storefront?wait=100`);
+        await fetch(`${url}/api/storefront?wait=2200`);
+        await fetch(`${url}/api/storefront?wait=99999`);
+        assert.deepEqual(seenBudgets, [4000, 500, 2200, 6000]);
       },
     );
   });
 
-  it('enforces the 1.3s/1.4s timing budgets on all browse routes with slow fakes (answers under 1.5s)', async () => {
+  it('enforces the timing budgets on all browse routes with slow fakes', async () => {
     const never = <T>(): Promise<T> => new Promise<T>(() => {});
 
     await withServer(
       {
+        env: { ALICE_LIBRARY_FILE: path.join(os.tmpdir(), 'alice-nonexistent-sets.json') },
         store: {
-          searchMixed: async (query, gender) => {
+          searchMixed: () => never(),
+          search: async (query, gender) => {
             if (query === "women's dress") {
-              return { items: [sampleItem('fast-dress', gender)], source: 'live', ms: 5 };
+              return {
+                items: [
+                  sampleItem('fast-dress-1', gender),
+                  sampleItem('fast-dress-2', gender),
+                  sampleItem('fast-dress-3', gender),
+                  sampleItem('fast-dress-4', gender),
+                ],
+                source: 'live',
+                ms: 5,
+              };
             }
             return never();
           },
-          search: () => never(),
           getProduct: () => never(),
         },
         loadLibrary: async () => ({
@@ -1244,9 +1386,9 @@ describe('Storefront, product, search, and looks API', () => {
           return { status: res.status, ms, body };
         };
 
-        // Run all five slow-fake budget checks in parallel (~1.4s total)
+        // Run all five slow-fake budget checks in parallel (~1.4s total; storefront uses wait=500)
         const [sf, prod, srch, lks, occ] = await Promise.all([
-          timedFetch('/api/storefront?department=women'),
+          timedFetch('/api/storefront?department=women&wait=500'),
           timedFetch('/api/product?variant_id=gid%3A%2F%2Fshopify%2FProductVariant%2F41356358090885'),
           timedFetch('/api/search?q=linen+blazer&department=women'),
           timedFetch('/api/looks?department=men'),
@@ -1256,7 +1398,7 @@ describe('Storefront, product, search, and looks API', () => {
         assert.equal(sf.status, 200);
         assert.equal(sf.body.partial, true);
         assert.equal((sf.body.sections as unknown[]).length, 1);
-        assert.ok(sf.ms < 1550, `/api/storefront exceeded budget: ${sf.ms}ms`);
+        assert.ok(sf.ms < 800, `/api/storefront wait=500 exceeded budget: ${sf.ms}ms`);
 
         assert.equal(prod.status, 504);
         assert.deepEqual(prod.body, { error: 'slow_store' });
@@ -1282,7 +1424,12 @@ describe('Storefront, product, search, and looks API', () => {
     await withServer(
       {
         store: {
-          storefront: async (department) => ({ department, sections: [], ms: 1 }),
+          storefront: async (department) => ({
+            department,
+            sections: [],
+            ms: 1,
+            storefront: { searches: 0, shared: false },
+          }),
           searchMixed: async () => ({ items: [], source: 'empty', ms: 1 }),
           getProduct: async () => null,
         },

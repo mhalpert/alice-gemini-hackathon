@@ -1,7 +1,7 @@
 import type { Gender, Item, SearchResult } from '../types.ts';
 import type { ProductDetail, SearchOpts } from './catalog.ts';
-import { search as defaultSearch, searchMixed as defaultSearchMixed } from './index.ts';
-import { STORES, storeNameForDomain } from './stores.ts';
+import { search as defaultSearch } from './index.ts';
+import { ALL_SITES, OTHER_SITES, STORES, storeNameForDomain } from './stores.ts';
 
 export interface StorefrontSection {
   id: string;
@@ -9,19 +9,25 @@ export interface StorefrontSection {
   items: Item[];
 }
 
+export interface StorefrontMeta {
+  searches: number;
+  shared: boolean;
+}
+
 export interface StorefrontResult {
   department: Gender;
   sections: StorefrontSection[];
   ms: number;
+  storefront: StorefrontMeta;
   partial?: true;
 }
 
 export interface StorefrontDeps {
-  searchMixed?: (query: string, gender: Gender, opts?: SearchOpts) => Promise<SearchResult>;
   search?: (query: string, gender: Gender, opts?: SearchOpts) => Promise<SearchResult>;
   budgetMs?: number;
   perSearchBudgetMs?: number;
   now?: () => number;
+  env?: Record<string, string | undefined>;
 }
 
 export interface SizeDetail {
@@ -44,13 +50,14 @@ interface RailSpec {
   id: string;
   title: string;
   kind: 'category' | 'store';
-  queries: string[];
+  query: string;
   shop?: string;
 }
 
-const DEFAULT_STOREFRONT_BUDGET_MS = 1400;
+const DEFAULT_STOREFRONT_BUDGET_MS = 4000;
 const DEFAULT_PER_SEARCH_BUDGET_MS = 2500;
 const RAIL_LIMIT = 8;
+const THIN_RAIL_THRESHOLD = 4;
 const STOREFRONT_DESC_MAX = 160;
 const PRODUCT_ITEM_DESC_MAX = 300;
 const PRODUCT_FULL_DESC_MAX = 700;
@@ -69,22 +76,22 @@ const HTML_ENTITIES: Record<string, string> = {
   '&gt;': '>',
 };
 
-const CATEGORY_RAILS: Record<Gender, Array<{ id: string; title: string; queries: string[] }>> = {
+const CATEGORY_RAILS: Record<Gender, Array<{ id: string; title: string; query: string }>> = {
   men: [
-    { id: 'shirts-knits', title: 'Shirts & knits', queries: ["men's shirt", "men's knit sweater"] },
-    { id: 'trousers-denim', title: 'Trousers & denim', queries: ["men's trousers", "men's jeans"] },
-    { id: 'shoes', title: 'Shoes', queries: ["men's leather shoes", "men's sneakers"] },
-    { id: 'outerwear', title: 'Outerwear', queries: ["men's jacket"] },
-    { id: 'bags-accessories', title: 'Bags & accessories', queries: ["men's bag"] },
-    { id: 'tailoring', title: 'Blazers & tailoring', queries: ["men's blazer"] },
+    { id: 'shirts', title: 'Shirts', query: "men's shirt" },
+    { id: 'trousers', title: 'Trousers', query: "men's trousers" },
+    { id: 'shoes', title: 'Shoes', query: "men's shoes" },
+    { id: 'outerwear', title: 'Outerwear', query: "men's jacket" },
+    { id: 'bags', title: 'Bags', query: "men's bag" },
+    { id: 'tailoring', title: 'Blazers & tailoring', query: "men's blazer" },
   ],
   women: [
-    { id: 'dresses', title: 'Dresses', queries: ["women's dress"] },
-    { id: 'tops', title: 'Tops & blouses', queries: ["women's top"] },
-    { id: 'trousers-denim', title: 'Trousers & denim', queries: ["women's trousers", "women's jeans"] },
-    { id: 'shoes', title: 'Heels & sandals', queries: ["women's heels", "women's sandals"] },
-    { id: 'outerwear', title: 'Outerwear', queries: ["women's jacket"] },
-    { id: 'bags-jewelry', title: 'Bags & jewelry', queries: ["women's bag", "women's jewelry"] },
+    { id: 'dresses', title: 'Dresses', query: "women's dress" },
+    { id: 'tops', title: 'Tops', query: "women's top" },
+    { id: 'trousers', title: 'Trousers', query: "women's trousers" },
+    { id: 'shoes', title: 'Shoes', query: "women's shoes" },
+    { id: 'outerwear', title: 'Outerwear', query: "women's jacket" },
+    { id: 'bags', title: 'Bags', query: "women's bag" },
   ],
 };
 
@@ -102,7 +109,7 @@ function buildRailSpecs(gender: Gender): RailSpec[] {
     id: r.id,
     title: r.title,
     kind: 'category',
-    queries: r.queries,
+    query: r.query,
   }));
 
   const orderedStores = [...STORES].sort((a, b) => {
@@ -116,11 +123,23 @@ function buildRailSpecs(gender: Gender): RailSpec[] {
     id: `from-${slugify(s.name)}`,
     title: `From ${s.name}`,
     kind: 'store',
-    queries: [storeQuery],
+    query: storeQuery,
     shop: s.site,
   }));
 
   return [...categorySpecs, ...storeSpecs];
+}
+
+// Default is 0 (reuse OFF) because today's Shopify challenge rule requires live
+// data without caching results. ALICE_STOREFRONT_REUSE_S exists solely so the team
+// can opt in to brief reuse (e.g. 15-30s) if the shared venue IP starts getting throttled.
+export function getStorefrontReuseSeconds(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env.ALICE_STOREFRONT_REUSE_S;
+  if (!raw || !raw.trim()) return 0;
+  const parsed = Number(raw.trim());
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
 export function trimPlainText(raw: string, maxChars: number): string {
@@ -152,21 +171,17 @@ function trimStorefrontItem(item: Item): Item {
   };
 }
 
-function mergeInterleavedItems(lists: Item[][], maxItems: number): Item[] {
+function dedupeItems(primary: Item[], extra: Item[], maxItems: number): Item[] {
   const seen = new Set<string>();
   const out: Item[] = [];
-  const maxLen = lists.reduce((acc, list) => Math.max(acc, list.length), 0);
-
-  for (let i = 0; i < maxLen && out.length < maxItems; i += 1) {
-    for (const list of lists) {
-      const item = list[i];
+  for (const list of [primary, extra]) {
+    for (const item of list) {
       if (!item || typeof item.id !== 'string' || !item.id || seen.has(item.id)) continue;
       seen.add(item.id);
       out.push(trimStorefrontItem(item));
-      if (out.length >= maxItems) break;
+      if (out.length >= maxItems) return out;
     }
   }
-
   return out;
 }
 
@@ -174,120 +189,252 @@ export function isValidShopifyGid(id: string): boolean {
   return typeof id === 'string' && id.length <= 200 && SHOPIFY_GID_RE.test(id);
 }
 
-export async function storefront(
-  gender: Gender,
+interface InFlightBuild {
+  promise: Promise<StorefrontResult>;
+  joiners: number;
+}
+
+interface ReuseEntry {
+  t: number;
+  result: StorefrontResult;
+}
+
+export interface StorefrontCallOpts {
+  budgetMs?: number;
+}
+
+export function createStorefront(
   deps?: StorefrontDeps,
-): Promise<StorefrontResult> {
-  const now = deps?.now ?? (() => Date.now());
-  const t0 = now();
-  const searchMixedFn = deps?.searchMixed ?? defaultSearchMixed;
-  const searchFn = deps?.search ?? defaultSearch;
-  const budgetMs = deps?.budgetMs ?? DEFAULT_STOREFRONT_BUDGET_MS;
-  const perSearchBudgetMs = deps?.perSearchBudgetMs ?? DEFAULT_PER_SEARCH_BUDGET_MS;
+): (gender: Gender, callOpts?: StorefrontCallOpts) => Promise<StorefrontResult> {
+  const inFlight = new Map<Gender, InFlightBuild>();
+  const reuseCache = new Map<Gender, ReuseEntry>();
 
-  const rails = buildRailSpecs(gender);
+  async function buildDepartment(
+    gender: Gender,
+    flight: InFlightBuild,
+    budgetMsOverride?: number,
+  ): Promise<StorefrontResult> {
+    const now = deps?.now ?? (() => Date.now());
+    const t0 = now();
+    const searchFn = deps?.search ?? defaultSearch;
+    const budgetMs = budgetMsOverride ?? deps?.budgetMs ?? DEFAULT_STOREFRONT_BUDGET_MS;
+    const perSearchBudgetMs = deps?.perSearchBudgetMs ?? DEFAULT_PER_SEARCH_BUDGET_MS;
 
-  // Track every individual query so we can return any rail whose work completed by budgetMs.
-  interface RailState {
-    spec: RailSpec;
-    results: Array<Item[] | null>;
-    settledCount: number;
-  }
+    const rails = buildRailSpecs(gender);
+    let searches = 0;
+    let deadlinePassed = false;
 
-  const states: RailState[] = rails.map((spec) => ({
-    spec,
-    results: spec.queries.map(() => null),
-    settledCount: 0,
-  }));
+    interface RailState {
+      spec: RailSpec;
+      items: Item[] | null;
+      settled: boolean;
+    }
 
-  const allQueryPromises: Promise<void>[] = [];
+    const states: RailState[] = rails.map((spec) => ({
+      spec,
+      items: null,
+      settled: false,
+    }));
 
-  for (const railState of states) {
-    const { spec } = railState;
-    spec.queries.forEach((query, qIdx) => {
-      const runOne = async (): Promise<void> => {
-        let perTimer: ReturnType<typeof setTimeout> | undefined;
-        try {
-          const callPromise =
-            spec.kind === 'store' && spec.shop
-              ? searchFn(query, gender, { shops: [spec.shop], limit: RAIL_LIMIT })
-              : searchMixedFn(query, gender, { limit: RAIL_LIMIT });
+    const runBoundedSearch = async (query: string, shops: string[]): Promise<Item[]> => {
+      searches += 1;
+      let perTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const callPromise = searchFn(query, gender, { shops, limit: RAIL_LIMIT });
+        callPromise.catch(() => {});
 
-          callPromise.catch(() => {});
-
-          const timeoutPromise = new Promise<null>((resolve) => {
-            perTimer = setTimeout(() => resolve(null), perSearchBudgetMs);
-            if (typeof perTimer.unref === 'function') {
-              perTimer.unref();
-            }
-          });
-
-          const res = await Promise.race([callPromise, timeoutPromise]);
-          railState.results[qIdx] = res && Array.isArray(res.items) ? res.items : [];
-        } catch {
-          railState.results[qIdx] = [];
-        } finally {
-          if (perTimer !== undefined) {
-            clearTimeout(perTimer);
+        const timeoutPromise = new Promise<null>((resolve) => {
+          perTimer = setTimeout(() => resolve(null), perSearchBudgetMs);
+          if (typeof perTimer.unref === 'function') {
+            perTimer.unref();
           }
-          railState.settledCount += 1;
+        });
+
+        const res = await Promise.race([callPromise, timeoutPromise]);
+        return res && Array.isArray(res.items) ? res.items : [];
+      } catch {
+        return [];
+      } finally {
+        if (perTimer !== undefined) {
+          clearTimeout(perTimer);
         }
-      };
+      }
+    };
 
-      allQueryPromises.push(runOne());
-    });
-  }
-
-  let budgetTimer: ReturnType<typeof setTimeout> | undefined;
-  let timedOut = false;
-
-  try {
-    const allDone = Promise.all(allQueryPromises).then(() => 'done' as const);
-    const budgetPromise = new Promise<'timeout'>((resolve) => {
-      budgetTimer = setTimeout(() => resolve('timeout'), budgetMs);
-      if (typeof budgetTimer.unref === 'function') {
-        budgetTimer.unref();
+    const allRailPromises = states.map(async (railState) => {
+      const { spec } = railState;
+      try {
+        if (spec.kind === 'store' && spec.shop) {
+          const rawItems = await runBoundedSearch(spec.query, [spec.shop]);
+          railState.items = dedupeItems(rawItems, [], RAIL_LIMIT);
+        } else {
+          // One plain search restricted to OTHER_SITES (cleaner photos; Fashion Nova has its own rail).
+          const primaryRaw = await runBoundedSearch(spec.query, OTHER_SITES);
+          let merged = dedupeItems(primaryRaw, [], RAIL_LIMIT);
+          // Only top up from ALL_SITES if this rail came back thin (< 4 items) and budget remains.
+          if (merged.length < THIN_RAIL_THRESHOLD && !deadlinePassed) {
+            const topUpRaw = await runBoundedSearch(spec.query, ALL_SITES);
+            merged = dedupeItems(primaryRaw, topUpRaw, RAIL_LIMIT);
+          }
+          railState.items = merged;
+        }
+      } catch {
+        railState.items = [];
+      } finally {
+        railState.settled = true;
       }
     });
 
-    const winner = await Promise.race([allDone, budgetPromise]);
-    timedOut = winner === 'timeout';
-  } finally {
-    if (budgetTimer !== undefined) {
-      clearTimeout(budgetTimer);
-    }
-  }
+    let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
 
-  const sections: StorefrontSection[] = [];
-  let anySectionDropped = false;
-
-  for (const railState of states) {
-    const readyLists = railState.results.filter((list): list is Item[] => list !== null);
-    const fullySettled = railState.settledCount === railState.spec.queries.length;
-
-    if (!fullySettled) {
-      anySectionDropped = true;
-    }
-
-    if (readyLists.length === 0) {
-      continue;
-    }
-
-    const items = mergeInterleavedItems(readyLists, RAIL_LIMIT);
-    if (items.length > 0) {
-      sections.push({
-        id: railState.spec.id,
-        title: railState.spec.title,
-        items,
+    try {
+      const allDone = Promise.all(allRailPromises).then(() => 'done' as const);
+      const budgetPromise = new Promise<'timeout'>((resolve) => {
+        budgetTimer = setTimeout(() => {
+          deadlinePassed = true;
+          resolve('timeout');
+        }, budgetMs);
+        if (typeof budgetTimer.unref === 'function') {
+          budgetTimer.unref();
+        }
       });
+
+      const winner = await Promise.race([allDone, budgetPromise]);
+      timedOut = winner === 'timeout';
+      if (timedOut) {
+        deadlinePassed = true;
+      }
+    } finally {
+      if (budgetTimer !== undefined) {
+        clearTimeout(budgetTimer);
+      }
     }
+
+    const sections: StorefrontSection[] = [];
+    let anySectionDropped = false;
+
+    for (const railState of states) {
+      if (!railState.settled) {
+        anySectionDropped = true;
+      }
+      if (railState.items && railState.items.length > 0) {
+        sections.push({
+          id: railState.spec.id,
+          title: railState.spec.title,
+          items: railState.items,
+        });
+      }
+    }
+
+    const ms = Math.max(0, now() - t0);
+    const wasShared = flight.joiners > 0;
+    console.log(
+      `[store] storefront ${gender} searches=${searches} shared=${wasShared} ms=${ms}`,
+    );
+
+    const baseResult: StorefrontResult =
+      timedOut && anySectionDropped
+        ? {
+            department: gender,
+            sections,
+            ms,
+            storefront: { searches, shared: false },
+            partial: true,
+          }
+        : {
+            department: gender,
+            sections,
+            ms,
+            storefront: { searches, shared: false },
+          };
+
+    return baseResult;
   }
 
-  const ms = Math.max(0, now() - t0);
-  if (timedOut && anySectionDropped) {
-    return { department: gender, sections, ms, partial: true };
+  return async function loadStorefront(
+    gender: Gender,
+    callOpts?: StorefrontCallOpts,
+  ): Promise<StorefrontResult> {
+    const now = deps?.now ?? (() => Date.now());
+    const env = deps?.env ?? process.env;
+    const reuseS = getStorefrontReuseSeconds(env);
+
+    // 1. Optional short reuse (OFF by default when ALICE_STOREFRONT_REUSE_S is 0/unset).
+    if (reuseS > 0) {
+      const cached = reuseCache.get(gender);
+      if (cached && now() - cached.t < reuseS * 1000) {
+        console.log(`[store] storefront ${gender} searches=0 shared=true ms=0`);
+        return {
+          ...cached.result,
+          ms: 0,
+          storefront: { searches: 0, shared: true },
+        };
+      }
+      if (cached) {
+        reuseCache.delete(gender);
+      }
+    } else if (reuseCache.size > 0) {
+      reuseCache.clear();
+    }
+
+    // 2. In-flight sharing: await the active build for this department instead of starting another.
+    const existing = inFlight.get(gender);
+    if (existing) {
+      existing.joiners += 1;
+      const waitStart = now();
+      const base = await existing.promise;
+      const waitMs = Math.max(0, now() - waitStart);
+      return {
+        ...base,
+        ms: waitMs,
+        storefront: { searches: 0, shared: true },
+      };
+    }
+
+    const flight: InFlightBuild = {
+      promise: null as unknown as Promise<StorefrontResult>,
+      joiners: 0,
+    };
+
+    const runPromise = buildDepartment(gender, flight, callOpts?.budgetMs).finally(() => {
+      if (inFlight.get(gender) === flight) {
+        inFlight.delete(gender);
+      }
+    });
+    flight.promise = runPromise;
+    inFlight.set(gender, flight);
+
+    const result = await runPromise;
+
+    // Only keep a finished result if optional reuse is explicitly enabled (> 0).
+    if (getStorefrontReuseSeconds(deps?.env ?? process.env) > 0 && result.sections.length > 0) {
+      reuseCache.set(gender, { t: now(), result });
+    }
+
+    return result;
+  };
+}
+
+const defaultStorefrontLoader = createStorefront();
+const loaderByDeps = new WeakMap<
+  StorefrontDeps,
+  (gender: Gender, callOpts?: StorefrontCallOpts) => Promise<StorefrontResult>
+>();
+
+export function storefront(
+  gender: Gender,
+  deps?: StorefrontDeps,
+): Promise<StorefrontResult> {
+  if (!deps) {
+    return defaultStorefrontLoader(gender);
   }
-  return { department: gender, sections, ms };
+  let loader = loaderByDeps.get(deps);
+  if (!loader) {
+    loader = createStorefront(deps);
+    loaderByDeps.set(deps, loader);
+  }
+  return loader(gender);
 }
 
 function resolveStoreFromDetail(detail: ProductDetail): { store: string; store_domain: string } {

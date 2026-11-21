@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { Gender, Item, SearchResult } from '../src/types.ts';
 import type { ProductDetail } from '../src/store/catalog.ts';
+import { ALL_SITES, OTHER_SITES } from '../src/store/stores.ts';
 import {
   buildProductPayload,
+  createStorefront,
   extractDetailBullets,
   isValidShopifyGid,
   storefront,
@@ -29,69 +31,53 @@ function makeItem(id: string, overrides: Partial<Item> = {}): Item {
   };
 }
 
-describe('storefront() orchestration', () => {
-  it('builds 6 category rails + 4 store rails, interleaves & deduplicates, trims description & clears variants_by_size, and preserves URLs', async () => {
-    const sharedItem = makeItem('shared-1', {
-      department: 'men',
-      url: 'https://www.stevemadden.com/products/shared-1?variant=99&_gsid=keepme&utm_source=shopify&utm_medium=catalog',
-    });
+function makeItems(prefix: string, count: number, department: Gender): Item[] {
+  return Array.from({ length: count }, (_, i) =>
+    makeItem(`${prefix}-${i + 1}`, { department }),
+  );
+}
 
-    const fakeSearchMixed = async (
-      query: string,
-      gender: Gender,
-    ): Promise<SearchResult> => {
-      if (query === "men's shirt") {
-        return {
-          items: [
-            makeItem('shirt-1', { department: gender }),
-            sharedItem,
-            makeItem('shirt-2', { department: gender }),
-          ],
-          source: 'live',
-          ms: 5,
-        };
-      }
-      if (query === "men's knit sweater") {
-        return {
-          items: [
-            makeItem('knit-1', { department: gender }),
-            sharedItem,
-            makeItem('knit-2', { department: gender }),
-          ],
-          source: 'live',
-          ms: 5,
-        };
-      }
-      return {
-        items: [makeItem(`cat-${query.replace(/\W+/g, '-')}`, { department: gender })],
-        source: 'live',
-        ms: 5,
-      };
-    };
+describe('storefront() orchestration', () => {
+  it('makes exactly 10 search calls for a full load (6 OTHER_SITES category rails + 4 store rails), trims descriptions, clears variants_by_size, and preserves URLs', async () => {
+    const calls: Array<{ query: string; gender: Gender; shops?: string[]; limit?: number }> = [];
 
     const fakeSearch = async (
       query: string,
       gender: Gender,
-      opts?: { shops?: string[] },
+      opts?: { shops?: string[]; limit?: number },
     ): Promise<SearchResult> => {
-      const shop = opts?.shops?.[0] ?? 'unknown';
-      assert.equal(query, "men's clothing");
+      calls.push({ query, gender, shops: opts?.shops, limit: opts?.limit });
       return {
-        items: [makeItem(`store-${shop}`, { department: gender })],
+        items: makeItems(`${query.replace(/\W+/g, '-')}-${opts?.shops?.length ?? 0}`, 5, gender),
         source: 'live',
         ms: 5,
       };
     };
 
-    const res = await storefront('men', {
-      searchMixed: fakeSearchMixed,
-      search: fakeSearch,
-    });
+    const res = await storefront('men', { search: fakeSearch, env: {} });
 
+    assert.equal(calls.length, 10, `expected exactly 10 search calls, got ${calls.length}`);
     assert.equal(res.department, 'men');
     assert.equal(res.partial, undefined);
+    assert.deepEqual(res.storefront, { searches: 10, shared: false });
     assert.equal(typeof res.ms, 'number');
     assert.equal(res.sections.length, 10);
+
+    // First 6 calls are category rails restricted to OTHER_SITES
+    const catCalls = calls.filter((c) => c.query !== "men's clothing");
+    assert.equal(catCalls.length, 6);
+    for (const c of catCalls) {
+      assert.deepEqual(c.shops, OTHER_SITES);
+      assert.equal(c.limit, 8);
+    }
+
+    // Remaining 4 calls are per-store rails
+    const storeCalls = calls.filter((c) => c.query === "men's clothing");
+    assert.equal(storeCalls.length, 4);
+    assert.deepEqual(
+      storeCalls.map((c) => c.shops?.[0]),
+      ['everlane.com', 'stevemadden.com', 'kith.com', 'fashionnova.com'],
+    );
 
     const titles = res.sections.map((s) => s.title);
     for (const title of titles) {
@@ -102,31 +88,158 @@ describe('storefront() orchestration', () => {
     assert.ok(titles.includes('From Kith'));
     assert.ok(titles.includes('From Fashion Nova'));
 
-    const shirtsRail = res.sections.find((s) => s.id === 'shirts-knits');
-    assert.ok(shirtsRail);
-    // Interleaved [shirt-1, knit-1, shared-1, shirt-2, knit-2] with duplicate shared-1 removed
-    assert.deepEqual(
-      shirtsRail.items.map((it) => it.id),
-      ['shirt-1', 'knit-1', 'shared-1', 'shirt-2', 'knit-2'],
-    );
+    const sample = res.sections[0].items[0];
+    assert.ok(sample.url.includes('_gsid=abc123&utm_source=shopify&utm_medium=catalog'));
+    assert.deepEqual(sample.variants_by_size, {});
+    assert.ok(sample.description.length <= 160 && sample.description.length > 0);
+  });
 
-    const returnedShared = shirtsRail.items.find((it) => it.id === 'shared-1');
-    assert.ok(returnedShared);
-    assert.equal(returnedShared.url, sharedItem.url);
-    assert.deepEqual(returnedShared.variants_by_size, {});
-    assert.ok(returnedShared.description.length <= 160);
-    assert.ok(returnedShared.description.length > 0);
+  it('tops up from ALL_SITES with exactly one extra call only for a thin category rail (< 4 items) and deduplicates', async () => {
+    const calls: Array<{ query: string; shops?: string[] }> = [];
+
+    const fakeSearch = async (
+      query: string,
+      gender: Gender,
+      opts?: { shops?: string[] },
+    ): Promise<SearchResult> => {
+      calls.push({ query, shops: opts?.shops });
+      if (query === "women's bag") {
+        if (opts?.shops === OTHER_SITES) {
+          // Thin rail: only 2 items from OTHER_SITES
+          return {
+            items: [
+              makeItem('bag-shared', { department: gender }),
+              makeItem('bag-2', { department: gender }),
+            ],
+            source: 'live',
+            ms: 5,
+          };
+        }
+        // Top-up call from ALL_SITES with 1 duplicate and 4 new items
+        return {
+          items: [
+            makeItem('bag-shared', { department: gender }),
+            makeItem('bag-3', { department: gender }),
+            makeItem('bag-4', { department: gender }),
+            makeItem('bag-5', { department: gender }),
+            makeItem('bag-6', { department: gender }),
+          ],
+          source: 'live',
+          ms: 5,
+        };
+      }
+      // All other rails have >= 4 items so no top-up should happen
+      return {
+        items: makeItems(query.replace(/\W+/g, '-'), 4, gender),
+        source: 'live',
+        ms: 5,
+      };
+    };
+
+    const res = await storefront('women', { search: fakeSearch, env: {} });
+
+    assert.equal(calls.length, 11, `expected 10 base + 1 thin top-up = 11 calls, got ${calls.length}`);
+    assert.deepEqual(res.storefront, { searches: 11, shared: false });
+
+    const bagCalls = calls.filter((c) => c.query === "women's bag");
+    assert.equal(bagCalls.length, 2);
+    assert.deepEqual(bagCalls[0].shops, OTHER_SITES);
+    assert.deepEqual(bagCalls[1].shops, ALL_SITES);
+
+    const bagSection = res.sections.find((s) => s.id === 'bags');
+    assert.ok(bagSection);
+    assert.deepEqual(
+      bagSection.items.map((i) => i.id),
+      ['bag-shared', 'bag-2', 'bag-3', 'bag-4', 'bag-5', 'bag-6'],
+    );
+  });
+
+  it('shares a single in-flight build across concurrent requests for the same department (10 calls, not 20)', async () => {
+    let callCount = 0;
+
+    const fakeSearch = async (query: string, gender: Gender): Promise<SearchResult> => {
+      callCount += 1;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return {
+        items: makeItems(`${query.replace(/\W+/g, '-')}`, 4, gender),
+        source: 'live',
+        ms: 40,
+      };
+    };
+
+    const loader = createStorefront({ search: fakeSearch, env: {} });
+    const [first, second] = await Promise.all([loader('women'), loader('women')]);
+
+    assert.equal(callCount, 10, `concurrent requests must share 10 calls, got ${callCount}`);
+    assert.deepEqual(first.storefront, { searches: 10, shared: false });
+    assert.deepEqual(second.storefront, { searches: 0, shared: true });
+    assert.equal(first.sections.length, 10);
+    assert.equal(second.sections.length, 10);
+
+    // After settling, with ALICE_STOREFRONT_REUSE_S unset (default 0), a third request runs fresh
+    const third = await loader('women');
+    assert.equal(callCount, 20, `reuse off by default must run 10 fresh calls, got ${callCount}`);
+    assert.deepEqual(third.storefront, { searches: 10, shared: false });
+  });
+
+  it('reuses a finished result only when ALICE_STOREFRONT_REUSE_S > 0 and expires on the injected clock', async () => {
+    let nowMs = 1_000_000;
+    let callCount = 0;
+    const env: Record<string, string | undefined> = { ALICE_STOREFRONT_REUSE_S: '30' };
+
+    const fakeSearch = async (query: string, gender: Gender): Promise<SearchResult> => {
+      callCount += 1;
+      return {
+        items: makeItems(query.replace(/\W+/g, '-'), 4, gender),
+        source: 'live',
+        ms: 5,
+      };
+    };
+
+    const loader = createStorefront({
+      search: fakeSearch,
+      now: () => nowMs,
+      env,
+    });
+
+    const first = await loader('men');
+    assert.equal(callCount, 10);
+    assert.deepEqual(first.storefront, { searches: 10, shared: false });
+
+    // Within 30s reuse window -> 0 new searches
+    nowMs += 15_000;
+    const reused = await loader('men');
+    assert.equal(callCount, 10);
+    assert.deepEqual(reused.storefront, { searches: 0, shared: true });
+    assert.equal(reused.sections.length, 10);
+
+    // Different department still fetches independently
+    const womenRes = await loader('women');
+    assert.equal(callCount, 20);
+    assert.deepEqual(womenRes.storefront, { searches: 10, shared: false });
+
+    // Past 30s window -> fetches men live again
+    nowMs += 20_000;
+    const refreshed = await loader('men');
+    assert.equal(callCount, 30);
+    assert.deepEqual(refreshed.storefront, { searches: 10, shared: false });
+
+    // Switching env back to 0 disables reuse immediately
+    env.ALICE_STOREFRONT_REUSE_S = '0';
+    const noReuse = await loader('men');
+    assert.equal(callCount, 40);
+    assert.deepEqual(noReuse.storefront, { searches: 10, shared: false });
   });
 
   it('drops empty sections without marking partial and returns empty sections when all fail', async () => {
     const partialEmpty = await storefront('women', {
-      searchMixed: async (query) => {
-        if (query === "women's dress") {
-          return { items: [makeItem('dress-1')], source: 'live', ms: 3 };
+      env: {},
+      search: async (query, gender, opts) => {
+        if (query === "women's dress" && opts?.shops === OTHER_SITES) {
+          return { items: makeItems('dress', 4, gender), source: 'live', ms: 3 };
         }
         return { items: [], source: 'empty', ms: 3 };
       },
-      search: async () => ({ items: [], source: 'empty', ms: 3 }),
     });
 
     assert.equal(partialEmpty.department, 'women');
@@ -135,9 +248,7 @@ describe('storefront() orchestration', () => {
     assert.equal(partialEmpty.sections[0].id, 'dresses');
 
     const allFailed = await storefront('women', {
-      searchMixed: async () => {
-        throw new Error('boom');
-      },
+      env: {},
       search: async () => {
         throw new Error('boom');
       },
@@ -151,19 +262,16 @@ describe('storefront() orchestration', () => {
     const t0 = Date.now();
     const res = await storefront('women', {
       budgetMs: 120,
-      searchMixed: async (query) => {
+      env: {},
+      search: async (query, gender, opts) => {
         if (query === "women's dress") {
-          return { items: [makeItem('fast-dress')], source: 'live', ms: 5 };
+          return { items: makeItems('fast-dress', 4, gender), source: 'live', ms: 5 };
+        }
+        if (opts?.shops?.length === 1 && opts.shops[0] === 'everlane.com') {
+          return { items: makeItems('fast-everlane', 4, gender), source: 'live', ms: 5 };
         }
         await new Promise((resolve) => setTimeout(resolve, 5000));
         return { items: [makeItem('late')], source: 'live', ms: 5000 };
-      },
-      search: async (_q, _g, opts) => {
-        if (opts?.shops?.[0] === 'everlane.com') {
-          return { items: [makeItem('fast-everlane')], source: 'live', ms: 5 };
-        }
-        await new Promise((resolve) => setTimeout(resolve, 5000));
-        return { items: [makeItem('late-store')], source: 'live', ms: 5000 };
       },
     });
     const elapsed = Date.now() - t0;
