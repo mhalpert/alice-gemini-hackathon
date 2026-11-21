@@ -22,6 +22,7 @@ import {
   buildAutomaticActivityDetection,
   loadConfig,
   type NoiseCancelMode,
+  resolveTavusConfig,
 } from './config.ts';
 import {
   AppContextSender,
@@ -37,6 +38,11 @@ import { createToolResultNudger } from './nudge.ts';
 import { createPageSender } from './page.ts';
 import { ALICE_SYSTEM_PROMPT, GREETING_INSTRUCTIONS } from './prompt.ts';
 import { createCallStateStore } from './state.ts';
+import {
+  endStaleTavusConversations,
+  startTavusAvatar,
+  type TavusAvatarHandle,
+} from './tavus.ts';
 import { createAgentTools } from './tools.ts';
 import { createVisionController } from './vision.ts';
 
@@ -277,6 +283,7 @@ export interface StartableSessionLike {
     agent: voice.Agent;
     room: JobContext['room'];
     inputOptions?: { noiseCancellation?: NoiseCancellationOptions };
+    outputOptions?: { audioEnabled?: boolean };
   }) => Promise<void>;
 }
 
@@ -286,15 +293,18 @@ export async function startSessionWithNoiseCancel(params: {
   agent: voice.Agent;
   room: JobContext['room'];
   requestedMode: NoiseCancelMode;
+  outputOptions?: { audioEnabled?: boolean };
   loadModule?: () => Promise<NoiseCancelModuleLike | null>;
   log?: (room: string, ev: string, data?: Record<string, unknown>) => void;
 }): Promise<{ mode: NoiseCancelMode; requested: NoiseCancelMode }> {
-  const { roomName, session, agent, room, requestedMode } = params;
+  const { roomName, session, agent, room, requestedMode, outputOptions } = params;
   const logFn = params.log ?? calllog;
   const resolved = await resolveNoiseCancellation(roomName, requestedMode, {
     loadModule: params.loadModule,
     log: logFn,
   });
+
+  const baseOutput = outputOptions ? { outputOptions } : {};
 
   let activeMode: NoiseCancelMode = resolved.mode;
   if (resolved.noiseCancellation) {
@@ -305,6 +315,7 @@ export async function startSessionWithNoiseCancel(params: {
         inputOptions: {
           noiseCancellation: resolved.noiseCancellation,
         },
+        ...baseOutput,
       });
     } catch (err) {
       logFn(roomName, 'session_error', {
@@ -316,12 +327,14 @@ export async function startSessionWithNoiseCancel(params: {
       await session.start({
         agent,
         room,
+        ...baseOutput,
       });
     }
   } else {
     await session.start({
       agent,
       room,
+      ...baseOutput,
     });
   }
 
@@ -348,9 +361,14 @@ export default defineAgent({
       });
     });
 
-    if (config.avatar !== 'none') {
-      console.warn(`[alice] AVATAR="${config.avatar}" is not supported yet; running with avatar=none.`);
-    }
+    const tavusConfig = resolveTavusConfig(config);
+    const staleTavusCleanup = tavusConfig.enabled
+      ? endStaleTavusConversations({
+          roomName,
+          apiKey: tavusConfig.apiKey!,
+          log: calllog,
+        })
+      : null;
 
     const onParticipantDisconnected = (participant: RemoteParticipant) => {
       calllog(roomName, 'participant_left', { identity: participant.identity });
@@ -522,6 +540,8 @@ export default defineAgent({
     });
 
     let sessionStarted = false;
+    let activeTavusAvatar: TavusAvatarHandle | null = null;
+    let cleanupTavusWatcher: (() => void) | undefined;
 
     session.on(voice.AgentSessionEventTypes.Close, (ev) => {
       if (!sessionStarted) {
@@ -533,6 +553,8 @@ export default defineAgent({
       });
       toolAbort.abort();
       resultNudger.dispose();
+      cleanupTavusWatcher?.();
+      void activeTavusAvatar?.shutdown().catch(() => {});
       void vision?.close().catch(() => {});
       appContext.dispose();
     });
@@ -542,6 +564,8 @@ export default defineAgent({
       toolAbort.abort();
       resultNudger.dispose();
       cleanupCameraWatcher?.();
+      cleanupTavusWatcher?.();
+      await activeTavusAvatar?.shutdown();
       await vision?.close();
       appContext.dispose();
       ctx.room.off(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
@@ -566,14 +590,30 @@ export default defineAgent({
       attributes: shopper.attributes,
     });
 
+    const tavusAvatar = await startTavusAvatar({
+      roomName,
+      config,
+      session,
+      room: ctx.room,
+      staleCleanupPromise: staleTavusCleanup,
+      log: calllog,
+    });
+    activeTavusAvatar = tavusAvatar;
+
     await startSessionWithNoiseCancel({
       roomName,
       session,
       agent,
       room: ctx.room,
       requestedMode: config.noiseCancel,
+      outputOptions: tavusAvatar.roomOutputOptions,
     });
     sessionStarted = true;
+
+    cleanupTavusWatcher = tavusAvatar.attachDisconnectFallback({
+      room: ctx.room,
+      session,
+    });
 
     // Fallback check in case session creation bypassed model.session.
     const liveRtSession =
@@ -598,7 +638,8 @@ export default defineAgent({
     });
 
     calllog(roomName, 'session_started', {
-      face: false,
+      face: tavusAvatar.startedWithFace,
+      ...(tavusAvatar.startedWithFace ? { avatar_identity: tavusAvatar.avatarIdentity } : {}),
       vision: config.vision,
       model: config.modelLive,
       voice: config.geminiVoice,

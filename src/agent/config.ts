@@ -1,3 +1,4 @@
+export type AvatarMode = 'tavus' | 'none';
 export type NoiseCancelMode = 'bvc' | 'nc' | 'off';
 export type RoomMode = 'noisy' | 'quiet';
 export type VadStartSensitivity =
@@ -23,12 +24,24 @@ export interface AgentConfig {
   modelLive: string;
   geminiVoice: string;
   language: string;
-  avatar: string;
+  avatar: AvatarMode;
+  tavusApiKey: string | undefined;
+  tavusFaceId: string | undefined;
+  tavusPersonaId: string | undefined;
   vision: boolean;
   visionFrameMs: number;
   noiseCancel: NoiseCancelMode;
   roomMode: RoomMode;
   vad: VadConfig;
+}
+
+export interface ResolvedTavusConfig {
+  enabled: boolean;
+  requested: boolean;
+  missingReason?: string;
+  apiKey?: string;
+  faceId?: string;
+  personaId?: string;
 }
 
 export const ROOM_VAD_PRESETS: Record<RoomMode, Omit<VadConfig, 'room'>> = {
@@ -72,6 +85,13 @@ function parseOptionalNonNegativeIntEnv(
   if (!/^\d+$/.test(trimmed)) return defaultValue;
   const parsed = Number.parseInt(trimmed, 10);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : defaultValue;
+}
+
+function parseAvatarMode(raw: string | undefined): AvatarMode {
+  if (raw === undefined || raw.trim() === '') return 'none';
+  const norm = raw.trim().toLowerCase();
+  if (norm === 'tavus' || norm === 'none') return norm;
+  return 'none';
 }
 
 function parseNoiseCancelMode(raw: string | undefined): NoiseCancelMode {
@@ -132,11 +152,54 @@ export function buildAutomaticActivityDetection(vad: VadConfig): {
   };
 }
 
+export function resolveTavusConfig(
+  config: Pick<AgentConfig, 'avatar' | 'tavusApiKey' | 'tavusFaceId' | 'tavusPersonaId'>,
+): ResolvedTavusConfig {
+  if (config.avatar !== 'tavus') {
+    return { enabled: false, requested: false };
+  }
+  const apiKey = config.tavusApiKey?.trim() || undefined;
+  const faceId = config.tavusFaceId?.trim() || undefined;
+  const personaId = config.tavusPersonaId?.trim() || undefined;
+
+  if (!apiKey && !faceId) {
+    return {
+      enabled: false,
+      requested: true,
+      missingReason: 'missing TAVUS_API_KEY and TAVUS_FACE_ID',
+    };
+  }
+  if (!apiKey) {
+    return {
+      enabled: false,
+      requested: true,
+      missingReason: 'missing TAVUS_API_KEY',
+    };
+  }
+  if (!faceId) {
+    return {
+      enabled: false,
+      requested: true,
+      missingReason: 'missing TAVUS_FACE_ID',
+    };
+  }
+  return {
+    enabled: true,
+    requested: true,
+    apiKey,
+    faceId,
+    ...(personaId ? { personaId } : {}),
+  };
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AgentConfig {
   const agentName = env.ALICE_AGENT_NAME?.trim() || 'alice';
   const modelLive = env.ALICE_MODEL_LIVE?.trim() || 'gemini-3.8-live';
   const geminiVoice = env.GEMINI_VOICE?.trim() || 'Aoede';
-  const avatar = env.AVATAR?.trim().toLowerCase() || 'none';
+  const avatar = parseAvatarMode(env.AVATAR);
+  const tavusApiKey = env.TAVUS_API_KEY?.trim() || undefined;
+  const tavusFaceId = env.TAVUS_FACE_ID?.trim() || undefined;
+  const tavusPersonaId = env.TAVUS_PERSONA_ID?.trim() || undefined;
   const vision = parseBoolEnv(env.VISION, true);
   const visionFrameMs = parsePositiveIntEnv(env.VISION_FRAME_MS, 1000);
   const googleApiKey = env.GOOGLE_API_KEY?.trim() || undefined;
@@ -167,6 +230,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AgentConfig {
     geminiVoice,
     language: 'en-US',
     avatar,
+    tavusApiKey,
+    tavusFaceId,
+    tavusPersonaId,
     vision,
     visionFrameMs,
     noiseCancel,
