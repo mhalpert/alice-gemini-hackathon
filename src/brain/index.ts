@@ -9,6 +9,7 @@
 //   0                  no delays (tests)
 import { readFileSync } from 'node:fs';
 import type { Brief, BuildResult, Outfit, Piece } from '../types.ts';
+import type { Critique } from './critic.ts';
 import { calllog } from '../calllog.ts';
 import { wantedColour, titleHas } from './words.ts';
 
@@ -47,7 +48,7 @@ function log(room: string | undefined, ev: string, data: Record<string, unknown>
   try { calllog(room, ev, data); } catch { /* logging must never break a build */ }
 }
 
-export interface BuildOptions { onOutfit?(outfit: Outfit, index: number): void; room?: string }
+export interface BuildOptions { onOutfit?(outfit: Outfit, index: number): void; onCritique?(number: number, critique: Critique): void; room?: string }
 
 // ALICE_BRAIN=live runs the real builder (plan + store search + pick); anything else serves the mock.
 export async function buildOutfits(brief: Brief, opts: BuildOptions = {}): Promise<BuildResult> {
