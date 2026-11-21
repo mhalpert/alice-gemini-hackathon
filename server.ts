@@ -211,6 +211,14 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
   const rateBuckets = new Map<string, number[]>();
   const logSink = opts.calllog ?? defaultCalllog;
 
+  function logServerEvent(ev: string, data?: Record<string, unknown>): void {
+    try {
+      logSink('_server', ev, data);
+    } catch {
+      // calllog must never affect the response
+    }
+  }
+
   function checkRateLimit(remoteAddr: string): { allowed: boolean; retryAfterS: number } {
     const now = Date.now();
     const cutoff = now - RATE_LIMIT_WINDOW_MS;
@@ -317,6 +325,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         const remoteAddr = req.socket.remoteAddress ?? 'unknown';
         const limit = checkRateLimit(remoteAddr);
         if (!limit.allowed) {
+          logServerEvent('token_refused', { reason: 'slow_down' });
           sendJson(
             res,
             429,
@@ -342,6 +351,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         const expectedPasscode = env.ALICE_PASSCODE;
         if (expectedPasscode) {
           if (!suppliedPasscode) {
+            logServerEvent('token_refused', { reason: 'passcode_required' });
             sendJson(
               res,
               401,
@@ -351,6 +361,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
             return;
           }
           if (!timingSafeMatches(suppliedPasscode, expectedPasscode)) {
+            logServerEvent('token_refused', { reason: 'bad_passcode' });
             sendJson(
               res,
               401,
@@ -365,6 +376,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         const apiKey = env.LIVEKIT_API_KEY;
         const apiSecret = env.LIVEKIT_API_SECRET;
         if (!url || !apiKey || !apiSecret) {
+          logServerEvent('token_refused', { reason: 'livekit_not_configured' });
           sendJson(
             res,
             503,
@@ -398,11 +410,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
 
         const token = await at.toJwt();
         logExtra = `room=${room}`;
-        try {
-          logSink(room, 'token', { identity, agent });
-        } catch {
-          // calllog must never affect the response
-        }
+        logServerEvent('token', { room, identity, agent });
 
         sendJson(
           res,
