@@ -7,7 +7,9 @@ import { recordCost } from '../ledger.ts';
 import { getProduct } from '../store/catalog.ts';
 import type { Item } from '../types.ts';
 import {
+  classifyShotSource,
   collectImageUrls,
+  cropRawRgb,
   decideCrop,
   parsePickReply,
   publicUrl,
@@ -37,6 +39,8 @@ const DISK_CACHE_MAX_AGE_MS = 6 * 3600 * 1000;
 const DOWNLOAD_TIMEOUT_MS = 5000;
 const PICKER_TIMEOUT_MS = 4000;
 const MAX_PICKER_IMAGES = 6;
+const CANDIDATE_FETCH_WIDTH = 800;
+const THUMB_SIZE = 256;
 
 const shotCache = new Map<string, ChildShotResult>();
 const shotInFlight = new Map<string, Promise<ChildShotResult>>();
@@ -75,14 +79,17 @@ export async function fetchImageBuffer(url: string, timeoutMs = DOWNLOAD_TIMEOUT
   return Buffer.from(arr);
 }
 
-async function downloadThumb(origUrl: string): Promise<ThumbEntry | null> {
+async function downloadThumb(
+  origUrl: string,
+  timeoutMs = DOWNLOAD_TIMEOUT_MS,
+): Promise<ThumbEntry | null> {
   try {
-    const rawBuf = await fetchImageBuffer(withWidth(origUrl, 384), DOWNLOAD_TIMEOUT_MS);
+    const rawBuf = await fetchImageBuffer(withWidth(origUrl, CANDIDATE_FETCH_WIDTH), timeoutMs);
     const jpegBuf = await sharp(rawBuf)
       .rotate()
-      .resize(384, 384, { fit: 'inside', withoutEnlargement: true })
+      .resize(THUMB_SIZE, THUMB_SIZE, { fit: 'inside', withoutEnlargement: true })
       .flatten({ background: '#ffffff' })
-      .jpeg({ quality: 80 })
+      .jpeg({ quality: 70 })
       .toBuffer();
     return { origUrl, jpegB64: jpegBuf.toString('base64'), rawBuf };
   } catch {
@@ -148,7 +155,7 @@ async function computeProductShot(item: Item, slot: string): Promise<ChildShotRe
     // Not on disk yet
   }
 
-  // 1-2. Run getProduct, Image 0 thumbnail, and speculative Image 0 1000px download concurrently
+  // 1-2. Run getProduct and Image 0 download (800px raw + 256px picker thumb) concurrently
   const tMedia = Date.now();
   const mediaPromise = getProduct(item.variant_id)
     .catch(() => null)
@@ -158,10 +165,6 @@ async function computeProductShot(item: Item, slot: string): Promise<ChildShotRe
     entry,
     ms: Date.now() - tThumb0,
   }));
-  const specItem0FullPromise: Promise<Buffer | null> = fetchImageBuffer(
-    withWidth(item.image, 1000),
-    DOWNLOAD_TIMEOUT_MS,
-  ).catch(() => null);
 
   const [{ detail, ms: mediaMs }, { entry: thumb0, ms: thumb0Ms }] = await Promise.all([
     mediaPromise,
@@ -174,11 +177,13 @@ async function computeProductShot(item: Item, slot: string): Promise<ChildShotRe
     return fallback;
   }
 
-  // 3. Download remaining 384 px thumbnails in parallel
+  // 3. Download remaining candidate thumbnails (at 800 px once, resized to 256 px for picker)
   const tRestThumbs = Date.now();
   const restEntries =
     candidates.length > 1
-      ? await Promise.all(candidates.slice(1).map((origUrl) => downloadThumb(origUrl)))
+      ? await Promise.all(
+          candidates.slice(1).map((origUrl) => downloadThumb(origUrl, DOWNLOAD_TIMEOUT_MS)),
+        )
       : [];
   const thumbsMs = candidates.length > 1 ? Date.now() - tRestThumbs : thumb0Ms;
 
@@ -191,12 +196,6 @@ async function computeProductShot(item: Item, slot: string): Promise<ChildShotRe
   if (thumbs.length === 0) {
     return fallback;
   }
-
-  // Ensure speculative 1000 px download of thumbs[0] runs in parallel with Flash Lite picker
-  const specFull0Promise: Promise<Buffer | null> =
-    thumbs[0].origUrl === item.image
-      ? specItem0FullPromise
-      : fetchImageBuffer(withWidth(thumbs[0].origUrl, 1000), DOWNLOAD_TIMEOUT_MS).catch(() => null);
 
   // One Flash Lite call with consistent sequential labels Image 0..n
   let chosenIndex = 0;
@@ -252,61 +251,45 @@ async function computeProductShot(item: Item, slot: string): Promise<ChildShotRe
   }
   const pickMs = Date.now() - tPick;
 
-  // 4. Fetch chosen image at 1000 px (reusing speculative Image 0 fetch when chosenIndex === 0)
+  // 4. Reuse the already-downloaded 800 px buffer (0ms post-pick fetch!)
   const tFetch = Date.now();
   const chosen = thumbs[chosenIndex];
-  let fullBuf: Buffer | null = null;
-  if (chosenIndex === 0) {
-    fullBuf = await specFull0Promise;
-  }
-  if (!fullBuf) {
-    try {
-      fullBuf = await fetchImageBuffer(withWidth(chosen.origUrl, 1000), DOWNLOAD_TIMEOUT_MS);
-    } catch {
-      try {
-        fullBuf = await fetchImageBuffer(chosen.origUrl, DOWNLOAD_TIMEOUT_MS);
-      } catch {
-        fullBuf = chosen.rawBuf;
-      }
-    }
-  }
+  const fullBuf = chosen.rawBuf;
   const fetchMs = Date.now() - tFetch;
 
-  // 5-6. Orient, crop below chin, whiten background, fit 800x800 white square
+  // 5-6. Decode directly to raw RGB (no intermediate PNG), crop below chin, whiten background, fit 800x800 white square
   const tProcess = Date.now();
-  const orientedPng = await sharp(fullBuf)
+  const { data: decodedRgb, info: decodedInfo } = await sharp(fullBuf)
     .rotate()
     .flatten({ background: '#ffffff' })
-    .png()
-    .toBuffer();
-  const meta = await sharp(orientedPng).metadata();
-  const imgW = meta.width ?? 0;
-  const imgH = meta.height ?? 0;
-  if (imgW <= 0 || imgH <= 0) {
-    return fallback;
-  }
-
-  const crop = decideCrop(imgW, imgH, hasPerson, box2d, { chinY, slot });
-  let pipeline = sharp(orientedPng);
-  if (crop) {
-    pipeline = pipeline.extract(crop);
-  }
-
-  const { data: rawRgb, info } = await pipeline
     .removeAlpha()
     .toColourspace('srgb')
     .raw()
     .toBuffer({ resolveWithObject: true });
 
-  if (info.channels === 3) {
-    whitenBackground(rawRgb, info.width, info.height);
+  const imgW = decodedInfo.width;
+  const imgH = decodedInfo.height;
+  const channels = decodedInfo.channels;
+  if (imgW <= 0 || imgH <= 0) {
+    return fallback;
+  }
+
+  const crop = decideCrop(imgW, imgH, hasPerson, box2d, { chinY, slot });
+  const rawRgb = crop
+    ? cropRawRgb(decodedRgb, imgW, imgH, channels, crop)
+    : decodedRgb;
+  const outW = crop ? crop.width : imgW;
+  const outH = crop ? crop.height : imgH;
+
+  if (channels === 3) {
+    whitenBackground(rawRgb, outW, outH);
   }
 
   const finalBuf = await sharp(rawRgb, {
     raw: {
-      width: info.width,
-      height: info.height,
-      channels: info.channels as 1 | 2 | 3 | 4,
+      width: outW,
+      height: outH,
+      channels: channels as 1 | 2 | 3 | 4,
     },
   })
     .resize(768, 768, { fit: 'contain', background: '#ffffff' })
@@ -317,7 +300,7 @@ async function computeProductShot(item: Item, slot: string): Promise<ChildShotRe
   await writeFileAtomic(filePath, finalBuf);
   const processMs = Date.now() - tProcess;
 
-  const source: ShotSource = crop ? 'cropped' : 'product-only';
+  const source: ShotSource = classifyShotSource(hasPerson);
   const result: ChildShotResult = {
     filePath,
     url: publicUrl(name),

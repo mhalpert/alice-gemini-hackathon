@@ -819,6 +819,171 @@ describe('lookup, getProduct, and sizeVariant', () => {
     assert.equal(heelRes.ok, true);
     assert.deepEqual(sentSelected[3], [{ name: 'Size', label: '8' }]);
   });
+
+  it('Everlane Transit Chino: returns sold out without 2nd get_product when exists/available is false, and preserves trailing whitespace on Color "Olive "', async () => {
+    const baseFixture = loadFixtureJson('get_product.json');
+    const calls: Array<{ id: string; selected?: Array<{ name: string; label: string }> }> = [];
+
+    const transitOptions = [
+      {
+        name: 'Waist',
+        values: [
+          { label: '28', available: false, exists: false },
+          { label: '29', available: false, exists: false },
+          { label: '30', available: false, exists: false },
+          { label: '31', available: false, exists: false },
+          { label: '32', available: false, exists: false },
+          { label: '33', available: false, exists: false },
+          { label: '34', available: false, exists: false },
+          { label: '36', available: false, exists: false },
+          { label: '38', available: true, exists: true },
+        ],
+      },
+      {
+        name: 'Length',
+        values: [
+          { label: '28', available: false, exists: false },
+          { label: '30', available: true, exists: true },
+          { label: '32', available: true, exists: true },
+          { label: '34', available: false, exists: false },
+        ],
+      },
+      {
+        name: 'Color',
+        values: [{ label: 'Olive ', available: true, exists: true }],
+      },
+    ];
+
+    const fakeFetch: typeof fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      const cat = body.params.arguments.catalog;
+      calls.push({ id: cat.id, selected: cat.selected });
+
+      const cloned = structuredClone(baseFixture);
+      cloned.result.structuredContent.product.id = 'gid://shopify/p/transit-chino';
+      cloned.result.structuredContent.product.title = 'The Transit Chino | Olive  | Slim';
+      cloned.result.structuredContent.product.options = transitOptions;
+      cloned.result.structuredContent.product.selected = cat.selected ?? [
+        { name: 'Color', label: 'Olive ' },
+        { name: 'Waist', label: '36' },
+        { name: 'Length', label: '30' },
+      ];
+      cloned.result.structuredContent.product.variants[0].id =
+        cat.selected ? 'gid://shopify/ProductVariant/transit-38-32' : 'gid://shopify/ProductVariant/transit-38-30';
+      cloned.result.structuredContent.product.variants[0].availability.available = true;
+      return jsonResponse(cloned);
+    };
+
+    const mcp = createShopMcp({ fetch: fakeFetch });
+    const store = createStore({ mcp, saved: createSavedStore({ dir: makeTempDir() }) });
+
+    // Asking for "32" (available: false, exists: false) must NOT make a 2nd get_product call
+    const res32 = await store.sizeVariant('gid://shopify/ProductVariant/transit-38-30', '32', {
+      gender: 'men',
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(res32.ok, false);
+    assert.equal(res32.available, false);
+    assert.deepEqual(res32.sizes_available, ['38']);
+    assert.equal(res32.nearest, '38');
+    assert.equal(res32.reason, '32 is sold out (sizes left: 38)');
+
+    // Asking for "38" (when initial selected waist is different) makes 2nd call keeping Color "Olive " verbatim & Length "32" for men
+    const res38 = await store.sizeVariant('gid://shopify/ProductVariant/transit-38-30', '38', {
+      gender: 'men',
+    });
+    assert.equal(calls.length, 3);
+    assert.equal(res38.ok, true);
+    assert.equal(res38.variant_id, 'gid://shopify/ProductVariant/transit-38-32');
+    assert.deepEqual(calls[2].selected, [
+      { name: 'Color', label: 'Olive ' },
+      { name: 'Waist', label: '38' },
+      { name: 'Length', label: '32' },
+    ]);
+  });
+
+  it('sizeVariant handles EU sneakers ("12" sold out -> nearest 45, "8.5 wide" -> 42 + width note) and separate Waist+Length ("30x34" -> note when 34 unavailable)', async () => {
+    const baseFixture = loadFixtureJson('get_product.json');
+
+    const fakeFetch: typeof fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      const cat = body.params.arguments.catalog;
+      const cloned = structuredClone(baseFixture);
+
+      if (cat.id === 'gid://shopify/ProductVariant/eu-sneaker' || cat.id === 'gid://shopify/p/eu-sneaker') {
+        cloned.result.structuredContent.product.id = 'gid://shopify/p/eu-sneaker';
+        cloned.result.structuredContent.product.title = 'Kith EU Sneaker';
+        cloned.result.structuredContent.product.options = [
+          {
+            name: 'Size',
+            values: ['39', '40', '41', '42', '43', '44', '45'].map((label) => ({
+              label,
+              available: true,
+              exists: true,
+            })),
+          },
+        ];
+        cloned.result.structuredContent.product.selected = cat.selected ?? [{ name: 'Size', label: '41' }];
+        cloned.result.structuredContent.product.variants[0].id = 'gid://shopify/ProductVariant/eu-42';
+        cloned.result.structuredContent.product.variants[0].availability.available = true;
+      } else {
+        cloned.result.structuredContent.product.id = 'gid://shopify/p/perf-chino';
+        cloned.result.structuredContent.product.title = 'The Performance Chino';
+        cloned.result.structuredContent.product.options = [
+          {
+            name: 'Waist',
+            values: [
+              { label: '30', available: true, exists: true },
+              { label: '32', available: true, exists: true },
+            ],
+          },
+          {
+            name: 'Length',
+            values: [
+              { label: '28', available: true, exists: true },
+              { label: '30', available: true, exists: true },
+              { label: '32', available: true, exists: true },
+            ],
+          },
+        ];
+        cloned.result.structuredContent.product.selected = cat.selected ?? [
+          { name: 'Waist', label: '32' },
+          { name: 'Length', label: '32' },
+        ];
+        cloned.result.structuredContent.product.variants[0].id = 'gid://shopify/ProductVariant/pc-30-32';
+        cloned.result.structuredContent.product.variants[0].availability.available = true;
+      }
+      return jsonResponse(cloned);
+    };
+
+    const mcp = createShopMcp({ fetch: fakeFetch });
+    const store = createStore({ mcp, saved: createSavedStore({ dir: makeTempDir() }) });
+
+    // EU sneaker: US 12 -> EU 46 not in 39..45 -> sold out with nearest 45
+    const eu12 = await store.sizeVariant('gid://shopify/ProductVariant/eu-sneaker', '12', {
+      gender: 'men',
+    });
+    assert.equal(eu12.ok, false);
+    assert.equal(eu12.nearest, '45');
+    assert.match(eu12.reason ?? '', /EU 46.*sold out.*nearest 45/i);
+
+    // EU sneaker: US 8.5 wide -> EU 42 + width fallback note
+    const eu85w = await store.sizeVariant('gid://shopify/ProductVariant/eu-sneaker', '8.5 wide', {
+      gender: 'men',
+    });
+    assert.equal(eu85w.ok, true);
+    assert.equal(eu85w.size, '42');
+    assert.equal(eu85w.note, "wide width isn't offered; added regular 42");
+
+    // Performance Chino: "30x34" when 34 inseam isn't offered -> selects 30 + Length 32 + note
+    const ch3034 = await store.sizeVariant('gid://shopify/ProductVariant/pc-32-32', '30x34', {
+      gender: 'men',
+    });
+    assert.equal(ch3034.ok, true);
+    assert.equal(ch3034.size, '30');
+    assert.equal(ch3034.length, '32');
+    assert.equal(ch3034.note, "34 inseam isn't offered; used 32");
+  });
 });
 
 describe('cart client', () => {
@@ -985,5 +1150,76 @@ describe('cart client', () => {
         },
       },
     });
+  });
+
+  it('createCart retries once after 300ms with a NEW idempotency key on tool or transport error and extracts UCP JSON error messages', async () => {
+    const keys: string[] = [];
+    const timestamps: number[] = [];
+    let attempt = 0;
+
+    const fakeFetch: typeof fetch = async (_url, init) => {
+      attempt += 1;
+      timestamps.push(Date.now());
+      const body = JSON.parse(String(init?.body));
+      keys.push(body.params.arguments.meta['idempotency-key']);
+
+      if (attempt === 1) {
+        // First call fails with a transient transport error
+        throw new Error('ECONNRESET');
+      }
+      if (attempt === 2) {
+        // Retry succeeds!
+        return jsonResponse(loadFixtureText('create_cart.json'));
+      }
+      // Subsequent call fails both times with real UCP tool error JSON
+      return jsonResponse({
+        jsonrpc: '2.0',
+        id: body.id,
+        result: {
+          isError: true,
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                ucp: { version: '2026-08-25', status: 'error' },
+                messages: [
+                  {
+                    type: 'error',
+                    code: 'invalid',
+                    content:
+                      'The merchandise with id gid://shopify/ProductVariant/67966605459748 does not exist.',
+                    path: '$.add_items[0].product_variant_id',
+                  },
+                ],
+              }),
+            },
+          ],
+        },
+      });
+    };
+
+    const mcp = createShopMcp({ fetch: fakeFetch });
+    const store = createStore({ mcp, saved: createSavedStore({ dir: makeTempDir() }) });
+
+    // 1. Transient error -> retries once after ~300ms with a NEW idempotency key -> succeeds
+    const okRes = await store.createCart('fnova.myshopify.com', [
+      { variant_id: 'gid://shopify/ProductVariant/722039242769' },
+    ]);
+    assert.equal(okRes.error, undefined);
+    assert.ok(okRes.cart_id);
+    assert.equal(keys.length, 2);
+    assert.notEqual(keys[0], keys[1]);
+    assert.ok(timestamps[1] - timestamps[0] >= 250, `expected >=250ms retry delay, got ${timestamps[1] - timestamps[0]}ms`);
+
+    // 2. Persistent tool error -> retries once with new key, returns extracted readable error + messages[]
+    const errRes = await store.createCart('fnova.myshopify.com', [
+      { variant_id: 'gid://shopify/ProductVariant/67966605459748' },
+    ]);
+    assert.equal(keys.length, 4);
+    assert.notEqual(keys[2], keys[3]);
+    assert.equal(errRes.cart_id, null);
+    assert.match(errRes.error ?? '', /67966605459748 does not exist/);
+    assert.equal(errRes.messages.length, 1);
+    assert.equal(errRes.messages[0].path, '$.add_items[0].product_variant_id');
   });
 });

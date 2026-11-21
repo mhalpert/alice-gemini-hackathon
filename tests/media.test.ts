@@ -9,7 +9,9 @@ import { outfitCollage, productShot, setCallRoom, warmMedia } from '../src/media
 import {
   TRYON_NAME_RE,
   boardFileName,
+  classifyShotSource,
   collectImageUrls,
+  cropRawRgb,
   decideCrop,
   newTryonId,
   parsePickReply,
@@ -359,6 +361,34 @@ describe('decideCrop', () => {
       assert.deepEqual(decideCrop(tc.w, tc.h, tc.hasPerson, tc.box, tc.opts), tc.expected);
     });
   }
+
+  it('classifyShotSource reports product-only when hasPerson is false even if tightly cropped', () => {
+    assert.equal(classifyShotSource(false), 'product-only');
+    assert.equal(classifyShotSource(true), 'cropped');
+  });
+
+  it('cropRawRgb extracts exact pixel subregion without sharp PNG round-trip', () => {
+    // 4x4 RGB image where pixel (x, y) has [x*10, y*10, 99]
+    const w = 4;
+    const h = 4;
+    const rgb = new Uint8Array(w * h * 3);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const o = (y * w + x) * 3;
+        rgb[o] = x * 10;
+        rgb[o + 1] = y * 10;
+        rgb[o + 2] = 99;
+      }
+    }
+    const sub = cropRawRgb(rgb, w, h, 3, { left: 1, top: 2, width: 2, height: 2 });
+    assert.equal(sub.length, 2 * 2 * 3);
+    // Top-left of crop is (1, 2) -> [10, 20, 99]
+    assert.deepEqual(Array.from(sub.slice(0, 3)), [10, 20, 99]);
+    // Top-right of crop is (2, 2) -> [20, 20, 99]
+    assert.deepEqual(Array.from(sub.slice(3, 6)), [20, 20, 99]);
+    // Bottom-right of crop is (2, 3) -> [20, 30, 99]
+    assert.deepEqual(Array.from(sub.slice(9, 12)), [20, 30, 99]);
+  });
 });
 
 describe('whitenBackground (raw RGB Uint8Array, no sharp)', () => {
