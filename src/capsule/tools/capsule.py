@@ -21,7 +21,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from shop_client import fetch_and_check_pool
+from shop_client import fetch_and_check_pool, run_self_test as run_shop_client_self_test
 from solver import run_self_test, solve_capsule
 from verifier import verify_solution
 
@@ -183,7 +183,9 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "self-test":
+        shop_out = run_shop_client_self_test()
         out = run_self_test()
+        out.update(shop_out)
         print(json.dumps(out))
         return
 
