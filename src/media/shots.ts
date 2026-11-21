@@ -11,6 +11,7 @@ import {
   decideCrop,
   parsePickReply,
   publicUrl,
+  resolvePick,
   shotCacheKey,
   shotFileName,
   tryonDir,
@@ -34,7 +35,8 @@ interface ThumbEntry {
 
 const DISK_CACHE_MAX_AGE_MS = 6 * 3600 * 1000;
 const DOWNLOAD_TIMEOUT_MS = 5000;
-const PICKER_TIMEOUT_MS = 6000;
+const PICKER_TIMEOUT_MS = 4000;
+const MAX_PICKER_IMAGES = 6;
 
 const shotCache = new Map<string, ChildShotResult>();
 const shotInFlight = new Map<string, Promise<ChildShotResult>>();
@@ -109,13 +111,17 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 function buildPickerInstructions(title: string, slot: string): string {
   return [
     `Item: "${title}" (slot: ${slot}).`,
-    'Image 0 shows the exact colourway being bought.',
-    'Pick the ONE image showing this exact item, fully visible, in the same colour as Image 0 (never another colourway).',
-    'Strongly prefer an image with NO person (flat lay, ghost mannequin, or packshot).',
-    'Avoid fabric close-ups, back views, and lifestyle scenes.',
-    'If every image shows a person, pick the clearest front view; the box must contain only the item: no face, no head, no beard; start below the chin (for shoes, just the shoes).',
+    'Image 0 shows the exact colourway being bought and is the store main front photo.',
+    'Never choose a detail shot, close-up, or back view: the ENTIRE item must be fully inside the frame (for a shirt or top: both shoulders, both sleeves, and the hem; for shoes: the whole shoe from heel to toe).',
+    'Rule for picking index:',
+    '(1) If Image 0 shows NO person and shows the whole item, pick index 0.',
+    '(2) Otherwise, if any other image shows NO person (flat lay, ghost mannequin, or packshot) and the whole item in the same colour as Image 0 (front/side view, never a back view), pick it.',
+    '(3) When EVERY image shows a person, pick Image 0 (the store main front view) as long as the whole item is visible in Image 0; only fall back to another on-model front-view image when Image 0 cuts the item off or is a detail shot. NEVER pick a back view.',
+    'When the chosen image shows a person, box the whole item (exclude face, head, and beard; start below the chin; exclude unrelated garments like trousers or bags).',
+    'Also return product_only: an array of all image indexes that show NO person and the WHOLE item in the same colour as Image 0 (never back views).',
+    'Also return back_view: an array of all image indexes that show the back of the garment or the back of a model.',
     'Also return chin_y: the y coordinate (0-1000) of the lowest point of the chin or beard of any person in the chosen image, or null if no head is visible.',
-    'Return JSON with keys: {"index": <integer>, "has_person": <boolean>, "box_2d": [ymin, xmin, ymax, xmax], "chin_y": <number|null>} on a 0-1000 scale, where has_person is true if any part of a human is visible.',
+    'Return JSON: {"index": <integer>, "has_person": <boolean>, "box_2d": [ymin, xmin, ymax, xmax] | null, "chin_y": <number|null>, "product_only": [<integer>, ...], "back_view": [<integer>, ...]} on a 0-1000 scale, where has_person is true if any part of a human is visible.',
   ].join(' ');
 }
 
@@ -142,7 +148,7 @@ async function computeProductShot(item: Item, slot: string): Promise<ChildShotRe
     // Not on disk yet
   }
 
-  // 1-2. Run getProduct and Image 0 thumbnail download concurrently
+  // 1-2. Run getProduct, Image 0 thumbnail, and speculative Image 0 1000px download concurrently
   const tMedia = Date.now();
   const mediaPromise = getProduct(item.variant_id)
     .catch(() => null)
@@ -152,6 +158,10 @@ async function computeProductShot(item: Item, slot: string): Promise<ChildShotRe
     entry,
     ms: Date.now() - tThumb0,
   }));
+  const specItem0FullPromise: Promise<Buffer | null> = fetchImageBuffer(
+    withWidth(item.image, 1000),
+    DOWNLOAD_TIMEOUT_MS,
+  ).catch(() => null);
 
   const [{ detail, ms: mediaMs }, { entry: thumb0, ms: thumb0Ms }] = await Promise.all([
     mediaPromise,
@@ -159,7 +169,7 @@ async function computeProductShot(item: Item, slot: string): Promise<ChildShotRe
   ]);
 
   const extraUrls = Array.isArray(detail?.images) ? detail.images : [];
-  const candidates = collectImageUrls(item.image, extraUrls, 8);
+  const candidates = collectImageUrls(item.image, extraUrls, MAX_PICKER_IMAGES);
   if (candidates.length === 0) {
     return fallback;
   }
@@ -182,11 +192,11 @@ async function computeProductShot(item: Item, slot: string): Promise<ChildShotRe
     return fallback;
   }
 
-  // Speculatively download 1000 px Image 0 in parallel with Flash Lite picker
-  const specFull0Promise: Promise<Buffer | null> = fetchImageBuffer(
-    withWidth(thumbs[0].origUrl, 1000),
-    DOWNLOAD_TIMEOUT_MS,
-  ).catch(() => null);
+  // Ensure speculative 1000 px download of thumbs[0] runs in parallel with Flash Lite picker
+  const specFull0Promise: Promise<Buffer | null> =
+    thumbs[0].origUrl === item.image
+      ? specItem0FullPromise
+      : fetchImageBuffer(withWidth(thumbs[0].origUrl, 1000), DOWNLOAD_TIMEOUT_MS).catch(() => null);
 
   // One Flash Lite call with consistent sequential labels Image 0..n
   let chosenIndex = 0;
@@ -228,17 +238,11 @@ async function computeProductShot(item: Item, slot: string): Promise<ChildShotRe
     });
 
     const parsed = parsePickReply(r.text);
-    if (parsed && parsed.index >= 0 && parsed.index < thumbs.length) {
-      chosenIndex = parsed.index;
-      hasPerson = parsed.has_person;
-      box2d = parsed.box_2d;
-      chinY = parsed.chin_y;
-    } else {
-      chosenIndex = 0;
-      hasPerson = true;
-      box2d = null;
-      chinY = null;
-    }
+    const resolved = resolvePick(parsed, thumbs.length);
+    chosenIndex = resolved.index;
+    hasPerson = resolved.has_person;
+    box2d = resolved.box_2d;
+    chinY = resolved.chin_y;
   } catch (err) {
     console.error(`[media] shot-pick failed for "${item.title.slice(0, 40)}":`, (err as Error)?.message);
     chosenIndex = 0;

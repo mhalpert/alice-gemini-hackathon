@@ -125,6 +125,15 @@ export interface PickReply {
   has_person: boolean;
   box_2d: [number, number, number, number] | null;
   chin_y: number | null;
+  product_only: number[];
+  back_view: number[];
+}
+
+export interface ResolvedPick {
+  index: number;
+  has_person: boolean;
+  box_2d: [number, number, number, number] | null;
+  chin_y: number | null;
 }
 
 function parseBox2d(raw: unknown): [number, number, number, number] | null {
@@ -140,6 +149,22 @@ function parseChinY(raw: unknown): number | null {
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return null;
   if (raw < 0 || raw > 1000) return null;
   return raw;
+}
+
+function parseIndexArray(raw: unknown): number[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<number>();
+  const out: number[] = [];
+  for (const v of raw) {
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) {
+      const idx = Math.trunc(v);
+      if (!seen.has(idx)) {
+        seen.add(idx);
+        out.push(idx);
+      }
+    }
+  }
+  return out;
 }
 
 export function parsePickReply(text: string | undefined | null): PickReply | null {
@@ -169,13 +194,71 @@ export function parsePickReply(text: string | undefined | null): PickReply | nul
   const hasPerson = typeof rec.has_person === 'boolean' ? rec.has_person : true;
   const box2d = parseBox2d(rec.box_2d);
   const chinY = parseChinY(rec.chin_y);
+  const productOnly = parseIndexArray(rec.product_only);
+  const backView = parseIndexArray(rec.back_view);
 
   return {
     index: Math.trunc(rawIdx),
     has_person: hasPerson,
     box_2d: box2d,
     chin_y: chinY,
+    product_only: productOnly,
+    back_view: backView,
   };
+}
+
+/**
+ * Prompt-independent post-rule for the Flash Lite pick:
+ * - Never choose any index listed in back_view (unless all images are back views).
+ * - If Image 0 has no person (and is not a back view), always choose Image 0 with no crop.
+ * - If any valid non-back product_only index exists, prefer it with no crop.
+ * - When every image shows a person, keep the chosen non-back index; if the model picked
+ *   a back_view index, fall back to Image 0 (or first non-back image) with box/chin cleared.
+ */
+export function resolvePick(reply: PickReply | null, imageCount: number): ResolvedPick {
+  if (!reply || imageCount <= 0) {
+    return { index: 0, has_person: true, box_2d: null, chin_y: null };
+  }
+
+  const backSet = new Set(reply.back_view.filter((i) => i >= 0 && i < imageCount));
+  const validProductOnly = reply.product_only.filter(
+    (i) => i >= 0 && i < imageCount && !backSet.has(i),
+  );
+  const indexInBounds = reply.index >= 0 && reply.index < imageCount;
+  const pickedIsBack = backSet.has(reply.index);
+
+  // Rule 2: Image 0 first when Image 0 has no person
+  if (validProductOnly.includes(0) || (reply.index === 0 && !reply.has_person && !pickedIsBack)) {
+    return { index: 0, has_person: false, box_2d: null, chin_y: null };
+  }
+
+  // Model picked an in-bounds non-back product-only image -> use whole image, ignore box
+  if (indexInBounds && !reply.has_person && !pickedIsBack) {
+    return { index: reply.index, has_person: false, box_2d: null, chin_y: null };
+  }
+
+  // Model picked a person image (or back view / out-of-bounds) while product-only candidates exist
+  if (validProductOnly.length > 0) {
+    return { index: validProductOnly[0], has_person: false, box_2d: null, chin_y: null };
+  }
+
+  // Every image has a person: keep non-back pick, otherwise exclude back_view and prefer Image 0
+  if (indexInBounds && !pickedIsBack) {
+    return {
+      index: reply.index,
+      has_person: true,
+      box_2d: reply.box_2d,
+      chin_y: reply.chin_y,
+    };
+  }
+
+  for (let i = 0; i < imageCount; i++) {
+    if (!backSet.has(i)) {
+      return { index: i, has_person: true, box_2d: null, chin_y: null };
+    }
+  }
+
+  return { index: 0, has_person: true, box_2d: null, chin_y: null };
 }
 
 export interface CropRegion {
@@ -190,6 +273,12 @@ export interface DecideCropOptions {
   slot?: string;
 }
 
+const SMALL_ITEM_SLOTS = new Set(['shoes', 'bag', 'accessory', 'jewelry']);
+
+function minBoxAreaRatio(slot: string): number {
+  return SMALL_ITEM_SLOTS.has(slot) ? 0.06 : 0.25;
+}
+
 export function decideCrop(
   imgWidth: number,
   imgHeight: number,
@@ -199,12 +288,18 @@ export function decideCrop(
 ): CropRegion | null {
   if (imgWidth <= 0 || imgHeight <= 0) return null;
 
+  // Rule 1: product-only images are never cropped; ignore box_2d completely
+  if (!hasPerson) {
+    return null;
+  }
+
   const chinY =
     typeof opts?.chinY === 'number' && Number.isFinite(opts.chinY)
       ? Math.max(0, Math.min(1000, opts.chinY))
       : null;
-  const chinFloorNorm = hasPerson && chinY !== null ? Math.min(999, chinY + 15) : null;
+  const chinFloorNorm = chinY !== null ? Math.min(999, chinY + 15) : null;
   const slot = (opts?.slot ?? '').trim().toLowerCase();
+  const minArea = minBoxAreaRatio(slot);
 
   let usableBox = false;
   let rawLeft = 0;
@@ -224,16 +319,13 @@ export function decideCrop(
     rawBottom = (ymax / 1000) * imgHeight;
     const rawW = rawRight - rawLeft;
     const rawH = rawBottom - rawTop;
-    if (rawW >= 40 && rawH >= 40) {
+    const boxAreaRatio = (rawW * rawH) / (imgWidth * imgHeight);
+    if (rawW >= 40 && rawH >= 40 && boxAreaRatio >= minArea) {
       usableBox = true;
     }
   }
 
   if (usableBox) {
-    const boxAreaRatio = ((rawRight - rawLeft) * (rawBottom - rawTop)) / (imgWidth * imgHeight);
-    if (!hasPerson && boxAreaRatio >= 0.8) {
-      return null;
-    }
     const padX = imgWidth * 0.03;
     const padY = imgHeight * 0.03;
     const left = Math.max(0, Math.floor(rawLeft - padX));
@@ -250,17 +342,25 @@ export function decideCrop(
     }
   }
 
-  if (hasPerson) {
-    const baseFrac = slot === 'shoes' || slot === 'bottom' ? 0.45 : 0.2;
-    let top = Math.round(imgHeight * baseFrac);
+  // Fallback when no usable box:
+  // - shoes / bottom: lower 55% (top >= 45%)
+  // - otherwise: below chin if known, else top 20% off; full width to bottom
+  let top: number;
+  if (slot === 'shoes' || slot === 'bottom') {
+    top = Math.round(imgHeight * 0.45);
     if (chinFloorNorm !== null) {
       top = Math.max(top, Math.ceil((chinFloorNorm / 1000) * imgHeight - 1e-9));
     }
-    top = Math.max(0, Math.min(imgHeight - 1, top));
-    const height = imgHeight - top;
-    if (height >= 1) {
-      return { left: 0, top, width: imgWidth, height };
-    }
+  } else if (chinFloorNorm !== null) {
+    top = Math.ceil((chinFloorNorm / 1000) * imgHeight - 1e-9);
+  } else {
+    top = Math.round(imgHeight * 0.2);
+  }
+
+  top = Math.max(0, Math.min(imgHeight - 1, top));
+  const height = imgHeight - top;
+  if (height >= 1) {
+    return { left: 0, top, width: imgWidth, height };
   }
 
   return null;
@@ -271,11 +371,36 @@ function medianByte(values: number[]): number {
   return values[Math.floor(values.length / 2)] ?? 0;
 }
 
+function applyBorderGain(
+  rgb: Uint8Array,
+  totalPixels: number,
+  br: number,
+  bg: number,
+  bb: number,
+): void {
+  const gr = br >= 255 ? 1 : Math.min(255 / Math.max(br, 1), 1.7);
+  const gg = bg >= 255 ? 1 : Math.min(255 / Math.max(bg, 1), 1.7);
+  const gb = bb >= 255 ? 1 : Math.min(255 / Math.max(bb, 1), 1.7);
+  if (gr === 1 && gg === 1 && gb === 1) return;
+
+  for (let i = 0; i < totalPixels; i++) {
+    const o = i * 3;
+    const r = Math.round(rgb[o] * gr);
+    const g = Math.round(rgb[o + 1] * gg);
+    const b = Math.round(rgb[o + 2] * gb);
+    rgb[o] = r > 255 ? 255 : r;
+    rgb[o + 1] = g > 255 ? 255 : g;
+    rgb[o + 2] = b > 255 ? 255 : b;
+  }
+}
+
 /**
- * Flood-fill near-border-colour pixels inward from the edges on a raw
- * 3-channel RGB buffer (mutated in place).
- * Skips dark borders (luma < 150) and already near-white borders (all channels >= 238).
- * Returns true if whitening ran, false if skipped.
+ * Clean light/mid studio backgrounds to pure white on a raw 3-channel RGB buffer (in place).
+ * - Dark borders (luma < 150): skip untouched, return false.
+ * - Light borders (every channel >= 225): skip flood fill and normalise levels with
+ *   per-channel gain = 255 / border so the border becomes 255 while white garments stay intact.
+ * - Mid borders (luma >= 150, at least one channel < 225): edge flood fill within tolerance 14
+ *   of the border colour, then apply the same per-channel gain so near-background shades lift.
  */
 export function whitenBackground(rgb: Uint8Array, width: number, height: number): boolean {
   if (width <= 0 || height <= 0 || rgb.length < width * height * 3) {
@@ -313,11 +438,13 @@ export function whitenBackground(rgb: Uint8Array, width: number, height: number)
     return false;
   }
 
-  if (br >= 238 && bg >= 238 && bb >= 238) {
-    return false;
+  const total = width * height;
+
+  if (br >= 225 && bg >= 225 && bb >= 225) {
+    applyBorderGain(rgb, total, br, bg, bb);
+    return true;
   }
 
-  const total = width * height;
   const visited = new Uint8Array(total);
   const stack = new Int32Array(total);
   let sp = 0;
@@ -362,6 +489,7 @@ export function whitenBackground(rgb: Uint8Array, width: number, height: number)
     if (y + 1 < height) trySeed(idx + width);
   }
 
+  applyBorderGain(rgb, total, br, bg, bb);
   return true;
 }
 
