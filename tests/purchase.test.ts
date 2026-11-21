@@ -3300,6 +3300,214 @@ describe('checkout fulfillment line_item_ids (FIX 1, Addendum A & B) and repeat 
     assert.equal(createCalls, 6);
     assert.notEqual(rAfterSignOut.order_id, rAfterPlace.order_id);
   });
+
+  it('order_prepare diagnostics log reason, status, counts, totals_types, up to 3 message {type,code} pairs, needs_phone / needs_store_page only from structured codes (never free text), and zero PII', async () => {
+    const logs: Array<{ ev: string; data?: Record<string, unknown> }> = [];
+    setCallRoom(VALID_ROOM);
+    setCallLogSink((_room, ev, data) => logs.push({ ev, data }));
+    try {
+      let clock = 70_000_000;
+      const runCase = async (checkoutFactory: () => any) => {
+        logs.length = 0;
+        clock += 20_000;
+        const { auth, completeSignIn } = makeSignedInAuth(`tok_diag_${clock}`, () => clock);
+        await completeSignIn();
+
+        const mcp = createShopMcp({
+          fetch: async (_u, init) => {
+            const body = JSON.parse(String(init?.body ?? '{}'));
+            const name = body.params?.name;
+            if (name === 'get_account') return jsonRpcOk(makeFakeAccount());
+            if (name === 'create_checkout' || name === 'update_checkout') {
+              return jsonRpcOk(checkoutFactory());
+            }
+            throw new Error(`Unexpected ${name}`);
+          },
+          isPurchaseEnabled: () => true,
+          getAuthToken: () => auth.getToken(),
+        });
+
+        const purchase = createPurchaseClient({
+          mcp,
+          auth,
+          now: () => clock,
+          isPurchaseEnabled: () => true,
+          getRoom: () => VALID_ROOM,
+          isHarnessEnv: () => false,
+        });
+
+        await purchase.prepareOrder(makeBag());
+        const ev = logs.find((l) => l.ev === 'order_prepare');
+        assert.ok(ev, 'expected order_prepare log');
+        const serialized = JSON.stringify(ev);
+        // Never leak fake address, name, email, or free message text
+        assert.equal(serialized.includes('742 Evergreen Terrace'), false);
+        assert.equal(serialized.includes('Brooklyn'), false);
+        assert.equal(serialized.includes('Sam'), false);
+        assert.equal(serialized.includes('sam.secret@example.com'), false);
+        assert.equal(serialized.includes('Enter a phone number'), false);
+        assert.equal(serialized.includes('extension interaction'), false);
+        const stores = ev.data?.stores as Array<Record<string, unknown>>;
+        return stores[0];
+      };
+
+      // 1. Ready checkout -> reason: 'ready', full counts & totals_types
+      const readyDiag = await runCase(() => {
+        const doc = makeCheckoutDoc({
+          status: 'ready_for_complete',
+          withAddress: true,
+          totals: [
+            { type: 'subtotal', amount: 6000 },
+            { type: 'fulfillment', amount: 500 },
+            { type: 'tax', amount: 300 },
+            { type: 'total', amount: 6800 },
+          ],
+        });
+        (doc.fulfillment.methods[0] as any).groups = [
+          {
+            id: 'g1',
+            selected_option_id: 'std',
+            options: [{ id: 'std', title: 'Standard' }, { id: 'exp', title: 'Express' }],
+          },
+        ];
+        return doc;
+      });
+      assert.equal(readyDiag.reason, 'ready');
+      assert.equal(readyDiag.status, 'ready_for_complete');
+      assert.equal(readyDiag.methods, 1);
+      assert.equal(readyDiag.delivery_groups, 1);
+      assert.deepEqual(readyDiag.delivery_options, [2]);
+      assert.equal(readyDiag.delivery_selected, 1);
+      assert.equal(readyDiag.destinations, 1);
+      assert.equal(readyDiag.destination_selected, true);
+      assert.equal(readyDiag.instruments, 1);
+      assert.deepEqual(readyDiag.totals_types, ['subtotal', 'fulfillment', 'tax', 'total']);
+      assert.deepEqual(readyDiag.messages, []);
+
+      // 2. Structured message codes matching BOTH phone and extension/store_page -> reason: 'needs_store_page' (capped at 3 {type,code} pairs, no free text)
+      const bothCodesDiag = await runCase(() => {
+        const doc = makeCheckoutDoc({ status: 'requires_escalation', withAddress: true });
+        doc.messages = [
+          { type: 'error', code: 'phone_required', content: 'Enter a phone number to use this delivery method' },
+          { type: 'warning', code: 'extension_required', content: 'An extension interaction is required' },
+          { type: 'info', code: 'info_3', content: 'free text 3' },
+          { type: 'info', code: 'info_4', content: 'should be truncated' },
+        ];
+        return doc;
+      });
+      assert.equal(bothCodesDiag.reason, 'needs_store_page');
+      assert.equal(bothCodesDiag.status, 'requires_escalation');
+      assert.deepEqual(bothCodesDiag.messages, [
+        { type: 'error', code: 'phone_required' },
+        { type: 'warning', code: 'extension_required' },
+        { type: 'info', code: 'info_3' },
+      ]);
+
+      // 3a. Structured phone code alone -> reason: 'needs_phone'
+      const phoneOnlyDiag = await runCase(() => {
+        const doc = makeCheckoutDoc({ status: 'incomplete', withAddress: true });
+        doc.messages = [
+          { type: 'error', code: 'phone_required', content: 'Enter a phone number to use this delivery method' },
+        ];
+        return doc;
+      });
+      assert.equal(phoneOnlyDiag.reason, 'needs_phone');
+
+      // 3b. Structured extension/escalation code without phone -> reason: 'needs_store_page'
+      const storePageDiag = await runCase(() => {
+        const doc = makeCheckoutDoc({ status: 'requires_escalation', withAddress: true });
+        doc.messages = [
+          { type: 'error', code: 'extension_required', content: 'An extension interaction is required' },
+        ];
+        return doc;
+      });
+      assert.equal(storePageDiag.reason, 'needs_store_page');
+
+      // 4. Free-text ONLY (no code) -> MUST NOT parse free text; uses status_requires_escalation / status_incomplete
+      const freeTextOnlyDiag = await runCase(() => {
+        const doc = makeCheckoutDoc({ status: 'requires_escalation', withAddress: true });
+        doc.messages = [
+          { type: 'error', content: 'An extension interaction is required to complete the checkout.' },
+          { type: 'error', content: 'Enter a phone number to use this delivery method' },
+        ];
+        return doc;
+      });
+      assert.equal(freeTextOnlyDiag.reason, 'status_requires_escalation');
+      assert.deepEqual(freeTextOnlyDiag.messages, [{ type: 'error' }, { type: 'error' }]);
+
+      // 5. Status incomplete (multiple delivery options, unselected, free text only) -> status_incomplete
+      const incompleteDiag = await runCase(() => {
+        const doc = makeCheckoutDoc({
+          status: 'incomplete',
+          withAddress: true,
+          totals: [{ type: 'subtotal', amount: 6800 }],
+        });
+        (doc.fulfillment.methods[0] as any).groups = [
+          {
+            id: 'g1',
+            options: [{ id: 'std', title: 'Standard' }, { id: 'exp', title: 'Express' }],
+          },
+        ];
+        return doc;
+      });
+      assert.equal(incompleteDiag.reason, 'status_incomplete');
+      assert.equal(incompleteDiag.delivery_groups, 1);
+      assert.deepEqual(incompleteDiag.delivery_options, [2]);
+      assert.equal(incompleteDiag.delivery_selected, 0);
+      assert.deepEqual(incompleteDiag.totals_types, ['subtotal']);
+
+      // 6. Payment rejection reasons: payment_none, payment_multiple, payment_not_shop_pay
+      const payNone = await runCase(() =>
+        makeCheckoutDoc({ status: 'ready_for_complete', withAddress: true, instruments: [] }),
+      );
+      assert.equal(payNone.reason, 'payment_none');
+      assert.equal(payNone.instruments, 0);
+
+      const payMulti = await runCase(() =>
+        makeCheckoutDoc({
+          status: 'ready_for_complete',
+          withAddress: true,
+          instruments: [
+            makeShopPayInstrument({ id: 'i1', selected: false }),
+            { id: 'i2', type: 'card', selected: false },
+          ],
+        }),
+      );
+      assert.equal(payMulti.reason, 'payment_multiple');
+      assert.equal(payMulti.instruments, 2);
+
+      const payNotShop = await runCase(() =>
+        makeCheckoutDoc({
+          status: 'ready_for_complete',
+          withAddress: true,
+          instruments: [{ id: 'i-card', type: 'card', selected: true }],
+        }),
+      );
+      assert.equal(payNotShop.reason, 'payment_not_shop_pay');
+
+      // 7. total_not_final and address_mismatch
+      const totalNotFinal = await runCase(() =>
+        makeCheckoutDoc({
+          status: 'ready_for_complete',
+          withAddress: true,
+          totals: [{ type: 'subtotal', amount: 6800 }],
+        }),
+      );
+      assert.equal(totalNotFinal.reason, 'total_not_final');
+
+      const addrMismatch = await runCase(() =>
+        makeCheckoutDoc({
+          status: 'ready_for_complete',
+          withAddress: true,
+          address: makeFakeAddress({ id: 'addr-other', address_locality: 'Miami', address_region: 'FL' }),
+        }),
+      );
+      assert.equal(addrMismatch.reason, 'address_mismatch');
+    } finally {
+      setCallLogSink(null);
+      setCallRoom(null);
+    }
+  });
 });
 
 describe('repo-wide real-checkout and guard-symbol safety checks (Rule 8, L1)', () => {
