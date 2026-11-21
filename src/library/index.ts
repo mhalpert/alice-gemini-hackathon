@@ -61,6 +61,7 @@ export interface ServeLibraryOptions {
 
 const DEFAULT_THRESHOLD = 0.78;
 const DEFAULT_MIN_SCORE = 6;
+const DEFAULT_MAX_BUDGET_RATIO = 3;
 const SERVE_MAX_OUTFITS = 3;
 const SERVE_MAX_SPARES = 2;
 const DEFAULT_SETS_PATH = path.resolve(import.meta.dirname, 'sets.json');
@@ -128,6 +129,13 @@ function minServeScore(): number {
   if (raw === undefined || raw.trim() === '') return DEFAULT_MIN_SCORE;
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : DEFAULT_MIN_SCORE;
+}
+
+function maxBudgetRatio(): number {
+  const raw = process.env.ALICE_LIBRARY_MAX_BUDGET_RATIO;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_MAX_BUDGET_RATIO;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_BUDGET_RATIO;
 }
 
 function log(room: string | undefined, ev: string, data: Record<string, unknown>): void {
@@ -341,6 +349,16 @@ export async function serveLibrary(
     const selected = selectOutfitsForSet(set, grades, brief);
     const minOutfits = opts.anyMatch ? 1 : 2;
     if (selected.failedGrade || selected.outfits.length < minOutfits) {
+      return null;
+    }
+
+    if (!opts.anyMatch && set.budget_usd > 0 && brief.budget_usd > set.budget_usd * maxBudgetRatio()) {
+      log(opts.room, 'library_skip', {
+        key: match.key,
+        reason: 'budget',
+        brief_budget: brief.budget_usd,
+        set_budget: set.budget_usd,
+      });
       return null;
     }
 
