@@ -55,15 +55,20 @@ export interface BagLine { title: string; slot: string; image: string; price: nu
 export interface BagStore { store: string; added: BagLine[]; not_added: BagLine[]; subtotal: number | null }
 export interface BagLink { store: string; url: string }
 
+// Where each piece sits on a flat-lay board: slot -> [x, y, width, height], each a fraction 0 to 1 of the image.
+export type BoardBoxes = Record<string, [number, number, number, number]>;
+// The renders of a look on the shopper: on white, in the occasion's setting, and a short clip.
+export type TryOnKind = 'studio' | 'scene' | 'video';
+
 export interface PageActions {
   showOutfits: { outfits: Outfit[]; replace?: boolean; subtitle?: string };
   highlight: { outfit: number; piece: string | null };      // null points at the whole look
   updateOutfit: { outfit: number; data: Outfit; slot?: string };
   tryOnStatus: { outfit: number; status: TryOnState };
-  tryOnReady: { outfit: number; url: string };
-  collageReady: { outfit: number; url: string };
+  tryOnReady: { outfit: number; url: string; kind?: TryOnKind };   // no kind means the studio still
+  collageReady: { outfit: number; url: string; boxes?: BoardBoxes };
   showAll: Record<string, never>;
-  reveal: { outfit: number; url?: string };
+  reveal: { outfit: number; url?: string; kind?: TryOnKind };
   bagReady: { stores: BagStore[]; links: BagLink[]; total: number };
   say: { caption: string };
   showSearch: { query: string; items: Item[] };
