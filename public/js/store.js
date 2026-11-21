@@ -192,6 +192,103 @@ function prefersReducedMotion() {
   );
 }
 
+function isPhoneViewport() {
+  return (
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(max-width: 640px)').matches
+  );
+}
+
+function pieceIdentity(piece) {
+  const item = piece && typeof piece === 'object' ? piece.item : null;
+  if (!item || typeof item !== 'object') return '';
+  if (item.id !== null && item.id !== undefined && String(item.id).trim()) return `id:${item.id}`;
+  if (item.variant_id !== null && item.variant_id !== undefined && String(item.variant_id).trim()) {
+    return `v:${item.variant_id}`;
+  }
+  if (typeof item.url === 'string' && item.url.trim()) return `u:${item.url.trim()}`;
+  return `t:${item.title || ''}|p:${item.price ?? ''}`;
+}
+
+function canSwapInPlace(oldLook, newLook) {
+  if (!oldLook || !newLook) return false;
+  const oldPieces = Array.isArray(oldLook.pieces) ? oldLook.pieces : [];
+  const newPieces = Array.isArray(newLook.pieces) ? newLook.pieces : [];
+  if (oldPieces.length === 0 || oldPieces.length !== newPieces.length) return false;
+  for (let i = 0; i < oldPieces.length; i += 1) {
+    if ((oldPieces[i]?.slot || '') !== (newPieces[i]?.slot || '')) return false;
+  }
+  return true;
+}
+
+// Identify replaced piece indices using explicit slot when given, otherwise by comparing item ids
+function findSwappedIndices(oldLook, newLook, rawSlot) {
+  const oldPieces = Array.isArray(oldLook?.pieces) ? oldLook.pieces : [];
+  const newPieces = Array.isArray(newLook?.pieces) ? newLook.pieces : [];
+  const parsed = parseHighlightPiece(rawSlot);
+
+  if (parsed.slot) {
+    const matching = [];
+    let occ = 0;
+    for (let i = 0; i < newPieces.length; i += 1) {
+      if (newPieces[i]?.slot === parsed.slot) {
+        occ += 1;
+        if (parsed.explicitOccurrence !== null) {
+          if (occ === parsed.explicitOccurrence) return [i];
+        } else {
+          matching.push(i);
+        }
+      }
+    }
+    if (matching.length === 1) return matching;
+    if (matching.length > 1) {
+      const changed = matching.filter((i) => pieceIdentity(oldPieces[i]) !== pieceIdentity(newPieces[i]));
+      return changed.length > 0 ? changed : [matching[0]];
+    }
+  }
+
+  const changed = [];
+  const len = Math.min(oldPieces.length, newPieces.length);
+  for (let i = 0; i < len; i += 1) {
+    if (pieceIdentity(oldPieces[i]) !== pieceIdentity(newPieces[i])) {
+      changed.push(i);
+    }
+  }
+  return changed;
+}
+
+// Resolve up to 8 flat-lay boxes in the look's piece order; returns null when none or more than 8
+function collectOrderedBoxes(look, boxes) {
+  if (!boxes || typeof boxes !== 'object') return null;
+  const allEntries = Object.entries(boxes);
+  if (allEntries.length === 0 || allEntries.length > 8) return null;
+
+  const ordered = [];
+  const usedBoxes = new Set();
+  const slotCounts = new Map();
+
+  for (const piece of Array.isArray(look?.pieces) ? look.pieces : []) {
+    const slot = piece?.slot || '';
+    if (!slot) continue;
+    const occ = (slotCounts.get(slot) || 0) + 1;
+    slotCounts.set(slot, occ);
+    const box = getBoxForSlot(boxes, slot, occ);
+    if (box && !usedBoxes.has(box)) {
+      usedBoxes.add(box);
+      ordered.push(box);
+    }
+  }
+
+  for (const [, box] of allEntries) {
+    if (box && !usedBoxes.has(box)) {
+      usedBoxes.add(box);
+      ordered.push(box);
+    }
+  }
+
+  return ordered.length > 0 && ordered.length <= 8 ? ordered : null;
+}
+
 // Bring an active note row into view inside its own scrolling list without moving the window
 function scrollRowIntoList(listEl, rowEl) {
   if (!listEl || !rowEl) return;
@@ -1212,6 +1309,9 @@ export function mountStore(root, { onTalk } = {}) {
   }
 
   function renderEmptyView() {
+    cancelPickedMotion(activePickedRefs);
+    clearLookEnterTimers();
+    cancelLooksTotalRolls();
     releaseStageVideo();
     boutiqueRefs = null;
     mainEl.replaceChildren(
@@ -1637,6 +1737,9 @@ export function mountStore(root, { onTalk } = {}) {
   }
 
   function renderBoutiqueView() {
+    cancelPickedMotion(activePickedRefs);
+    clearLookEnterTimers();
+    cancelLooksTotalRolls();
     const deptButtons = new Map();
     const deptSwitch = el(
       'div',
@@ -1721,6 +1824,7 @@ export function mountStore(root, { onTalk } = {}) {
   }
 
   function showBoutique() {
+    cancelPickedMotion(activePickedRefs);
     closeProductPanel();
     leaveSearchView();
     state.pickedOutfit = null;
@@ -1925,6 +2029,7 @@ export function mountStore(root, { onTalk } = {}) {
     const alreadyLoadingSame =
       !switchingDept && (boutique.looksPending || boutique.storefrontPending);
 
+    cancelPickedMotion(activePickedRefs);
     closeProductPanel();
     leaveSearchView();
     state.pickedOutfit = null;
@@ -1962,13 +2067,28 @@ export function mountStore(root, { onTalk } = {}) {
     }
   }
 
-  function renderLooksView() {
+  function renderLooksView({ animateNums = null } = {}) {
+    cancelPickedMotion(activePickedRefs);
+    clearLookEnterTimers();
+    cancelLooksTotalRolls();
     releaseStageVideo();
     boutiqueRefs = null;
     const looks = sortedOutfits();
     if (looks.length === 0) {
       renderHomeView();
       return;
+    }
+
+    const animateOrder = new Map();
+    if (!prefersReducedMotion() && animateNums && animateNums.size > 0) {
+      const toAnimate = looks.filter((lk) => animateNums.has(lk.number));
+      const step =
+        toAnimate.length > 1
+          ? Math.min(120, Math.floor((1160 - 420) / (toAnimate.length - 1)))
+          : 0;
+      toAnimate.forEach((lk, idx) => {
+        animateOrder.set(lk.number, idx * step);
+      });
     }
 
     const meta = state.subtitleMeta;
@@ -2077,7 +2197,7 @@ export function mountStore(root, { onTalk } = {}) {
 
         applyLookCardCollage(visualBox, boardLayer, boardImg, media.collageUrl);
 
-        return el(
+        const card = el(
           'article',
           {
             className: 'look-card',
@@ -2116,6 +2236,29 @@ export function mountStore(root, { onTalk } = {}) {
             )
           )
         );
+
+        if (animateOrder.has(look.number)) {
+          const delay = animateOrder.get(look.number);
+          card.classList.add('is-look-entering');
+          card.style.setProperty('--look-enter-delay', `${delay}ms`);
+          let cleaned = false;
+          const cleanup = () => {
+            if (cleaned) return;
+            cleaned = true;
+            card.classList.remove('is-look-entering');
+            card.style.removeProperty('--look-enter-delay');
+          };
+          card.addEventListener(
+            'animationend',
+            (e) => {
+              if (e.target === card && e.animationName === 'look-card-rise') cleanup();
+            },
+            { once: true }
+          );
+          lookEnterCleanupTimers.push(setTimeout(cleanup, delay + 480));
+        }
+
+        return card;
       })
     );
 
@@ -2150,6 +2293,729 @@ export function mountStore(root, { onTalk } = {}) {
     boardFrame.style.height = '';
   }
 
+  // Motion state and cleanup helpers
+  const playedBoardUrls = new Set();
+  let lookEnterCleanupTimers = [];
+  const looksTotalRolls = new Map();
+
+  function clearLookEnterTimers() {
+    for (const timerId of lookEnterCleanupTimers) {
+      clearTimeout(timerId);
+    }
+    lookEnterCleanupTimers = [];
+  }
+
+  function cancelLooksTotalRolls() {
+    for (const roll of looksTotalRolls.values()) {
+      if (roll.rafId) cancelAnimationFrame(roll.rafId);
+    }
+    looksTotalRolls.clear();
+  }
+
+  function ensureStageMotion(panelRefs) {
+    if (!panelRefs.stageMotion) {
+      panelRefs.stageMotion = {
+        curtainTimer: null,
+        crossfadeTimer: null,
+        layerFadeTimer: null,
+        sceneDriftTimer: null,
+        ghostEl: null,
+      };
+    }
+    return panelRefs.stageMotion;
+  }
+
+  function cancelStageCurtain(panelRefs) {
+    if (!panelRefs) return;
+    const sm = panelRefs.stageMotion;
+    if (sm && sm.curtainTimer) {
+      clearTimeout(sm.curtainTimer);
+      sm.curtainTimer = null;
+    }
+    if (panelRefs.stagePanel) {
+      panelRefs.stagePanel.classList.remove('is-curtain-revealing');
+    }
+  }
+
+  function cancelStageCrossfade(panelRefs) {
+    if (!panelRefs) return;
+    const sm = panelRefs.stageMotion;
+    if (sm) {
+      if (sm.crossfadeTimer) {
+        clearTimeout(sm.crossfadeTimer);
+        sm.crossfadeTimer = null;
+      }
+      if (sm.layerFadeTimer) {
+        clearTimeout(sm.layerFadeTimer);
+        sm.layerFadeTimer = null;
+      }
+      if (sm.ghostEl) {
+        sm.ghostEl.remove();
+        sm.ghostEl = null;
+      }
+    }
+    if (panelRefs.tryOnLayer) {
+      panelRefs.tryOnLayer.classList.remove('is-stage-crossfading');
+    }
+    if (panelRefs.tryOnImg) {
+      panelRefs.tryOnImg.classList.remove('is-crossfade-start', 'is-crossfading');
+    }
+    if (panelRefs.stageVideo) {
+      panelRefs.stageVideo.classList.remove('is-video-entering', 'is-video-crossfading');
+    }
+  }
+
+  function cancelSceneDrift(panelRefs) {
+    if (!panelRefs) return;
+    const sm = panelRefs.stageMotion;
+    if (sm && sm.sceneDriftTimer) {
+      clearTimeout(sm.sceneDriftTimer);
+      sm.sceneDriftTimer = null;
+    }
+    if (panelRefs.tryOnImg) {
+      panelRefs.tryOnImg.classList.remove('is-scene-drifting');
+    }
+  }
+
+  function startStageCurtain(panelRefs) {
+    if (!panelRefs || !panelRefs.stagePanel || !panelRefs.tryOnLayer) return;
+    cancelStageCurtain(panelRefs);
+    cancelStageCrossfade(panelRefs);
+    const sm = ensureStageMotion(panelRefs);
+    const { stagePanel, tryOnLayer } = panelRefs;
+    stagePanel.classList.add('is-showing-tryon');
+    stagePanel.classList.remove('is-curtain-revealing');
+    void tryOnLayer.offsetWidth;
+    stagePanel.classList.add('is-curtain-revealing');
+
+    const finish = () => {
+      if (panelRefs.stageMotion && panelRefs.stageMotion.curtainTimer === timerId) {
+        cancelStageCurtain(panelRefs);
+      }
+    };
+    const timerId = setTimeout(finish, 760);
+    sm.curtainTimer = timerId;
+    tryOnLayer.addEventListener(
+      'animationend',
+      (e) => {
+        if (e.target === tryOnLayer && e.animationName === 'stage-curtain-open') finish();
+      },
+      { once: true }
+    );
+  }
+
+  function startStageLayerCrossfade(panelRefs) {
+    if (!panelRefs || !panelRefs.stagePanel || !panelRefs.tryOnLayer) return;
+    cancelStageCurtain(panelRefs);
+    const sm = ensureStageMotion(panelRefs);
+    if (sm.layerFadeTimer) {
+      clearTimeout(sm.layerFadeTimer);
+      sm.layerFadeTimer = null;
+    }
+    panelRefs.tryOnLayer.classList.add('is-stage-crossfading');
+    void panelRefs.stagePanel.offsetWidth;
+    panelRefs.stagePanel.classList.add('is-showing-tryon');
+    const timerId = setTimeout(() => {
+      if (panelRefs.stageMotion && panelRefs.stageMotion.layerFadeTimer === timerId) {
+        panelRefs.stageMotion.layerFadeTimer = null;
+        if (panelRefs.tryOnLayer) panelRefs.tryOnLayer.classList.remove('is-stage-crossfading');
+      }
+    }, 520);
+    sm.layerFadeTimer = timerId;
+  }
+
+  function captureCrossfadeGhost(panelRefs) {
+    if (!panelRefs || !panelRefs.tryOnImg) return null;
+    const { tryOnImg } = panelRefs;
+    const src = tryOnImg.getAttribute('src');
+    if (tryOnImg.hidden || !src) return null;
+    const ghost = el('img', {
+      className: 'stage-crossfade-out',
+      src,
+      alt: '',
+      decoding: 'async',
+      'aria-hidden': 'true',
+    });
+    if (tryOnImg.classList.contains('is-scene-drifting')) {
+      const computed = window.getComputedStyle(tryOnImg);
+      if (computed.transform && computed.transform !== 'none') {
+        ghost.style.transform = computed.transform;
+        ghost.style.transformOrigin = 'center top';
+      }
+    }
+    return ghost;
+  }
+
+  function startImageCrossfade(panelRefs, ghostEl) {
+    if (!panelRefs || !panelRefs.tryOnLayer || !panelRefs.tryOnImg) return;
+    cancelStageCrossfade(panelRefs);
+    const sm = ensureStageMotion(panelRefs);
+    const { tryOnLayer, tryOnImg } = panelRefs;
+    if (ghostEl) {
+      tryOnLayer.insertBefore(ghostEl, tryOnImg);
+      sm.ghostEl = ghostEl;
+    }
+    tryOnImg.classList.remove('is-media-entering', 'is-crossfading');
+    tryOnImg.classList.add('is-crossfade-start');
+    void tryOnImg.offsetWidth;
+    tryOnImg.classList.remove('is-crossfade-start');
+    tryOnImg.classList.add('is-crossfading');
+
+    const timerId = setTimeout(() => {
+      if (panelRefs.stageMotion && panelRefs.stageMotion.crossfadeTimer === timerId) {
+        cancelStageCrossfade(panelRefs);
+      }
+    }, 520);
+    sm.crossfadeTimer = timerId;
+  }
+
+  function startVideoCrossfade(panelRefs, ghostEl) {
+    if (!panelRefs || !panelRefs.tryOnLayer || !panelRefs.stageVideo) return;
+    cancelStageCrossfade(panelRefs);
+    const sm = ensureStageMotion(panelRefs);
+    const { tryOnLayer, stageVideo } = panelRefs;
+    if (ghostEl) {
+      tryOnLayer.insertBefore(ghostEl, panelRefs.tryOnImg || stageVideo);
+      sm.ghostEl = ghostEl;
+    }
+    stageVideo.classList.remove('is-media-entering', 'is-video-crossfading');
+    stageVideo.classList.add('is-video-entering');
+    void stageVideo.offsetWidth;
+    stageVideo.classList.remove('is-video-entering');
+    stageVideo.classList.add('is-video-crossfading');
+
+    const timerId = setTimeout(() => {
+      if (panelRefs.stageMotion && panelRefs.stageMotion.crossfadeTimer === timerId) {
+        cancelStageCrossfade(panelRefs);
+      }
+    }, 520);
+    sm.crossfadeTimer = timerId;
+  }
+
+  function startSceneDrift(panelRefs) {
+    if (!panelRefs || !panelRefs.tryOnImg) return;
+    cancelSceneDrift(panelRefs);
+    const sm = ensureStageMotion(panelRefs);
+    const { tryOnImg } = panelRefs;
+    void tryOnImg.offsetWidth;
+    tryOnImg.classList.add('is-scene-drifting');
+
+    const finish = () => {
+      if (panelRefs.stageMotion && panelRefs.stageMotion.sceneDriftTimer === timerId) {
+        cancelSceneDrift(panelRefs);
+      }
+    };
+    const timerId = setTimeout(finish, 8150);
+    sm.sceneDriftTimer = timerId;
+    tryOnImg.addEventListener(
+      'animationend',
+      (e) => {
+        if (e.target === tryOnImg && e.animationName === 'stage-scene-drift') finish();
+      },
+      { once: true }
+    );
+  }
+
+  function cancelBoardDropIn(panelRefs) {
+    if (!panelRefs) return;
+    if (panelRefs.stagePanel) {
+      panelRefs.stagePanel.classList.remove('is-board-awaiting-drop');
+    }
+    if (panelRefs.boardLayer) {
+      panelRefs.boardLayer.classList.remove('is-board-dropping');
+    }
+    if (panelRefs.boardFrame) {
+      panelRefs.boardFrame.classList.remove('is-board-awaiting-drop', 'is-board-dropping');
+    }
+    if (panelRefs.boardDrop) {
+      clearTimeout(panelRefs.boardDrop.timerId);
+      if (panelRefs.boardDrop.layer) panelRefs.boardDrop.layer.remove();
+      panelRefs.boardDrop = null;
+    }
+  }
+
+  function maybeStartBoardDropIn(panelRefs, media) {
+    if (!panelRefs || !media || !media.collageUrl) {
+      cancelBoardDropIn(panelRefs);
+      return;
+    }
+    if (prefersReducedMotion() || isPhoneViewport()) {
+      cancelBoardDropIn(panelRefs);
+      return;
+    }
+    const showingFlatLay = !(media.revealed && !media.stageSwapped);
+    if (!showingFlatLay) {
+      cancelBoardDropIn(panelRefs);
+      return;
+    }
+    if (playedBoardUrls.has(media.collageUrl)) return;
+
+    const look = state.outfits.get(panelRefs.outfit);
+    const boxes = collectOrderedBoxes(look, media.collageBoxes);
+    if (!boxes) {
+      cancelBoardDropIn(panelRefs);
+      return;
+    }
+
+    const activePointedBox =
+      state.highlightedSlot
+        ? getBoxForSlot(media.collageBoxes, state.highlightedSlot, state.highlightedOccurrence || 1)
+        : null;
+    if (activePointedBox) {
+      playedBoardUrls.add(media.collageUrl);
+      cancelBoardDropIn(panelRefs);
+      return;
+    }
+
+    const { stagePanel, boardLayer, boardFrame, collageImg, pointerRing } = panelRefs;
+    if (!collageImg.complete || collageImg.naturalWidth <= 0) {
+      stagePanel.classList.add('is-board-awaiting-drop');
+      boardFrame.classList.add('is-board-awaiting-drop');
+      return;
+    }
+
+    cancelBoardDropIn(panelRefs);
+    playedBoardUrls.add(media.collageUrl);
+
+    const src = collageImg.getAttribute('src') || stageUrl(media.collageUrl, 900);
+    const dropLayer = el('div', { className: 'board-drop-layer', 'aria-hidden': 'true' });
+    const dropStep = 110;
+    const dropDuration = 260;
+    let lastPieceImg = null;
+
+    boxes.forEach((box, idx) => {
+      const [x, y, w, h] = box;
+      const top = (y * 100).toFixed(4);
+      const right = (Math.max(0, 1 - x - w) * 100).toFixed(4);
+      const bottom = (Math.max(0, 1 - y - h) * 100).toFixed(4);
+      const left = (x * 100).toFixed(4);
+      const pieceImg = el('img', {
+        className: 'board-drop-piece',
+        src,
+        alt: '',
+        decoding: 'async',
+        onError: () => cancelBoardDropIn(panelRefs),
+      });
+      pieceImg.style.clipPath = `inset(${top}% ${right}% ${bottom}% ${left}%)`;
+      pieceImg.style.setProperty('--drop-delay', `${idx * dropStep}ms`);
+      dropLayer.appendChild(pieceImg);
+      lastPieceImg = pieceImg;
+    });
+
+    boardLayer.classList.add('is-board-dropping');
+    boardFrame.classList.add('is-board-dropping');
+    boardFrame.insertBefore(dropLayer, pointerRing);
+
+    const totalMs = (boxes.length - 1) * dropStep + dropDuration;
+    const finish = () => {
+      if (panelRefs.boardDrop && panelRefs.boardDrop.layer === dropLayer) {
+        cancelBoardDropIn(panelRefs);
+      }
+    };
+    const timerId = setTimeout(finish, totalMs + 80);
+    if (lastPieceImg) {
+      lastPieceImg.addEventListener(
+        'animationend',
+        (e) => {
+          if (e.animationName === 'board-piece-drop') finish();
+        },
+        { once: true }
+      );
+    }
+    panelRefs.boardDrop = { layer: dropLayer, timerId };
+  }
+
+  function setSpotlightVeilBox(strips, box) {
+    const [x, y, w, h] = box;
+    const topPct = y * 100;
+    const bottomStartPct = Math.min(100, (y + h) * 100);
+    const topBottomInset = Math.max(0, 100 - topPct);
+    const leftRightInset = Math.max(0, 100 - x * 100);
+    const rightLeftInset = Math.min(100, (x + w) * 100);
+    const sideTopInset = Math.max(0, topPct - 0.15);
+    const sideBottomInset = Math.max(0, 100 - bottomStartPct - 0.15);
+
+    strips.top.style.clipPath = `inset(0% 0% ${topBottomInset.toFixed(4)}% 0%)`;
+    strips.bottom.style.clipPath = `inset(${bottomStartPct.toFixed(4)}% 0% 0% 0%)`;
+    strips.left.style.clipPath = `inset(${sideTopInset.toFixed(4)}% ${leftRightInset.toFixed(4)}% ${sideBottomInset.toFixed(4)}% 0%)`;
+    strips.right.style.clipPath = `inset(${sideTopInset.toFixed(4)}% 0% ${sideBottomInset.toFixed(4)}% ${rightLeftInset.toFixed(4)}%)`;
+  }
+
+  function clearBoardSpotlight(panelRefs, { immediate = false } = {}) {
+    if (!panelRefs || !panelRefs.spotlight) return;
+    const spot = panelRefs.spotlight;
+    if (spot.cleanupTimer) {
+      clearTimeout(spot.cleanupTimer);
+      spot.cleanupTimer = null;
+    }
+    if (spot.settlingLift) {
+      clearTimeout(spot.settlingTimer);
+      spot.settlingLift.remove();
+      spot.settlingLift = null;
+      spot.settlingTimer = null;
+    }
+    spot.boxKey = null;
+
+    if (immediate) {
+      if (spot.veil) spot.veil.remove();
+      if (spot.lift) spot.lift.remove();
+      panelRefs.spotlight = null;
+      return;
+    }
+
+    if (spot.veil) spot.veil.classList.remove('is-active');
+    if (spot.lift) {
+      spot.lift.classList.remove('is-lifted');
+      spot.lift.classList.add('is-settling');
+    }
+    spot.cleanupTimer = setTimeout(() => {
+      if (panelRefs.spotlight === spot) {
+        if (spot.veil) spot.veil.remove();
+        if (spot.lift) spot.lift.remove();
+        panelRefs.spotlight = null;
+      }
+    }, 240);
+  }
+
+  function updateBoardSpotlight(panelRefs, media, slot, occurrence = 1) {
+    if (!panelRefs || !panelRefs.boardFrame || !panelRefs.collageImg) return;
+    const showingFlatLay = Boolean(media && media.collageUrl && !(media.revealed && !media.stageSwapped));
+    if (prefersReducedMotion() || isPhoneViewport() || !showingFlatLay) {
+      clearBoardSpotlight(panelRefs, { immediate: true });
+      return;
+    }
+
+    const normalized = typeof slot === 'string' && slot.trim() ? slot.trim() : null;
+    const box = normalized ? getBoxForSlot(media.collageBoxes, normalized, occurrence) : null;
+    if (!box) {
+      clearBoardSpotlight(panelRefs, { immediate: false });
+      return;
+    }
+
+    const { boardFrame, collageImg, pointerRing } = panelRefs;
+    if (!collageImg.complete || collageImg.naturalWidth <= 0) return;
+
+    cancelBoardDropIn(panelRefs);
+
+    const src = collageImg.getAttribute('src') || stageUrl(media.collageUrl, 900);
+    const boxKey = `${src}|${box.map((n) => n.toFixed(4)).join(',')}`;
+    let spot = panelRefs.spotlight;
+
+    if (spot && spot.cleanupTimer) {
+      clearTimeout(spot.cleanupTimer);
+      spot.cleanupTimer = null;
+    }
+
+    if (spot && spot.boxKey === boxKey && spot.veil && spot.lift) {
+      spot.veil.classList.add('is-active');
+      spot.lift.classList.remove('is-settling');
+      spot.lift.classList.add('is-lifted');
+      return;
+    }
+
+    if (!spot || !spot.veil) {
+      const top = el('div', { className: 'board-spotlight-strip' });
+      const bottom = el('div', { className: 'board-spotlight-strip' });
+      const left = el('div', { className: 'board-spotlight-strip' });
+      const right = el('div', { className: 'board-spotlight-strip' });
+      const veil = el(
+        'div',
+        { className: 'board-spotlight-veil is-snapping', 'aria-hidden': 'true' },
+        top,
+        bottom,
+        left,
+        right
+      );
+      const strips = { top, bottom, left, right };
+      setSpotlightVeilBox(strips, box);
+      boardFrame.insertBefore(veil, pointerRing);
+      void veil.offsetWidth;
+      veil.classList.remove('is-snapping');
+      veil.classList.add('is-active');
+      spot = { veil, strips, lift: null, settlingLift: null, settlingTimer: null, cleanupTimer: null, boxKey };
+      panelRefs.spotlight = spot;
+    } else {
+      setSpotlightVeilBox(spot.strips, box);
+      spot.veil.classList.add('is-active');
+      spot.boxKey = boxKey;
+    }
+
+    if (spot.settlingLift) {
+      clearTimeout(spot.settlingTimer);
+      spot.settlingLift.remove();
+      spot.settlingLift = null;
+      spot.settlingTimer = null;
+    }
+    if (spot.lift) {
+      const prevLift = spot.lift;
+      prevLift.classList.remove('is-lifted');
+      prevLift.classList.add('is-settling');
+      spot.settlingLift = prevLift;
+      spot.settlingTimer = setTimeout(() => {
+        prevLift.remove();
+        if (spot.settlingLift === prevLift) {
+          spot.settlingLift = null;
+          spot.settlingTimer = null;
+        }
+      }, 230);
+      spot.lift = null;
+    }
+
+    const [x, y, w, h] = box;
+    const topPct = (y * 100).toFixed(4);
+    const rightPct = (Math.max(0, 1 - x - w) * 100).toFixed(4);
+    const bottomPct = (Math.max(0, 1 - y - h) * 100).toFixed(4);
+    const leftPct = (x * 100).toFixed(4);
+    const cx = ((x + w / 2) * 100).toFixed(4);
+    const cy = ((y + h / 2) * 100).toFixed(4);
+
+    const liftImg = el('img', {
+      className: 'board-spotlight-lift-img',
+      src,
+      alt: '',
+      decoding: 'async',
+      onError: () => {
+        if (lift.parentNode) lift.remove();
+        if (spot.lift === lift) spot.lift = null;
+      },
+    });
+    liftImg.style.clipPath = `inset(${topPct}% ${rightPct}% ${bottomPct}% ${leftPct}%)`;
+
+    const lift = el('div', { className: 'board-spotlight-lift', 'aria-hidden': 'true' }, liftImg);
+    lift.style.transformOrigin = `${cx}% ${cy}%`;
+    boardFrame.insertBefore(lift, pointerRing);
+    void lift.offsetWidth;
+    lift.classList.add('is-lifted');
+    spot.lift = lift;
+  }
+
+  function buildPieceNoteRow(piece, occurrence, outfitNumber, isPointed) {
+    return el(
+      'li',
+      {
+        className: `piece-note-item${isPointed ? ' is-pointed' : ''}`,
+        dataset: { slot: piece.slot || '', occurrence, outfit: outfitNumber },
+      },
+      el(
+        'div',
+        { className: 'piece-note-top' },
+        el('span', { className: 'piece-slot-name' }, formatSlot(piece.slot)),
+        el('span', { className: 'piece-note-price' }, formatPrice(piece.item?.price))
+      ),
+      el('span', { className: 'piece-note-title' }, piece.item?.title || ''),
+      piece.why ? el('p', { className: 'piece-note-why' }, piece.why) : null
+    );
+  }
+
+  // Smoothly roll a formatted dollar total over 600ms (ease-out) and finish on the exact value
+  function rollPriceText(targetEl, fromVal, toVal, rollState, onDone = null) {
+    if (!targetEl) return;
+    if (rollState.rafId) {
+      cancelAnimationFrame(rollState.rafId);
+      rollState.rafId = null;
+    }
+    const startNum = Number(fromVal);
+    const endNum = Number(toVal);
+    const finalText = formatPrice(toVal);
+    if (
+      prefersReducedMotion() ||
+      !Number.isFinite(startNum) ||
+      !Number.isFinite(endNum) ||
+      startNum === endNum
+    ) {
+      targetEl.textContent = finalText;
+      if (typeof onDone === 'function') onDone();
+      return;
+    }
+
+    const useCents = !Number.isInteger(startNum) || !Number.isInteger(endNum);
+    const duration = 600;
+    const startTime = performance.now();
+    targetEl.textContent = useCents ? `$${startNum.toFixed(2)}` : formatPrice(startNum);
+
+    const step = (now) => {
+      const t = Math.min(1, Math.max(0, (now - startTime) / duration));
+      if (t >= 1) {
+        rollState.rafId = null;
+        targetEl.textContent = finalText;
+        if (typeof onDone === 'function') onDone();
+        return;
+      }
+      const eased = 1 - Math.pow(1 - t, 3);
+      const val = startNum + (endNum - startNum) * eased;
+      if (useCents) {
+        const rounded = Math.round(val * 100) / 100;
+        targetEl.textContent = `$${rounded.toFixed(2)}`;
+      } else {
+        targetEl.textContent = formatPrice(Math.round(val));
+      }
+      rollState.rafId = requestAnimationFrame(step);
+    };
+    rollState.rafId = requestAnimationFrame(step);
+  }
+
+  function flushPendingSwap(panelRefs) {
+    if (!panelRefs || !panelRefs.swapState) return;
+    const swap = panelRefs.swapState;
+    if (swap.halfTimer) {
+      clearTimeout(swap.halfTimer);
+      swap.halfTimer = null;
+    }
+    if (swap.doneTimer) {
+      clearTimeout(swap.doneTimer);
+      swap.doneTimer = null;
+    }
+    if (swap.totalRoll && swap.totalRoll.rafId) {
+      cancelAnimationFrame(swap.totalRoll.rafId);
+      swap.totalRoll.rafId = null;
+    }
+    if (!swap.committed && Array.isArray(swap.entries)) {
+      for (const entry of swap.entries) {
+        if (entry.oldRow && entry.oldRow.parentNode && entry.newRow) {
+          entry.oldRow.replaceWith(entry.newRow);
+        }
+        if (entry.oldCard && entry.oldCard.parentNode && entry.newCard) {
+          entry.oldCard.replaceWith(entry.newCard);
+        }
+      }
+      swap.committed = true;
+    }
+    if (Array.isArray(swap.entries)) {
+      for (const entry of swap.entries) {
+        if (entry.oldRow) entry.oldRow.classList.remove('is-swap-flip-out', 'is-swap-flip-in');
+        if (entry.oldCard) entry.oldCard.classList.remove('is-swap-flip-out', 'is-swap-flip-in');
+        if (entry.newRow) entry.newRow.classList.remove('is-swap-flip-out', 'is-swap-flip-in');
+        if (entry.newCard) entry.newCard.classList.remove('is-swap-flip-out', 'is-swap-flip-in');
+      }
+    }
+    if (panelRefs.lookTotalEl && swap.finalTotalText !== null) {
+      panelRefs.lookTotalEl.textContent = swap.finalTotalText;
+    }
+    swap.active = false;
+    panelRefs.swapState = null;
+  }
+
+  function applyInPlaceSwap(panelRefs, oldLook, updated, swappedIndices) {
+    if (!panelRefs || !panelRefs.pieceNotesList || !panelRefs.shopGrid) return false;
+    const pieces = updated.pieces || [];
+    const slotCounts = new Map();
+    const occurrences = pieces.map((piece) => {
+      const slot = piece?.slot || '';
+      const occ = slot ? (slotCounts.get(slot) || 0) + 1 : 1;
+      if (slot) slotCounts.set(slot, occ);
+      return occ;
+    });
+
+    const entries = [];
+    for (const idx of swappedIndices) {
+      const piece = pieces[idx];
+      if (!piece) continue;
+      const oldRow = panelRefs.pieceNotesList.children[idx];
+      const oldCard = panelRefs.shopGrid.children[idx];
+      if (!oldRow || !oldCard) continue;
+      const occ = occurrences[idx];
+      if (piece.item?.image) {
+        const pre = new Image();
+        pre.decoding = 'async';
+        pre.src = sized(piece.item.image, 600);
+      }
+      const newRow = buildPieceNoteRow(piece, occ, updated.number, false);
+      const newCard = buildProductCard(piece, updated.number, {
+        compact: false,
+        pointed: false,
+        occurrence: occ,
+      });
+      entries.push({ oldRow, oldCard, newRow, newCard });
+    }
+
+    if (entries.length === 0) return false;
+
+    const swapState = {
+      active: true,
+      committed: false,
+      entries,
+      halfTimer: null,
+      doneTimer: null,
+      totalRoll: { rafId: null },
+      finalTotalText: formatPrice(updated.total),
+    };
+    panelRefs.swapState = swapState;
+
+    for (const entry of entries) {
+      entry.oldRow.classList.remove('is-swap-flip-out', 'is-swap-flip-in');
+      entry.oldCard.classList.remove('is-swap-flip-out', 'is-swap-flip-in');
+      void entry.oldRow.offsetWidth;
+      entry.oldRow.classList.add('is-swap-flip-out');
+      entry.oldCard.classList.add('is-swap-flip-out');
+    }
+
+    if (panelRefs.lookTotalEl) {
+      rollPriceText(panelRefs.lookTotalEl, oldLook?.total, updated.total, swapState.totalRoll, () => {
+        if (!swapState.active && panelRefs.swapState === swapState) {
+          panelRefs.swapState = null;
+        }
+      });
+    }
+
+    swapState.halfTimer = setTimeout(() => {
+      if (state.view !== 'picked' || activePickedRefs !== panelRefs || panelRefs.swapState !== swapState) {
+        return;
+      }
+      swapState.halfTimer = null;
+      swapState.committed = true;
+      for (const entry of entries) {
+        entry.newRow.classList.add('is-swap-flip-in');
+        entry.newCard.classList.add('is-swap-flip-in');
+        if (entry.oldRow.parentNode) entry.oldRow.replaceWith(entry.newRow);
+        if (entry.oldCard.parentNode) entry.oldCard.replaceWith(entry.newCard);
+      }
+      if (entries[0]?.newRow) {
+        scrollRowIntoList(panelRefs.pieceNotesList, entries[0].newRow);
+      }
+
+      const finishFlip = () => {
+        if (panelRefs.swapState !== swapState) return;
+        if (swapState.doneTimer) {
+          clearTimeout(swapState.doneTimer);
+          swapState.doneTimer = null;
+        }
+        for (const entry of entries) {
+          entry.newRow.classList.remove('is-swap-flip-in');
+          entry.newCard.classList.remove('is-swap-flip-in');
+        }
+        if (panelRefs.lookTotalEl && !swapState.totalRoll.rafId) {
+          panelRefs.lookTotalEl.textContent = swapState.finalTotalText;
+        }
+        swapState.active = false;
+        if (!swapState.totalRoll.rafId) {
+          panelRefs.swapState = null;
+        }
+      };
+
+      const lastNode = entries[entries.length - 1].newCard;
+      lastNode.addEventListener(
+        'animationend',
+        (e) => {
+          if (e.target === lastNode && e.animationName === 'swap-flip-in') finishFlip();
+        },
+        { once: true }
+      );
+      swapState.doneTimer = setTimeout(finishFlip, 340);
+    }, 300);
+
+    return true;
+  }
+
+  function cancelPickedMotion(panelRefs) {
+    if (!panelRefs) return;
+    flushPendingSwap(panelRefs);
+    cancelBoardDropIn(panelRefs);
+    clearBoardSpotlight(panelRefs, { immediate: true });
+    cancelStageCurtain(panelRefs);
+    cancelStageCrossfade(panelRefs);
+    cancelSceneDrift(panelRefs);
+  }
+
   function updateBoardPointerRing(refs, media, slot, occurrence = 1) {
     if (!refs || !refs.pointerRing) return;
     const ring = refs.pointerRing;
@@ -2162,6 +3028,7 @@ export function mountStore(root, { onTalk } = {}) {
     if (!box) {
       ring.classList.remove('is-visible');
       ring.setAttribute('aria-hidden', 'true');
+      updateBoardSpotlight(refs, media, normalized, occurrence);
       return;
     }
 
@@ -2185,6 +3052,7 @@ export function mountStore(root, { onTalk } = {}) {
       ring.classList.add('is-visible');
     }
     ring.setAttribute('aria-hidden', 'false');
+    updateBoardSpotlight(refs, media, normalized, occurrence);
   }
 
   function syncVideoPlayButton(panelRefs) {
@@ -2343,6 +3211,7 @@ export function mountStore(root, { onTalk } = {}) {
           if (state.view === 'picked' && activePickedRefs === panelRefs) {
             applyStageState(panelRefs, currentMedia, {
               fadeRender: !wasSwapped && prevKind !== kind,
+              tileSwitch: wasSwapped,
             });
           }
         },
@@ -2420,7 +3289,7 @@ export function mountStore(root, { onTalk } = {}) {
   function applyStageState(
     panelRefs,
     media,
-    { deferReveal = false, fadeRender = false, newlyArrivedKind = null } = {}
+    { deferReveal = false, fadeRender = false, newlyArrivedKind = null, curtainReveal = false, tileSwitch = false } = {}
   ) {
     const {
       stagePanel,
@@ -2438,6 +3307,7 @@ export function mountStore(root, { onTalk } = {}) {
       thumbLabel,
       tryOnStatusEl,
     } = panelRefs;
+    const prevShowingTryOn = stagePanel.classList.contains('is-showing-tryon');
 
     // Flat-lay board state
     if (media.collageUrl) {
@@ -2476,20 +3346,40 @@ export function mountStore(root, { onTalk } = {}) {
     // Try-on stays hidden until reveal; on reveal it takes the main stage unless swapped
     const hasReveal = Boolean(media.revealed && activeKind);
     const showingTryOn = hasReveal && !media.stageSwapped;
+    const reduced = prefersReducedMotion();
+    const ghostEl =
+      !reduced && showingTryOn && fadeRender && prevShowingTryOn
+        ? captureCrossfadeGhost(panelRefs)
+        : null;
 
     if (!hasReveal) {
+      cancelStageCurtain(panelRefs);
+      cancelStageCrossfade(panelRefs);
+      cancelSceneDrift(panelRefs);
+      panelRefs.lastShownRenderKey = null;
       tryOnImg.removeAttribute('src');
       tryOnImg.hidden = true;
       tryOnImg.classList.remove('is-media-entering');
       releaseStageVideo(panelRefs);
       stageVideo.hidden = true;
     } else if (activeKind === 'video') {
+      cancelSceneDrift(panelRefs);
       tryOnImg.removeAttribute('src');
       tryOnImg.hidden = true;
       tryOnImg.classList.remove('is-media-entering');
       if (showingTryOn) {
-        mountStageVideo(panelRefs, media, media.renders.video, { fade: fadeRender });
+        if (!reduced && fadeRender) {
+          mountStageVideo(panelRefs, media, media.renders.video, { fade: false });
+          startVideoCrossfade(panelRefs, ghostEl);
+        } else {
+          cancelStageCrossfade(panelRefs);
+          mountStageVideo(panelRefs, media, media.renders.video, { fade: false });
+        }
+        panelRefs.lastShownRenderKey = `video:${media.renders.video}`;
       } else {
+        cancelStageCurtain(panelRefs);
+        cancelStageCrossfade(panelRefs);
+        panelRefs.lastShownRenderKey = null;
         try {
           stageVideo.pause();
         } catch {
@@ -2501,21 +3391,45 @@ export function mountStore(root, { onTalk } = {}) {
       releaseStageVideo(panelRefs);
       stageVideo.hidden = true;
       const nextTryOn = stageUrl(media.renders[activeKind], 900);
+      const renderKey = `${activeKind}:${nextTryOn}`;
+      const renderSwitched = panelRefs.lastShownRenderKey !== renderKey;
       tryOnImg.hidden = media.failedUrls.has(nextTryOn);
       tryOnImg.alt =
         activeKind === 'scene' ? `${lookLabel} on location` : `${lookLabel} try-on`;
       if (tryOnImg.getAttribute('src') !== nextTryOn) {
         tryOnImg.setAttribute('src', nextTryOn);
       }
-      if (showingTryOn && fadeRender) {
-        triggerMediaFade(tryOnImg, panelRefs);
+      if (showingTryOn) {
+        if (!reduced && fadeRender) {
+          startImageCrossfade(panelRefs, ghostEl);
+        } else {
+          cancelStageCrossfade(panelRefs);
+          tryOnImg.classList.remove('is-media-entering');
+        }
+        if (activeKind === 'scene' && !reduced) {
+          if (fadeRender || curtainReveal || renderSwitched) {
+            startSceneDrift(panelRefs);
+          }
+        } else {
+          cancelSceneDrift(panelRefs);
+        }
+        panelRefs.lastShownRenderKey = renderKey;
       } else {
+        cancelStageCurtain(panelRefs);
+        cancelStageCrossfade(panelRefs);
+        cancelSceneDrift(panelRefs);
+        panelRefs.lastShownRenderKey = null;
         tryOnImg.classList.remove('is-media-entering');
       }
     }
 
     if (showingTryOn) {
-      if (deferReveal) {
+      if (curtainReveal && !reduced) {
+        startStageCurtain(panelRefs);
+      } else if (tileSwitch && !prevShowingTryOn && !reduced) {
+        startStageLayerCrossfade(panelRefs);
+      } else if (deferReveal) {
+        cancelStageCurtain(panelRefs);
         stagePanel.classList.remove('is-showing-tryon');
         void stagePanel.offsetWidth;
         requestAnimationFrame(() => {
@@ -2529,9 +3443,11 @@ export function mountStore(root, { onTalk } = {}) {
           }
         });
       } else {
+        cancelStageCurtain(panelRefs);
         stagePanel.classList.add('is-showing-tryon');
       }
     } else {
+      cancelStageCurtain(panelRefs);
       stagePanel.classList.remove('is-showing-tryon');
     }
 
@@ -2638,6 +3554,7 @@ export function mountStore(root, { onTalk } = {}) {
     }
 
     updateBoardPointerRing(panelRefs, media, state.highlightedSlot, state.highlightedOccurrence);
+    maybeStartBoardDropIn(panelRefs, media);
   }
 
   function isElementInView(node) {
@@ -2651,7 +3568,10 @@ export function mountStore(root, { onTalk } = {}) {
   let activePickedRefs = null;
   let activeStageVideo = null;
 
-  function renderPickedView({ deferReveal = false } = {}) {
+  function renderPickedView({ deferReveal = false, curtainReveal = false } = {}) {
+    cancelPickedMotion(activePickedRefs);
+    clearLookEnterTimers();
+    cancelLooksTotalRolls();
     releaseStageVideo();
     boutiqueRefs = null;
     const look = state.outfits.get(state.pickedOutfit);
@@ -2704,8 +3624,18 @@ export function mountStore(root, { onTalk } = {}) {
       hidden: true,
       onLoad: () => {
         syncBoardFrameAspect(boardLayer, boardFrame, collageImg);
+        if (state.view === 'picked' && activePickedRefs && activePickedRefs.outfit === look.number) {
+          stagePanel.classList.remove('is-board-awaiting-drop');
+          boardFrame.classList.remove('is-board-awaiting-drop');
+          updateBoardSpotlight(activePickedRefs, media, state.highlightedSlot, state.highlightedOccurrence);
+          maybeStartBoardDropIn(activePickedRefs, media);
+        }
       },
       onError: () => {
+        if (activePickedRefs && activePickedRefs.outfit === look.number) {
+          cancelBoardDropIn(activePickedRefs);
+          clearBoardSpotlight(activePickedRefs, { immediate: true });
+        }
         if (stagePanel) stagePanel.classList.remove('has-collage');
         collageImg.hidden = true;
       },
@@ -2728,6 +3658,10 @@ export function mountStore(root, { onTalk } = {}) {
       onError: () => {
         const brokenSrc = tryOnImg.getAttribute('src');
         if (!brokenSrc) return;
+        if (activePickedRefs && activePickedRefs.outfit === look.number) {
+          cancelStageCrossfade(activePickedRefs);
+          cancelSceneDrift(activePickedRefs);
+        }
         media.failedUrls.add(brokenSrc);
         tryOnImg.hidden = true;
         const altKind =
@@ -2926,21 +3860,7 @@ export function mountStore(root, { onTalk } = {}) {
           occurrence === state.highlightedOccurrence
       );
       if (isPointed) hasActiveRow = true;
-      return el(
-        'li',
-        {
-          className: `piece-note-item${isPointed ? ' is-pointed' : ''}`,
-          dataset: { slot: piece.slot || '', occurrence, outfit: look.number },
-        },
-        el(
-          'div',
-          { className: 'piece-note-top' },
-          el('span', { className: 'piece-slot-name' }, formatSlot(piece.slot)),
-          el('span', { className: 'piece-note-price' }, formatPrice(piece.item?.price))
-        ),
-        el('span', { className: 'piece-note-title' }, piece.item?.title || ''),
-        piece.why ? el('p', { className: 'piece-note-why' }, piece.why) : null
-      );
+      return buildPieceNoteRow(piece, occurrence, look.number, isPointed);
     });
 
     const pieceNotesList = el(
@@ -2970,6 +3890,8 @@ export function mountStore(root, { onTalk } = {}) {
       hidden: true,
     });
 
+    const lookNameEl = el('h1', { className: 'stage-look-name' }, lookLabel);
+    const lookTotalEl = el('span', { className: 'stage-look-total' }, formatPrice(look.total));
     const notesCol = el(
       'aside',
       { className: 'stage-notes-col', 'aria-label': "Alice's notes" },
@@ -2980,8 +3902,8 @@ export function mountStore(root, { onTalk } = {}) {
         el(
           'div',
           { className: 'stage-notes-title-row' },
-          el('h1', { className: 'stage-look-name' }, lookLabel),
-          el('span', { className: 'stage-look-total' }, formatPrice(look.total))
+          lookNameEl,
+          lookTotalEl
         )
       ),
       pieceNotesList,
@@ -3017,6 +3939,11 @@ export function mountStore(root, { onTalk } = {}) {
       )
     );
 
+    const shopCountEl = el(
+      'span',
+      { className: 'shop-look-count' },
+      `${piecesCount} ${piecesCount === 1 ? 'piece' : 'pieces'}`
+    );
     const shopSection = el(
       'section',
       { className: 'shop-look-section', 'aria-label': 'Shop the look' },
@@ -3024,7 +3951,7 @@ export function mountStore(root, { onTalk } = {}) {
         'div',
         { className: 'shop-look-head' },
         el('h2', { className: 'shop-look-title' }, 'Shop the look'),
-        el('span', { className: 'shop-look-count' }, `${piecesCount} ${piecesCount === 1 ? 'piece' : 'pieces'}`)
+        shopCountEl
       ),
       shopGrid
     );
@@ -3032,11 +3959,15 @@ export function mountStore(root, { onTalk } = {}) {
     activePickedRefs = {
       outfit: look.number,
       lookLabel,
+      lookNameEl,
+      lookTotalEl,
+      shopCountEl,
       stagePanel,
       boardLayer,
       boardFrame,
       collageImg,
       pointerRing,
+      tryOnLayer,
       tryOnImg,
       stageVideo,
       videoPlayBtn,
@@ -3052,15 +3983,21 @@ export function mountStore(root, { onTalk } = {}) {
       tryOnStatusEl,
       pieceNotesList,
       shopGrid,
+      boardDrop: null,
+      spotlight: null,
+      stageMotion: null,
+      swapState: null,
+      lastShownRenderKey: null,
     };
 
     mainEl.replaceChildren(el('div', { className: 'picked-view' }, topBar, stage, shopSection));
-    applyStageState(activePickedRefs, media, { deferReveal });
+    applyStageState(activePickedRefs, media, { deferReveal, curtainReveal });
     updateNavActive();
   }
 
   function applyPointerInPlace(slot, occurrence = 1) {
     if (!activePickedRefs) return;
+    flushPendingSwap(activePickedRefs);
     const normalized = typeof slot === 'string' && slot.trim() ? slot.trim() : null;
     const targetOcc = normalized && Number.isInteger(occurrence) && occurrence >= 1 ? occurrence : 1;
     const targetOccStr = String(targetOcc);
@@ -3109,7 +4046,7 @@ export function mountStore(root, { onTalk } = {}) {
 
   function syncMediaInCurrentView(
     outfitNumber,
-    { deferReveal = false, fadeRender = false, newlyArrivedKind = null } = {}
+    { deferReveal = false, fadeRender = false, newlyArrivedKind = null, curtainReveal = false } = {}
   ) {
     const media = getMedia(outfitNumber);
     if (state.view === 'looks') {
@@ -3123,7 +4060,7 @@ export function mountStore(root, { onTalk } = {}) {
         applyLookCardCollage(visualEl, boardLayer, boardImg, media.collageUrl);
       }
     } else if (state.view === 'picked' && activePickedRefs && activePickedRefs.outfit === outfitNumber) {
-      applyStageState(activePickedRefs, media, { deferReveal, fadeRender, newlyArrivedKind });
+      applyStageState(activePickedRefs, media, { deferReveal, fadeRender, newlyArrivedKind, curtainReveal });
     }
   }
 
@@ -4181,6 +5118,8 @@ export function mountStore(root, { onTalk } = {}) {
       leaveSearchView();
 
       if (payload.replace === true) {
+        cancelPickedMotion(activePickedRefs);
+        playedBoardUrls.clear();
         releaseStageVideo();
         for (const media of state.media.values()) {
           clearLookRenders(media);
@@ -4198,11 +5137,16 @@ export function mountStore(root, { onTalk } = {}) {
         state.subtitleMeta = parseSubtitleMeta(payload.subtitle, payload);
       }
 
+      const prevOutfitNums = payload.replace === true ? new Set() : new Set(state.outfits.keys());
+      const addedNums = new Set();
       let nextNum = state.outfits.size + 1;
       for (const rawOutfit of payload.outfits) {
         if (!rawOutfit || typeof rawOutfit !== 'object') continue;
         const outfit = normalizeOutfit(rawOutfit, nextNum);
         state.outfits.set(outfit.number, outfit);
+        if (!prevOutfitNums.has(outfit.number)) {
+          addedNums.add(outfit.number);
+        }
         nextNum = Math.max(nextNum, outfit.number + 1);
       }
 
@@ -4213,7 +5157,7 @@ export function mountStore(root, { onTalk } = {}) {
         state.highlightedOccurrence = null;
         activePickedRefs = null;
         setHasProducts();
-        renderLooksView();
+        renderLooksView({ animateNums: addedNums });
       } else {
         renderHomeView();
       }
@@ -4293,6 +5237,7 @@ export function mountStore(root, { onTalk } = {}) {
 
       closeProductPanel();
 
+      const oldLook = state.outfits.get(payload.outfit) || null;
       const updated = normalizeOutfit({ ...payload.data, number: payload.outfit }, payload.outfit);
       state.outfits.set(payload.outfit, updated);
 
@@ -4313,13 +5258,83 @@ export function mountStore(root, { onTalk } = {}) {
         state.highlightedOccurrence = null;
       }
 
+      let flippedInPlace = false;
       if (state.view === 'looks') {
         renderLooksView();
+        if (!prefersReducedMotion() && oldLook && Number(oldLook.total) !== Number(updated.total)) {
+          const totalNode = mainEl.querySelector(
+            `.look-card[data-look-card="${CSS.escape(String(payload.outfit))}"] .look-total-value`
+          );
+          if (totalNode) {
+            const rollState = { rafId: null };
+            looksTotalRolls.set(payload.outfit, rollState);
+            rollPriceText(totalNode, oldLook.total, updated.total, rollState, () => {
+              if (looksTotalRolls.get(payload.outfit) === rollState) {
+                looksTotalRolls.delete(payload.outfit);
+              }
+            });
+          }
+        }
       } else if (state.view === 'picked' && state.pickedOutfit === payload.outfit) {
-        renderPickedView();
+        const isSamePicked = Boolean(activePickedRefs && activePickedRefs.outfit === payload.outfit);
+        const midFlip = Boolean(isSamePicked && activePickedRefs.swapState && activePickedRefs.swapState.active);
+        if (midFlip) {
+          renderPickedView();
+        } else if (!prefersReducedMotion() && isSamePicked && canSwapInPlace(oldLook, updated)) {
+          const swappedIndices = findSwappedIndices(oldLook, updated, payload.slot);
+          if (swappedIndices.length > 0) {
+            const nextLabel = updated.name || `Look ${updated.number}`;
+            activePickedRefs.lookLabel = nextLabel;
+            if (activePickedRefs.lookNameEl) activePickedRefs.lookNameEl.textContent = nextLabel;
+            applyStageState(activePickedRefs, media);
+            applyPointerInPlace(null, null);
+            flippedInPlace = applyInPlaceSwap(activePickedRefs, oldLook, updated, swappedIndices);
+          }
+          if (!flippedInPlace) {
+            renderPickedView();
+            if (oldLook && activePickedRefs && activePickedRefs.lookTotalEl && Number(oldLook.total) !== Number(updated.total)) {
+              const totalRoll = { rafId: null };
+              activePickedRefs.swapState = {
+                active: false,
+                committed: true,
+                entries: [],
+                halfTimer: null,
+                doneTimer: null,
+                totalRoll,
+                finalTotalText: formatPrice(updated.total),
+              };
+              rollPriceText(activePickedRefs.lookTotalEl, oldLook.total, updated.total, totalRoll, () => {
+                if (activePickedRefs && activePickedRefs.swapState?.totalRoll === totalRoll) {
+                  activePickedRefs.swapState = null;
+                }
+              });
+            }
+          }
+        } else {
+          renderPickedView();
+          if (
+            !prefersReducedMotion() &&
+            oldLook &&
+            activePickedRefs &&
+            activePickedRefs.lookTotalEl &&
+            Number(oldLook.total) !== Number(updated.total)
+          ) {
+            const totalRoll = { rafId: null };
+            activePickedRefs.swapState = {
+              active: false,
+              committed: true,
+              entries: [],
+              halfTimer: null,
+              doneTimer: null,
+              totalRoll,
+              finalTotalText: formatPrice(updated.total),
+            };
+            rollPriceText(activePickedRefs.lookTotalEl, oldLook.total, updated.total, totalRoll);
+          }
+        }
       }
 
-      if (typeof payload.slot === 'string' && payload.slot.trim()) {
+      if (!flippedInPlace && typeof payload.slot === 'string' && payload.slot.trim()) {
         flashUpdatedSlot(payload.outfit, payload.slot.trim());
       }
 
@@ -4428,6 +5443,7 @@ export function mountStore(root, { onTalk } = {}) {
     }),
 
     showAll: safeHandler(() => {
+      cancelPickedMotion(activePickedRefs);
       releaseStageVideo();
       closeProductPanel();
       leaveSearchView();
@@ -4494,11 +5510,18 @@ export function mountStore(root, { onTalk } = {}) {
         state.pickedOutfit = payload.outfit;
         state.highlightedSlot = null;
         state.highlightedOccurrence = null;
-        renderPickedView({ deferReveal: !wasAlreadyShowingTryOn });
+        renderPickedView({
+          deferReveal: !wasAlreadyShowingTryOn,
+          curtainReveal: !wasAlreadyShowingTryOn,
+        });
         window.scrollTo({ top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
       } else {
+        if (activePickedRefs && activePickedRefs.outfit === payload.outfit) {
+          flushPendingSwap(activePickedRefs);
+        }
         syncMediaInCurrentView(payload.outfit, {
           deferReveal: !wasAlreadyShowingTryOn,
+          curtainReveal: !wasAlreadyShowingTryOn,
           fadeRender: renderChanged,
         });
         if (activePickedRefs && activePickedRefs.stagePanel && !isElementInView(activePickedRefs.stagePanel)) {
