@@ -4,6 +4,7 @@ import sharp from 'sharp';
 import { recordCost } from '../ledger.ts';
 import type { Gender, Outfit, Piece } from '../types.ts';
 import { buildContactSheet, runTryOnGate, runTryOnInspector } from './inspect.ts';
+import { RenderCeilingError, getRenderLimiter } from './limits.ts';
 import {
   newTryonId,
   publicUrl,
@@ -76,17 +77,19 @@ export async function generateImageWithRetry(
   while (true) {
     const attemptStart = Date.now();
     try {
-      const response = await withAttemptTimeout(
-        getGenAI().models.generateContent({
-          model,
-          contents: [{ role: 'user', parts }],
-          config: {
-            responseModalities: ['IMAGE'],
-            imageConfig: { aspectRatio: '3:4' },
-          },
-        }),
-        attemptTimeoutMs,
-        job,
+      const response = await getRenderLimiter().run('image', () =>
+        withAttemptTimeout(
+          getGenAI().models.generateContent({
+            model,
+            contents: [{ role: 'user', parts }],
+            config: {
+              responseModalities: ['IMAGE'],
+              imageConfig: { aspectRatio: '3:4' },
+            },
+          }),
+          attemptTimeoutMs,
+          job,
+        ),
       );
       const attemptMs = Date.now() - attemptStart;
 
@@ -110,6 +113,10 @@ export async function generateImageWithRetry(
         mimeType: part.inlineData.mimeType || 'image/jpeg',
       };
     } catch (err) {
+      if (err instanceof RenderCeilingError) {
+        throw err;
+      }
+
       if (isRateLimitOrUnavailable(err) && rateLimitAttempt < RATE_LIMIT_DELAYS_MS.length) {
         const delayMs = RATE_LIMIT_DELAYS_MS[rateLimitAttempt++];
         console.error(

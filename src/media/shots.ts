@@ -6,6 +6,7 @@ import sharp from 'sharp';
 import { recordCost } from '../ledger.ts';
 import { getProduct } from '../store/catalog.ts';
 import type { Item } from '../types.ts';
+import { safeFetchImageBuffer } from './limits.ts';
 import {
   classifyShotSource,
   collectImageUrls,
@@ -64,19 +65,7 @@ export async function writeFileAtomic(filePath: string, data: Buffer): Promise<v
 }
 
 export async function fetchImageBuffer(url: string, timeoutMs = DOWNLOAD_TIMEOUT_MS): Promise<Buffer> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} fetching ${url}`);
-  }
-  const ct = (res.headers.get('content-type') || '').toLowerCase();
-  if (ct.includes('text/html') || ct.includes('application/json') || ct.includes('text/plain')) {
-    throw new Error(`Non-image content-type "${ct}" for ${url}`);
-  }
-  const arr = await res.arrayBuffer();
-  if (arr.byteLength === 0) {
-    throw new Error(`Empty response for ${url}`);
-  }
-  return Buffer.from(arr);
+  return safeFetchImageBuffer(url, { timeoutMs });
 }
 
 async function downloadThumb(
