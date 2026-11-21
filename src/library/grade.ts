@@ -591,8 +591,15 @@ export async function runGrading(
   for (const gender of ['men', 'women'] as const) {
     const keys = [...new Set(failedByGender[gender])];
     failedByGender[gender] = keys;
-    if (keys.length > 0) {
-      emit(`node --env-file-if-exists=.env.local src/library/build.ts --rebuild --only ${keys.join(',')} --gender ${gender}`);
+    const baseKeys = keys.filter((k) => !k.endsWith('@premium'));
+    const premiumKeys = keys
+      .filter((k) => k.endsWith('@premium'))
+      .map((k) => k.slice(0, -'@premium'.length));
+    if (baseKeys.length > 0) {
+      emit(`node --env-file-if-exists=.env.local src/library/build.ts --rebuild --only ${baseKeys.join(',')} --gender ${gender}`);
+    }
+    if (premiumKeys.length > 0) {
+      emit(`node --env-file-if-exists=.env.local src/library/build.ts --tier premium --rebuild --only ${premiumKeys.join(',')} --gender ${gender}`);
     }
   }
 
