@@ -39,10 +39,29 @@ function safeExternalUrl(url) {
   return null;
 }
 
+function safeOptionalUrl(url) {
+  if (typeof url !== 'string' || !url.trim()) return null;
+  return safeExternalUrl(url);
+}
+
 function formatPrice(amount) {
   const num = Number(amount);
   if (!Number.isFinite(num)) return '$0';
   return Number.isInteger(num) ? `$${num}` : `$${num.toFixed(2)}`;
+}
+
+// Format a price only when a valid numeric value is present; missing values return null
+function formatOptionalPrice(amount) {
+  if (typeof amount === 'number' && Number.isFinite(amount)) {
+    return formatPrice(amount);
+  }
+  if (typeof amount === 'string') {
+    const clean = amount.trim();
+    if (!clean) return null;
+    const num = Number(clean);
+    if (Number.isFinite(num)) return formatPrice(num);
+  }
+  return null;
 }
 
 function formatSlot(slot) {
@@ -343,6 +362,11 @@ export function mountStore(root, { onTalk } = {}) {
     bagCount: 0,
     bagData: null,
     bagOpen: false,
+    bagOpenedStores: new Set(),
+    drawerMode: 'bag', // 'bag' | 'review' | 'result'
+    orderReview: null,
+    orderConfirmedId: null,
+    orderResult: null,
     productOpen: false,
     lastSearch: null,
     searchFromBoutique: false,
@@ -540,7 +564,7 @@ export function mountStore(root, { onTalk } = {}) {
             onClick: () => {
               if (state.bagOpen) {
                 closeBagDrawer();
-              } else if (state.bagData) {
+              } else if (hasDrawerContent()) {
                 openBagDrawer();
               }
             },
@@ -669,8 +693,36 @@ export function mountStore(root, { onTalk } = {}) {
   );
   productSlotEl.replaceChildren(productLayerEl);
 
+  const bagTitleEl = el('h2', { className: 'bag-panel-title' }, 'Your bag');
   const bagBodyEl = el('div', { className: 'panel-body bag-panel-body' });
   const bagFooterEl = el('div', { className: 'panel-footer bag-panel-footer' });
+  const bagSheetEl = el(
+    'aside',
+    {
+      className: 'panel-sheet panel-sheet--bag',
+      role: 'dialog',
+      'aria-modal': 'true',
+      'aria-label': 'Your bag',
+    },
+    el(
+      'div',
+      { className: 'panel-head bag-panel-head' },
+      bagTitleEl,
+      el(
+        'button',
+        {
+          type: 'button',
+          className: 'panel-close-btn',
+          'aria-label': 'Close bag',
+          dataset: { closeBag: 'true' },
+          onClick: () => closeBagDrawer(),
+        },
+        closeSvg()
+      )
+    ),
+    bagBodyEl,
+    bagFooterEl
+  );
   const bagLayerEl = el(
     'div',
     { className: 'panel-layer panel-layer--bag', 'aria-hidden': 'true' },
@@ -678,33 +730,7 @@ export function mountStore(root, { onTalk } = {}) {
       className: 'panel-backdrop',
       onClick: () => closeBagDrawer(),
     }),
-    el(
-      'aside',
-      {
-        className: 'panel-sheet panel-sheet--bag',
-        role: 'dialog',
-        'aria-modal': 'true',
-        'aria-label': 'Your bag',
-      },
-      el(
-        'div',
-        { className: 'panel-head bag-panel-head' },
-        el('h2', { className: 'bag-panel-title' }, 'Your bag'),
-        el(
-          'button',
-          {
-            type: 'button',
-            className: 'panel-close-btn',
-            'aria-label': 'Close bag',
-            dataset: { closeBag: 'true' },
-            onClick: () => closeBagDrawer(),
-          },
-          closeSvg()
-        )
-      ),
-      bagBodyEl,
-      bagFooterEl
-    )
+    bagSheetEl
   );
   bagSlotEl.replaceChildren(bagLayerEl);
 
@@ -2467,6 +2493,12 @@ export function mountStore(root, { onTalk } = {}) {
     if (sync) syncPanelOpen();
   }
 
+  function hasDrawerContent() {
+    if (state.drawerMode === 'review') return Boolean(state.orderReview);
+    if (state.drawerMode === 'result') return Boolean(state.orderResult);
+    return Boolean(state.bagData);
+  }
+
   function closeBagDrawer() {
     state.bagOpen = false;
     bagLayerEl.classList.remove('is-open');
@@ -2475,7 +2507,7 @@ export function mountStore(root, { onTalk } = {}) {
   }
 
   function openBagDrawer() {
-    if (!state.bagData) return;
+    if (!hasDrawerContent()) return;
     // Opening the bag closes the product page first without flickering panel-open
     closeProductPanel({ sync: false });
     state.bagOpen = true;
@@ -2736,7 +2768,16 @@ export function mountStore(root, { onTalk } = {}) {
     productBodyEl.scrollTop = 0;
   }
 
+  function setBagDrawerHeader(title) {
+    bagTitleEl.textContent = title;
+    bagSheetEl.setAttribute('aria-label', title);
+  }
+
   function renderBagDrawer({ stores, links, total }) {
+    setBagDrawerHeader('Your bag');
+    bagFooterEl.hidden = false;
+    bagBodyEl.classList.remove('bag-panel-body--no-footer');
+
     const linkByStore = new Map();
     for (const link of links) {
       if (link && typeof link.store === 'string' && typeof link.url === 'string') {
@@ -2751,11 +2792,20 @@ export function mountStore(root, { onTalk } = {}) {
     if (stores.length === 0) {
       bagBodyEl.replaceChildren(el('p', { className: 'bag-empty' }, 'Nothing in your bag yet.'));
     } else {
-      const storeNodes = stores.map((storeObj) => {
+      const resolvedStores = stores.map((storeObj) => {
         const storeName =
           typeof storeObj.store === 'string' && storeObj.store.trim()
             ? storeObj.store.trim()
             : 'Store';
+        const checkoutUrl =
+          linkByStore.get(storeName) || linkByStore.get(storeName.toLowerCase()) || null;
+        return { storeObj, storeName, checkoutUrl };
+      });
+
+      const checkoutLinkCount = resolvedStores.filter((entry) => Boolean(entry.checkoutUrl)).length;
+      let linkIndex = 0;
+
+      const storeNodes = resolvedStores.map(({ storeObj, storeName, checkoutUrl }, idx) => {
         const addedLines = Array.isArray(storeObj.added)
           ? storeObj.added.filter((line) => line && typeof line === 'object')
           : [];
@@ -2764,8 +2814,6 @@ export function mountStore(root, { onTalk } = {}) {
           : [];
         const hasSubtotal =
           typeof storeObj.subtotal === 'number' && Number.isFinite(storeObj.subtotal);
-        const checkoutUrl =
-          linkByStore.get(storeName) || linkByStore.get(storeName.toLowerCase()) || null;
 
         const addedList =
           addedLines.length > 0
@@ -2813,8 +2861,37 @@ export function mountStore(root, { onTalk } = {}) {
             )
           : null;
 
-        const checkoutBtn = checkoutUrl
-          ? el(
+        let checkoutBtn = null;
+        if (checkoutUrl) {
+          if (checkoutLinkCount >= 2) {
+            linkIndex += 1;
+            const storeKey = `${idx}::${storeName.toLowerCase()}::${checkoutUrl}`;
+            const openedEl = el(
+              'span',
+              { className: 'bag-checkout-opened', hidden: !state.bagOpenedStores.has(storeKey) },
+              'Opened'
+            );
+            checkoutBtn = el(
+              'div',
+              { className: 'bag-checkout-row' },
+              el(
+                'a',
+                {
+                  className: 'btn-primary bag-checkout-btn',
+                  href: checkoutUrl,
+                  target: '_blank',
+                  rel: 'noopener',
+                  onClick: () => {
+                    state.bagOpenedStores.add(storeKey);
+                    openedEl.hidden = false;
+                  },
+                },
+                `Checkout at ${storeName} · ${linkIndex} of ${checkoutLinkCount}`
+              ),
+              openedEl
+            );
+          } else {
+            checkoutBtn = el(
               'a',
               {
                 className: 'btn-primary bag-checkout-btn',
@@ -2823,8 +2900,9 @@ export function mountStore(root, { onTalk } = {}) {
                 rel: 'noopener',
               },
               `Checkout at ${storeName}`
-            )
-          : null;
+            );
+          }
+        }
 
         const notAddedBox =
           notAddedLines.length > 0
@@ -2879,6 +2957,401 @@ export function mountStore(root, { onTalk } = {}) {
       el('p', { className: 'bag-disclaimer' }, "You check out on each store's own site. Alice never pays.")
     );
     bagBodyEl.scrollTop = 0;
+  }
+
+  function normalizeOrderStore(raw) {
+    const store = typeof raw.store === 'string' && raw.store.trim() ? raw.store.trim() : '';
+    const items = Array.isArray(raw.items)
+      ? raw.items
+          .filter((line) => line && typeof line === 'object')
+          .map((line) => ({
+            title: typeof line.title === 'string' && line.title.trim() ? line.title.trim() : '',
+            image: typeof line.image === 'string' && line.image.trim() ? line.image.trim() : '',
+            price: formatOptionalPrice(line.price),
+            size: typeof line.size === 'string' && line.size.trim() ? line.size.trim() : '',
+          }))
+      : [];
+    const orderNumber =
+      typeof raw.order_number === 'string' && raw.order_number.trim()
+        ? raw.order_number.trim()
+        : typeof raw.order_number === 'number' && Number.isFinite(raw.order_number)
+          ? String(raw.order_number)
+          : '';
+    return {
+      store,
+      items,
+      total: formatOptionalPrice(raw.total),
+      payment_label:
+        typeof raw.payment_label === 'string' && raw.payment_label.trim()
+          ? raw.payment_label.trim()
+          : '',
+      ready: raw.ready !== false,
+      status: typeof raw.status === 'string' ? raw.status.trim().toLowerCase() : '',
+      order_number: orderNumber,
+      continue_url: safeOptionalUrl(raw.continue_url),
+      note: typeof raw.note === 'string' && raw.note.trim() ? raw.note.trim() : '',
+    };
+  }
+
+  function buildOrderLine(line) {
+    const thumbUrl = line.image ? sized(line.image, 160) : '';
+    const hasThumb = Boolean(thumbUrl);
+    return el(
+      'li',
+      { className: `bag-line${hasThumb ? '' : ' bag-line--no-thumb'}` },
+      hasThumb
+        ? el(
+            'div',
+            { className: 'bag-line-thumb' },
+            el('img', {
+              className: 'bag-line-img',
+              src: thumbUrl,
+              alt: line.title || 'Garment',
+              loading: 'lazy',
+              decoding: 'async',
+              onError: (e) => {
+                e.currentTarget.hidden = true;
+              },
+            })
+          )
+        : null,
+      el(
+        'div',
+        { className: 'bag-line-info' },
+        line.title ? el('span', { className: 'bag-line-title' }, line.title) : null,
+        line.size ? el('span', { className: 'bag-line-size' }, `Size ${line.size}`) : null
+      ),
+      line.price ? el('span', { className: 'bag-line-price' }, line.price) : null
+    );
+  }
+
+  function dismissOrderReviewToBag() {
+    state.orderReview = null;
+    state.orderConfirmedId = null;
+    state.drawerMode = 'bag';
+    renderBagDrawer(state.bagData || { stores: [], links: [], total: null });
+  }
+
+  // Update the review footer in place so confirm/undo keeps scroll position
+  function renderOrderReviewFooter() {
+    const order = state.orderReview;
+    if (!order) return;
+
+    const footerNodes = [];
+    if (order.total) {
+      footerNodes.push(
+        el(
+          'div',
+          { className: 'bag-total-row' },
+          el('span', { className: 'bag-total-label' }, 'Total'),
+          el('span', { className: 'bag-total-value' }, order.total)
+        )
+      );
+    }
+
+    if (order.needs_sign_in) {
+      footerNodes.push(
+        el(
+          'div',
+          { className: 'order-review-actions' },
+          el(
+            'button',
+            {
+              type: 'button',
+              className: 'btn-secondary order-cancel-btn order-cancel-btn--full',
+              onClick: () => dismissOrderReviewToBag(),
+            },
+            'Not now'
+          )
+        )
+      );
+    } else if (state.orderConfirmedId === order.order_id) {
+      footerNodes.push(
+        el(
+          'div',
+          { className: 'order-confirmed-box', role: 'status', 'aria-live': 'polite' },
+          el('p', { className: 'order-confirmed-text' }, 'Confirmed. Tell Alice yes to place the order.'),
+          el(
+            'button',
+            {
+              type: 'button',
+              className: 'order-undo-btn',
+              onClick: () => {
+                state.orderConfirmedId = null;
+                renderOrderReviewFooter();
+              },
+            },
+            'Undo'
+          )
+        )
+      );
+    } else {
+      footerNodes.push(
+        el(
+          'div',
+          { className: 'order-review-actions' },
+          el(
+            'button',
+            {
+              type: 'button',
+              className: 'btn-primary order-confirm-btn',
+              onClick: () => {
+                if (
+                  state.drawerMode === 'review' &&
+                  state.orderReview &&
+                  state.orderReview.order_id === order.order_id &&
+                  !state.orderReview.needs_sign_in
+                ) {
+                  state.orderConfirmedId = order.order_id;
+                  renderOrderReviewFooter();
+                }
+              },
+            },
+            'Confirm order'
+          ),
+          el(
+            'button',
+            {
+              type: 'button',
+              className: 'btn-secondary order-cancel-btn',
+              onClick: () => dismissOrderReviewToBag(),
+            },
+            'Not now'
+          )
+        ),
+        el(
+          'p',
+          { className: 'bag-disclaimer order-confirm-note' },
+          'Alice places the order only after you confirm here and tell her yes.'
+        )
+      );
+    }
+
+    bagFooterEl.hidden = footerNodes.length === 0;
+    bagBodyEl.classList.toggle('bag-panel-body--no-footer', footerNodes.length === 0);
+    bagFooterEl.replaceChildren(...footerNodes);
+  }
+
+  function renderOrderReviewDrawer() {
+    const order = state.orderReview;
+    if (!order) return;
+
+    setBagDrawerHeader('Review your order');
+
+    const bodyNodes = [];
+
+    if (order.needs_sign_in) {
+      const signInUrl = order.sign_in ? order.sign_in.url : null;
+      const signInCode = order.sign_in ? order.sign_in.code : '';
+      bodyNodes.push(
+        el(
+          'section',
+          { className: 'order-signin-card', 'aria-label': 'Connect Shop Pay' },
+          el(
+            'p',
+            { className: 'order-signin-copy' },
+            'Sign in to Shop so Alice can place the order for you.'
+          ),
+          signInCode
+            ? el(
+                'div',
+                { className: 'order-signin-code-block' },
+                el('span', { className: 'order-signin-code-label' }, 'Your code'),
+                el('span', { className: 'order-signin-code' }, signInCode)
+              )
+            : null,
+          signInUrl
+            ? el(
+                'a',
+                {
+                  className: 'btn-primary order-signin-btn',
+                  href: signInUrl,
+                  target: '_blank',
+                  rel: 'noopener noreferrer',
+                },
+                'Connect Shop Pay'
+              )
+            : null
+        )
+      );
+    }
+
+    for (const storeObj of order.stores) {
+      const itemsList =
+        storeObj.items.length > 0
+          ? el('ul', { className: 'bag-lines' }, storeObj.items.map((line) => buildOrderLine(line)))
+          : null;
+
+      const storeTotalRow = storeObj.total
+        ? el(
+            'div',
+            { className: 'bag-store-subtotal' },
+            el('span', { className: 'bag-store-subtotal-label' }, 'Store total'),
+            el('span', { className: 'bag-store-subtotal-val' }, storeObj.total)
+          )
+        : null;
+
+      const paymentEl = storeObj.payment_label
+        ? el('p', { className: 'order-store-payment' }, storeObj.payment_label)
+        : null;
+
+      const notReadyNote = !storeObj.ready
+        ? el(
+            'p',
+            { className: 'order-store-note' },
+            storeObj.note || 'This store finishes on its own site.'
+          )
+        : null;
+
+      const notReadyBtn =
+        !storeObj.ready && storeObj.continue_url
+          ? el(
+              'a',
+              {
+                className: 'btn-primary bag-checkout-btn',
+                href: storeObj.continue_url,
+                target: '_blank',
+                rel: 'noopener noreferrer',
+              },
+              storeObj.store ? `Checkout at ${storeObj.store}` : 'Checkout at store'
+            )
+          : null;
+
+      bodyNodes.push(
+        el(
+          'section',
+          { className: 'bag-store-section order-review-section' },
+          storeObj.store ? el('h3', { className: 'bag-store-name' }, storeObj.store) : null,
+          itemsList,
+          storeTotalRow,
+          paymentEl,
+          notReadyNote,
+          notReadyBtn
+        )
+      );
+    }
+
+    if (order.address_label) {
+      bodyNodes.push(
+        el('p', { className: 'order-address' }, `Ships to ${order.address_label}`)
+      );
+    }
+
+    bagBodyEl.replaceChildren(...bodyNodes);
+    bagBodyEl.scrollTop = 0;
+    renderOrderReviewFooter();
+  }
+
+  function renderOrderResultDrawer(result) {
+    const stores = result.stores || [];
+    const allPlaced = stores.length > 0 && stores.every((s) => s.status === 'placed');
+    setBagDrawerHeader(allPlaced ? 'Order placed' : 'Your order');
+
+    const storeNodes = stores.map((storeObj) => {
+      const checkoutLabel = storeObj.store ? `Checkout at ${storeObj.store}` : 'Checkout at store';
+      const checkoutBtn = storeObj.continue_url
+        ? el(
+            'a',
+            {
+              className: 'btn-primary bag-checkout-btn',
+              href: storeObj.continue_url,
+              target: '_blank',
+              rel: 'noopener noreferrer',
+            },
+            checkoutLabel
+          )
+        : null;
+
+      if (storeObj.status === 'placed') {
+        const metaNodes = [];
+        if (storeObj.total) {
+          metaNodes.push(
+            el(
+              'div',
+              { className: 'bag-store-subtotal' },
+              el('span', { className: 'bag-store-subtotal-label' }, 'Total'),
+              el('span', { className: 'bag-store-subtotal-val' }, storeObj.total)
+            )
+          );
+        }
+        if (storeObj.order_number) {
+          metaNodes.push(
+            el('p', { className: 'order-result-number' }, `Order ${storeObj.order_number}`)
+          );
+        }
+        return el(
+          'section',
+          { className: 'bag-store-section order-result-section' },
+          el(
+            'div',
+            { className: 'order-result-head' },
+            storeObj.store ? el('h3', { className: 'bag-store-name' }, storeObj.store) : null,
+            el('span', { className: 'order-status order-status--placed' }, 'Order placed')
+          ),
+          ...metaNodes
+        );
+      }
+
+      if (storeObj.status === 'handoff') {
+        return el(
+          'section',
+          { className: 'bag-store-section order-result-section' },
+          storeObj.store ? el('h3', { className: 'bag-store-name' }, storeObj.store) : null,
+          el(
+            'p',
+            { className: 'order-store-note' },
+            storeObj.note || "Finish this one on the store's site."
+          ),
+          checkoutBtn
+        );
+      }
+
+      if (storeObj.status === 'failed') {
+        return el(
+          'section',
+          { className: 'bag-store-section order-result-section' },
+          el(
+            'div',
+            { className: 'order-result-head' },
+            storeObj.store ? el('h3', { className: 'bag-store-name' }, storeObj.store) : null,
+            el('span', { className: 'order-status order-status--failed' }, 'Not placed')
+          ),
+          storeObj.note ? el('p', { className: 'order-store-note' }, storeObj.note) : null,
+          checkoutBtn
+        );
+      }
+
+      if (storeObj.status === 'placing') {
+        return el(
+          'section',
+          { className: 'bag-store-section order-result-section' },
+          storeObj.store ? el('h3', { className: 'bag-store-name' }, storeObj.store) : null,
+          el('p', { className: 'order-status-placing' }, 'Placing your order…')
+        );
+      }
+
+      return el(
+        'section',
+        { className: 'bag-store-section order-result-section' },
+        storeObj.store ? el('h3', { className: 'bag-store-name' }, storeObj.store) : null,
+        storeObj.total
+          ? el(
+              'div',
+              { className: 'bag-store-subtotal' },
+              el('span', { className: 'bag-store-subtotal-label' }, 'Total'),
+              el('span', { className: 'bag-store-subtotal-val' }, storeObj.total)
+            )
+          : null,
+        storeObj.note ? el('p', { className: 'order-store-note' }, storeObj.note) : null,
+        checkoutBtn
+      );
+    });
+
+    bagBodyEl.replaceChildren(...storeNodes);
+    bagBodyEl.scrollTop = 0;
+    bagFooterEl.replaceChildren();
+    bagFooterEl.hidden = true;
+    bagBodyEl.classList.add('bag-panel-body--no-footer');
   }
 
   function renderSearchView(query, items) {
@@ -3265,6 +3738,11 @@ export function mountStore(root, { onTalk } = {}) {
       const total =
         typeof payload.total === 'number' && Number.isFinite(payload.total) ? payload.total : null;
 
+      state.orderReview = null;
+      state.orderConfirmedId = null;
+      state.orderResult = null;
+      state.drawerMode = 'bag';
+      state.bagOpenedStores = new Set();
       state.bagData = { stores, links, total };
       state.bagCount = stores.reduce(
         (sum, s) => sum + (Array.isArray(s.added) ? s.added.length : 0),
@@ -3273,6 +3751,89 @@ export function mountStore(root, { onTalk } = {}) {
       updateBagBadge();
       setHasProducts();
       renderBagDrawer(state.bagData);
+      openBagDrawer();
+      return { ok: true };
+    }),
+
+    showOrderReview: safeHandler((payload) => {
+      const raw =
+        payload && payload.order && typeof payload.order === 'object' && !Array.isArray(payload.order)
+          ? payload.order
+          : null;
+      if (
+        !raw ||
+        typeof raw.order_id !== 'string' ||
+        !raw.order_id.trim() ||
+        !Array.isArray(raw.stores)
+      ) {
+        return { ok: false, error: 'showOrderReview requires order with order_id and stores array' };
+      }
+
+      const rawSignIn = raw.sign_in && typeof raw.sign_in === 'object' ? raw.sign_in : null;
+      const signInCode =
+        rawSignIn && typeof rawSignIn.code === 'string' && rawSignIn.code.trim()
+          ? rawSignIn.code.trim()
+          : rawSignIn && typeof rawSignIn.code === 'number' && Number.isFinite(rawSignIn.code)
+            ? String(rawSignIn.code)
+            : '';
+
+      state.orderReview = {
+        order_id: raw.order_id,
+        stores: raw.stores.filter((s) => s && typeof s === 'object').map((s) => normalizeOrderStore(s)),
+        total: formatOptionalPrice(raw.total),
+        address_label:
+          typeof raw.address_label === 'string' && raw.address_label.trim()
+            ? raw.address_label.trim()
+            : '',
+        needs_sign_in: raw.needs_sign_in === true,
+        sign_in: rawSignIn
+          ? {
+              url: safeOptionalUrl(rawSignIn.url),
+              code: signInCode,
+            }
+          : null,
+      };
+      state.orderConfirmedId = null;
+      state.orderResult = null;
+      state.drawerMode = 'review';
+
+      setHasProducts();
+      renderOrderReviewDrawer();
+      openBagDrawer();
+      return { ok: true };
+    }),
+
+    confirmOrder: safeHandler((payload) => {
+      const orderId = payload && typeof payload.order_id === 'string' ? payload.order_id : '';
+      const confirmed = Boolean(
+        orderId &&
+          state.drawerMode === 'review' &&
+          state.orderReview &&
+          state.orderReview.order_id === orderId &&
+          state.orderConfirmedId === orderId
+      );
+      return { ok: true, confirmed };
+    }),
+
+    orderPlaced: safeHandler((payload) => {
+      if (!payload || !Array.isArray(payload.stores)) {
+        return { ok: false, error: 'orderPlaced requires a stores array' };
+      }
+
+      const stores = payload.stores
+        .filter((s) => s && typeof s === 'object')
+        .map((s) => normalizeOrderStore(s));
+
+      state.orderReview = null;
+      state.orderConfirmedId = null;
+      state.orderResult = {
+        order_id: typeof payload.order_id === 'string' ? payload.order_id : '',
+        stores,
+      };
+      state.drawerMode = 'result';
+
+      setHasProducts();
+      renderOrderResultDrawer(state.orderResult);
       openBagDrawer();
       return { ok: true };
     }),
