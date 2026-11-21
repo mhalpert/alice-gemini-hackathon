@@ -37,6 +37,7 @@ export const DUPLICATE_WINDOW_MS = 15_000;
 export const MAX_BUDGET_USD = 10_000;
 export const DEFAULT_TRYON_WAIT_MS = 45_000;
 export const DEFAULT_HIGHLIGHT_WALK_MS = 2_200;
+export const DEFAULT_WEATHER_TIMEOUT_MS = 2_500;
 
 export const SLOW_TOOL_NOTES: Readonly<Record<string, string>> = {
   build_outfits: 'Working on building three outfits now.',
@@ -86,6 +87,16 @@ export interface StoreModuleLike {
   setCallRoom?: (room: string | null) => void;
 }
 
+export interface WeatherResultLike {
+  ok?: boolean;
+  line?: string;
+  ms?: number;
+}
+
+export interface WeatherModuleLike {
+  forecast?: (where: string, when?: string) => Promise<WeatherResultLike>;
+}
+
 export interface ToolDeps {
   buildOutfits?: (brief: Brief, opts?: BuildOptions) => Promise<BuildResult>;
   swapPiece?: (
@@ -113,6 +124,8 @@ export interface ToolDeps {
     gender: Gender,
   ) => Promise<BagOut>;
   loadStoreModule?: () => Promise<StoreModuleLike | null>;
+  forecast?: (where: string, when?: string) => Promise<WeatherResultLike>;
+  loadWeatherModule?: () => Promise<WeatherModuleLike | null>;
 }
 
 export interface ToolRuntimeOptions {
@@ -124,6 +137,7 @@ export interface ToolRuntimeOptions {
   duplicateWindowMs?: number;
   tryOnTimeoutMs?: number;
   walkIntervalMs?: number;
+  weatherTimeoutMs?: number;
   sendWorkingNote?: (params: WorkingNoteParams) => boolean | void;
   getSnapshot?: () => CameraSnapshot | null;
   page?: PageSender;
@@ -405,6 +419,11 @@ async function defaultLoadStoreModule(): Promise<StoreModuleLike | null> {
   }
 }
 
+async function defaultLoadWeatherModule(): Promise<WeatherModuleLike | null> {
+  const modPath = '../weather.ts';
+  return ((await import(modPath)) as WeatherModuleLike) ?? null;
+}
+
 interface DuplicateEntry {
   startedAt: number;
   callId: string;
@@ -558,6 +577,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
   const tryOnTimeoutMs = options.tryOnTimeoutMs ?? DEFAULT_TRYON_WAIT_MS;
   const walkIntervalMs = options.walkIntervalMs ?? DEFAULT_HIGHLIGHT_WALK_MS;
+  const weatherTimeoutMs = options.weatherTimeoutMs ?? DEFAULT_WEATHER_TIMEOUT_MS;
   const page = options.page ?? NOOP_PAGE_SENDER;
   const stateStore =
     options.state ?? createCallStateStore({ roomName: options.room, log: logFn });
@@ -577,12 +597,14 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         : undefined;
   const tryOnFn = options.deps?.tryOn ?? defaultTryOn;
   const loadStoreModuleFn = options.deps?.loadStoreModule ?? defaultLoadStoreModule;
+  const loadWeatherModuleFn = options.deps?.loadWeatherModule ?? defaultLoadWeatherModule;
 
   const outfitsByNumber = new Map<number, Outfit>();
   const mediaVersionByLook = new Map<number, number>();
   const tryOnJobs = new Map<number, TryOnJob>();
   const baggedResults = new Map<string, string>();
   let lastBriefNotes: string | undefined;
+  let lastBriefWeather: string | undefined;
 
   let walkGen = 0;
   let activeWalkTimer: TimerLike | null = null;
@@ -790,6 +812,78 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     return `Available looks are ${nums.join(', ')}. Ask which look they want or pick one first.`;
   }
 
+  async function lookupWeatherForBrief(
+    where: string,
+    when: string,
+  ): Promise<string | undefined> {
+    const started = nowFn();
+    const timeoutMs = weatherTimeoutMs;
+
+    const runLookup = async (): Promise<
+      { ok: true; line: string } | { ok: false; error: string }
+    > => {
+      try {
+        let forecastFn = options.deps?.forecast;
+        if (!forecastFn) {
+          const mod = await loadWeatherModuleFn();
+          if (typeof mod?.forecast === 'function') {
+            forecastFn = mod.forecast;
+          }
+        }
+        if (!forecastFn) {
+          return { ok: false, error: 'weather module unavailable' };
+        }
+        const res = await forecastFn(where, when);
+        const line = typeof res?.line === 'string' ? res.line.trim() : '';
+        if (res?.ok && line.length > 0) {
+          return { ok: true, line };
+        }
+        return { ok: false, error: 'forecast unavailable' };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { ok: false, error: message };
+      }
+    };
+
+    const outcome = await new Promise<
+      { ok: true; line: string } | { ok: false; error: string }
+    >((resolve) => {
+      let settled = false;
+      const timer = scheduleTimer(() => {
+        if (settled) return;
+        settled = true;
+        resolve({ ok: false, error: `timeout after ${timeoutMs}ms` });
+      }, timeoutMs);
+
+      void runLookup().then((res) => {
+        if (settled) return;
+        settled = true;
+        clearTimeoutFn(timer);
+        activeTimers.delete(timer);
+        resolve(res);
+      });
+    });
+
+    const ms = Math.max(0, Math.round(nowFn() - started));
+    if (outcome.ok) {
+      logFn(options.room, 'weather', {
+        where,
+        when,
+        line: outcome.line,
+        ms,
+      });
+      return outcome.line;
+    }
+
+    logFn(options.room, 'weather', {
+      where,
+      when,
+      ms,
+      error: outcome.error,
+    });
+    return undefined;
+  }
+
   function currentBrief(): Brief {
     const st = stateStore.get();
     return {
@@ -798,6 +892,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       budget_usd: st.budget.given ?? 0,
       ...(lastBriefNotes ? { notes: lastBriefNotes } : {}),
       ...(st.ownPiece ? { own_piece: st.ownPiece } : {}),
+      ...(lastBriefWeather ? { weather: lastBriefWeather } : {}),
     };
   }
 
@@ -832,8 +927,18 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         budget_usd: z.number().describe('Total budget in US dollars'),
         notes: z.string().optional().describe('Optional style, color, or fit notes'),
         own_piece: z.string().optional().describe('Optional piece the shopper already owns'),
+        where: z
+          .string()
+          .optional()
+          .describe('City or location for the occasion; fill only when the shopper explicitly gave a place'),
+        when: z
+          .string()
+          .optional()
+          .describe('Date or day for the occasion; fill only when the shopper explicitly gave a date or day'),
       }),
-      execute: wrapper.wrap('build_outfits', async ({ occasion, budget_usd, notes, own_piece }) => {
+      execute: wrapper.wrap(
+        'build_outfits',
+        async ({ occasion, budget_usd, notes, own_piece, where, when }) => {
         const department = stateStore.get().department;
         if (!department) {
           return 'Department is not set yet. Decide men or women yourself, call set_department first, then call build_outfits.';
@@ -842,6 +947,14 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         const budgetCapped = budget_usd > MAX_BUDGET_USD;
         const effectiveBudget = budgetCapped ? MAX_BUDGET_USD : budget_usd;
         lastBriefNotes = notes;
+
+        const cleanWhere = typeof where === 'string' ? where.trim() : '';
+        const cleanWhen = typeof when === 'string' ? when.trim() : '';
+        const weatherLine =
+          cleanWhere && cleanWhen
+            ? await lookupWeatherForBrief(cleanWhere, cleanWhen)
+            : undefined;
+        lastBriefWeather = weatherLine;
 
         stateStore.dispatch({
           type: 'set_brief',
@@ -857,6 +970,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           budget_usd: effectiveBudget,
           ...(notes ? { notes } : {}),
           ...(own_piece ? { own_piece } : {}),
+          ...(weatherLine ? { weather: weatherLine } : {}),
         };
 
         cancelWalk();
@@ -946,6 +1060,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             `Built ${sorted.length} looks, but the page did not confirm displaying them yet. Do not claim they are live on screen; mention loading lightly.`,
           );
         }
+        if (weatherLine) {
+          headerLines.push(`Weather (you may mention in one short clause): ${weatherLine}`);
+        }
 
         const lookLines = sorted.map((outfit) => {
           const num = outfit.number ?? 1;
@@ -1029,15 +1146,15 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         }
 
         const currentSnap = options.getSnapshot?.() ?? null;
-        const noSnapshot = !(job?.hadSnapshot) && !currentSnap;
-        const snapNote = noSnapshot
-          ? ' No camera snapshot was available (camera may be off); mention that lightly if relevant.'
+        const renderedOnModel = job ? !job.hadSnapshot : !currentSnap;
+        const cameraOffFallbackNote = renderedOnModel
+          ? ' Camera is off (stand-in model render); turning the camera on lets you show it on them.'
           : '';
 
         if (tryOnInfo?.status === 'rendering' && job) {
           const outcome = await waitForJobWithTimeout(job, tryOnTimeoutMs);
           if (outcome === 'timeout') {
-            return `The fitting room is jammed right now for Look ${lookNum} (${outfit.name}) and the try-on timed out. Keep it light and offer the flat-lay and individual pieces instead.${snapNote}`;
+            return `The fitting room is jammed right now for Look ${lookNum} (${outfit.name}) and the try-on timed out. Keep it light and offer the flat-lay and individual pieces instead.${cameraOffFallbackNote}`;
           }
           tryOnInfo = stateStore.get().tryOn[lookNum];
         }
@@ -1046,12 +1163,17 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           const reply = await page.send('reveal', { outfit: lookNum, url: tryOnInfo.url });
           if (reply.ok) {
             stateStore.dispatch({ type: 'mark_revealed', look: lookNum });
-            return `Try-on for Look ${lookNum} (${outfit.name}) is now revealed on screen.${snapNote} React like a friend in a line or two, then ask for top, bottom, and shoe sizes together in one question.`;
+            if (renderedOnModel) {
+              return `Look ${lookNum} (${outfit.name}) is now revealed on screen on a model because the camera is off. Say the look is on screen on a model and that turning the camera on lets you show it on them; never say you cannot overlay it. React like a friend in a line or two, then ask for top, bottom, and shoe sizes together in one question.`;
+            }
+            return `Try-on for Look ${lookNum} (${outfit.name}) is now revealed on screen. React like a friend in a line or two, then ask for top, bottom, and shoe sizes together in one question.`;
           }
-          return `Try-on for Look ${lookNum} is ready, but the page did not confirm revealing it.${snapNote}`;
+          return renderedOnModel
+            ? `Try-on for Look ${lookNum} (on a model because the camera is off) is ready, but the page did not confirm revealing it.`
+            : `Try-on for Look ${lookNum} is ready, but the page did not confirm revealing it.`;
         }
 
-        return `The fitting room is jammed right now for Look ${lookNum} (${outfit.name}). Keep it light and offer the flat-lay and individual pieces instead.${snapNote}`;
+        return `The fitting room is jammed right now for Look ${lookNum} (${outfit.name}). Keep it light and offer the flat-lay and individual pieces instead.${cameraOffFallbackNote}`;
       }),
     }),
 
@@ -1405,13 +1527,13 @@ export function createAgentTools(options: ToolRuntimeOptions) {
 
         if (!usedMock && !hasRealCart(bagOut)) {
           const skippedSummaries = notAdded.map(
-            (na) => `${na.title} at ${na.store} (${na.reason})`,
+            (na) => `${na.title} at ${na.store} (${na.reason.replace(/\.$/, '')})`,
           );
           if (skippedSummaries.length > 0) {
-            return `NOT DONE: No store cart could be created. Not added: ${skippedSummaries.join('; ')}. Suggest the nearest size or a swap.`;
+            return `NOT DONE: Added 0 pieces, total $0. Not added (${notAdded.length}): ${skippedSummaries.join('; ')}. No checkout links are on the page. Name each piece that was not added with its reason in plain words, and offer to swap those pieces or try another size. Never say the bag is processing and never pitch a different look.`;
           }
           const reason = rawSummary ? ` ${rawSummary}` : '';
-          return `NOT DONE: No store cart could be created.${reason} Suggest trying another size or swapping a piece.`;
+          return `NOT DONE: Added 0 pieces, total $0. No store cart could be created.${reason} No checkout links are on the page. Offer to try another size or swap a piece. Never say the bag is processing and never pitch a different look.`;
         }
 
         const reply = await page.send('bagReady', bagPayload);
@@ -1439,6 +1561,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           mocked: usedMock,
         });
 
+        const addedCount = bagPayload.stores.reduce((sum, s) => sum + s.added.length, 0);
         const storeSummaries = bagPayload.stores
           .filter((s) => s.added.length > 0)
           .map((s) => {
@@ -1449,28 +1572,48 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           });
 
         const skippedSummaries = notAdded.map(
-          (na) => `${na.title} at ${na.store} (${na.reason})`,
+          (na) => `${na.title} at ${na.store} (${na.reason.replace(/\.$/, '')})`,
         );
 
         const lines: string[] = [];
+        const pieceWord = addedCount === 1 ? 'piece' : 'pieces';
+        const addedDetails = storeSummaries.length > 0 ? ` — ${storeSummaries.join(' | ')}` : '';
         lines.push(
-          reply.ok
-            ? `Bag is ready on screen for Look ${lookNum} (${outfit.name}).`
-            : `Bag built for Look ${lookNum} (${outfit.name}), though the page did not confirm opening it.`,
+          `Added ${addedCount} ${pieceWord}, total ${formatPrice(bagPayload.total)} for Look ${lookNum} (${outfit.name})${addedDetails}.`,
         );
-        if (storeSummaries.length > 0) {
-          lines.push(`Added: ${storeSummaries.join(' | ')}.`);
-        } else {
-          lines.push('No items could be added to any store cart.');
-        }
+
         if (skippedSummaries.length > 0) {
-          lines.push(`Not added: ${skippedSummaries.join('; ')}. Suggest the nearest size or a swap.`);
+          lines.push(`Not added (${notAdded.length}): ${skippedSummaries.join('; ')}.`);
         }
-        lines.push(`Bag total: ${formatPrice(bagPayload.total)}.`);
+
+        if (reply.ok) {
+          if (bagPayload.links.length > 0) {
+            const linkStores = bagPayload.links.map((l) => l.store).join(', ');
+            const linkPhrase =
+              bagPayload.links.length === 1 ? 'Checkout link is' : 'Checkout links are';
+            lines.push(`${linkPhrase} on the page (${linkStores}).`);
+          } else {
+            lines.push('Bag is on the page (no store checkout links).');
+          }
+        } else {
+          lines.push(
+            'Checkout links were prepared, though the page did not confirm displaying the bag yet.',
+          );
+        }
+
         if (usedMock || /mock/i.test(bagOut.summary)) {
           lines.push(`Note: ${bagOut.summary}`);
         }
-        lines.push('Read back what made it into the bag and remind them checkout happens directly with each store.');
+
+        if (skippedSummaries.length > 0) {
+          lines.push(
+            'State plainly what is in the bag and the total, name each piece that was not added with its reason in plain words, and offer to swap those pieces or try another size. Never say the bag is processing and never pitch a different look.',
+          );
+        } else {
+          lines.push(
+            'State plainly what is in the bag, the total, and that the checkout links are on the page. Never say the bag is processing and never pitch a different look.',
+          );
+        }
 
         const resultText = lines.join(' ');
         baggedResults.set(dedupeKey, resultText);
