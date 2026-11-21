@@ -70,6 +70,7 @@ export function applyRealtimeSessionPatches(
     room: string;
     log?: PatchLogFn;
     errorLog?: (...args: unknown[]) => void;
+    shouldSilenceToolResult?: (fr: FunctionResponseLike) => boolean;
   },
 ): PatchResult {
   const logFn = options.log ?? calllog;
@@ -146,7 +147,19 @@ export function applyRealtimeSessionPatches(
         if (fr.willContinue === true) {
           continue;
         }
-        if (typeof fr.name === 'string' && SILENT_TOOL_NAMES.has(fr.name)) {
+        const rawOutput =
+          typeof fr.response?.output === 'string'
+            ? fr.response.output
+            : typeof fr.response?.result === 'string'
+              ? fr.response.result
+              : '';
+        const isDuplicateRack =
+          fr.name === 'show_rack' && /^Rack already shown\b/i.test(rawOutput.trim());
+        if (
+          (typeof fr.name === 'string' && SILENT_TOOL_NAMES.has(fr.name)) ||
+          isDuplicateRack ||
+          options.shouldSilenceToolResult?.(fr) === true
+        ) {
           fr.scheduling = FunctionResponseScheduling.SILENT;
         } else if (typeof fr.name === 'string' && INTERRUPT_TOOL_NAMES.has(fr.name)) {
           fr.scheduling = FunctionResponseScheduling.INTERRUPT;

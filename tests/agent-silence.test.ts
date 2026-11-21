@@ -10,6 +10,7 @@ import {
   createToolResultNudger,
 } from '../src/agent/nudge.ts';
 import {
+  DEFAULT_DEAD_AIR_MS,
   DEFAULT_SILENCE_COOLDOWN_MS,
   DEFAULT_SILENCE_FIRST_MS,
   DEFAULT_SILENCE_SECOND_MS,
@@ -21,6 +22,8 @@ import {
   createSilenceCheckIn,
   endsWithQuestionMark,
   isGoodbyeMessage,
+  pickDeadAirLine,
+  type DeadAirCallStateSlice,
 } from '../src/agent/silence.ts';
 
 function createFakeClock(start = 10_000) {
@@ -455,5 +458,193 @@ test('silence check-in wording never blames the shopper, names "Type instead" (n
   assert.ok(EXPRESS_SECOND_CHECKIN_INSTRUCTIONS.includes(replies[1]!.instructions));
   assert.match(replies[1]!.instructions, /no jokes/i);
   assert.match(replies[1]!.instructions, /Type instead/);
+});
+
+test('dead-air guard fires after 15s of silence with flow-state next-step lines, respects tools/suppression, and shares 30s cooldown and 4/call cap', () => {
+  assert.equal(DEFAULT_DEAD_AIR_MS, 15_000);
+
+  // Pure flow-state mapping for all 4 stages + empty state.
+  assert.equal(
+    pickDeadAirLine({ looks: [], pickedLook: null, revealsDone: [], bag: null }),
+    null,
+  );
+  assert.deepEqual(
+    pickDeadAirLine({
+      looks: [{ number: 1, name: 'SoHo Sharp', total: 200, slots: ['top'] }],
+      pickedLook: null,
+      revealsDone: [],
+      bag: null,
+    }),
+    { stage: 'looks', line: 'Which one are we trying?' },
+  );
+  assert.deepEqual(
+    pickDeadAirLine({
+      looks: [{ number: 1, name: 'SoHo Sharp', total: 200, slots: ['top'] }],
+      pickedLook: 1,
+      revealsDone: [],
+      bag: null,
+    }),
+    { stage: 'picked', line: 'Want to see it on you?' },
+  );
+  assert.deepEqual(
+    pickDeadAirLine({
+      looks: [{ number: 1, name: 'SoHo Sharp', total: 200, slots: ['top'] }],
+      pickedLook: 1,
+      revealsDone: [1],
+      bag: null,
+    }),
+    { stage: 'revealed', line: "Give me your sizes and I'll bag it." },
+  );
+  assert.deepEqual(
+    pickDeadAirLine({
+      looks: [{ number: 1, name: 'SoHo Sharp', total: 200, slots: ['top'] }],
+      pickedLook: 1,
+      revealsDone: [1],
+      bag: {
+        stores: [{ store: 'Everlane', added: [{ title: 'Polo', slot: 'top', image: '', price: 60, size: 'M' }], not_added: [], subtotal: 60 }],
+        total: 60,
+        links: [],
+        notAdded: [],
+      },
+    }),
+    { stage: 'bagged', line: 'Want anything swapped or taken out?' },
+  );
+
+  const clock = createFakeClock();
+  const replies: Array<{ instructions: string }> = [];
+  const logs: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+  let suppressed = false;
+  let state: DeadAirCallStateSlice = {
+    looks: [{ number: 1, name: 'SoHo Sharp', total: 200, slots: ['top'] }],
+    pickedLook: 1,
+    revealsDone: [],
+    bag: null,
+  };
+
+  const silence = createSilenceCheckIn({
+    room: 'dead-air-room',
+    initialAgentState: 'listening',
+    initialUserState: 'listening',
+    isSuppressed: () => suppressed,
+    getCallState: () => state,
+    generateReply: (opts) => replies.push(opts),
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+  });
+
+  // 1) After pick_outfit, Alice describes the look without asking a question -> dead-air fires at 15s!
+  silence.onAgentStateChanged('speaking');
+  silence.onAssistantMessage('That wool coat has razor-sharp lapels and clean structure.');
+  silence.onAgentStateChanged('listening');
+  assert.equal(silence.isArmed, false, 'question check-in must not arm without question mark');
+  assert.equal(silence.isDeadAirArmed, true, 'dead-air guard must arm on non-question silence');
+
+  clock.advance(DEFAULT_DEAD_AIR_MS - 1);
+  assert.equal(replies.length, 0);
+
+  clock.advance(1);
+  assert.equal(replies.length, 1);
+  assert.ok(replies[0]!.instructions.includes('Want to see it on you?'));
+  assert.equal(silence.totalCheckInCount, 1);
+  assert.equal(logs[0]!.ev, 'dead_air_nudge');
+  assert.equal(logs[0]!.data?.stage, 'picked');
+  assert.equal(logs[0]!.data?.line, 'Want to see it on you?');
+
+  // Alice speaks the dead-air line and finishes -> does not re-fire without shopper activity.
+  silence.onAgentStateChanged('speaking');
+  clock.advance(1_500);
+  silence.onAgentStateChanged('listening');
+  silence.onAssistantMessage('Want to see it on you?');
+  clock.advance(60_000);
+  assert.equal(replies.length, 1);
+
+  // 2) Tool running or reveal beat pending (suppressed) blocks dead-air guard.
+  silence.onShopperActivity();
+  silence.onToolStart('call-tryon');
+  clock.advance(30_000);
+  assert.equal(replies.length, 1, 'must not fire dead-air while tool is running');
+
+  suppressed = true; // reveal beat pending
+  silence.onToolEnd('call-tryon');
+  clock.advance(30_000);
+  assert.equal(replies.length, 1, 'must not fire dead-air while reveal beat is pending');
+  suppressed = false;
+
+  // 3) Advance to revealed state -> dead-air shares 30s cooldown with question check-in!
+  state = { ...state, revealsDone: [1] };
+  silence.onAgentStateChanged('speaking');
+  silence.onAssistantMessage('Oh I cannot, that silhouette is unreal.');
+  silence.onAgentStateChanged('listening');
+  clock.advance(DEFAULT_DEAD_AIR_MS);
+  assert.equal(replies.length, 2);
+  assert.ok(replies[1]!.instructions.includes("Give me your sizes and I'll bag it."));
+  assert.equal(logs[1]!.ev, 'dead_air_nudge');
+  assert.equal(logs[1]!.data?.stage, 'revealed');
+  assert.equal(silence.totalCheckInCount, 2);
+
+  // Immediately after dead-air #2 ends, shopper speaks and Alice asks a question -> MUST respect shared 30s cooldown!
+  silence.onAgentStateChanged('speaking');
+  clock.advance(1_000);
+  silence.onAgentStateChanged('listening');
+  // Cooldown starts here (T0).
+  clock.advance(1_000);
+  silence.onShopperActivity();
+  clock.advance(1_000);
+  silence.onAgentStateChanged('speaking');
+  silence.onAssistantMessage('What size jacket do you wear?');
+  silence.onAgentStateChanged('listening');
+
+  // At T0 + 2s + 9s = T0 + 11s: question check-in must wait for the 30s shared cooldown!
+  clock.advance(DEFAULT_SILENCE_FIRST_MS);
+  assert.equal(replies.length, 2, 'question check-in must share 30s cooldown with dead-air nudge');
+
+  // At T0 + 30s: question check-in fires (total = 3).
+  clock.advance(DEFAULT_SILENCE_COOLDOWN_MS - 11_000);
+  assert.equal(replies.length, 3);
+  assert.equal(logs[2]!.ev, 'silence_checkin');
+  assert.equal(silence.totalCheckInCount, 3);
+
+  // 4) Shopper replies, then after 30s cooldown, bagged dead-air fires (total = 4 -> hits shared per-call cap of 4!).
+  silence.onAgentStateChanged('speaking');
+  clock.advance(1_000);
+  silence.onAgentStateChanged('listening');
+  // Shopper replies right away (cancelling the 2nd check-in of Cycle 2).
+  silence.onUserStateChanged('speaking');
+  clock.advance(1_000);
+  silence.onUserStateChanged('listening');
+  state = {
+    ...state,
+    bag: {
+      stores: [{ store: 'Everlane', added: [{ title: 'Polo', slot: 'top', image: '', price: 60, size: 'M' }], not_added: [], subtotal: 60 }],
+      total: 60,
+      links: [],
+      notAdded: [],
+    },
+  };
+  clock.advance(DEFAULT_SILENCE_COOLDOWN_MS);
+  silence.onShopperActivity();
+  silence.onAgentStateChanged('speaking');
+  silence.onAssistantMessage('Your pieces are in the bag for $60.');
+  silence.onAgentStateChanged('listening');
+  clock.advance(DEFAULT_DEAD_AIR_MS);
+  assert.equal(replies.length, 4);
+  assert.ok(replies[3]!.instructions.includes('Want anything swapped or taken out?'));
+  assert.equal(logs[3]!.ev, 'dead_air_nudge');
+  assert.equal(logs[3]!.data?.stage, 'bagged');
+  assert.equal(silence.totalCheckInCount, MAX_SILENCE_CHECKINS_PER_CALL);
+
+  // 5) Shared cap of 4 reached: neither dead-air nor question check-in can fire a 5th time.
+  silence.onAgentStateChanged('speaking');
+  clock.advance(1_000);
+  silence.onAgentStateChanged('listening');
+  clock.advance(DEFAULT_SILENCE_COOLDOWN_MS + 5_000);
+  silence.onShopperActivity();
+  silence.onAgentStateChanged('speaking');
+  silence.onAssistantMessage('All set.');
+  silence.onAgentStateChanged('listening');
+  clock.advance(60_000);
+  assert.equal(replies.length, 4, 'shared cap of 4 must block a 5th nudge');
 });
 

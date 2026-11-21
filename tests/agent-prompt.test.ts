@@ -3,7 +3,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   FILLER_BITS,
+  SHORT_FILLER_BITS,
   formatFillerBitInstruction,
+  formatShortFillerBitInstruction,
   formatWorkingNoteWithBit,
 } from '../src/agent/bits.ts';
 import {
@@ -83,9 +85,9 @@ test('ALICE_SYSTEM_PROMPT mentions CALL STATE and CAMERA STATUS', () => {
   assert.match(ALICE_SYSTEM_PROMPT, /\bCAMERA STATUS\b/);
 });
 
-test('ALICE_SYSTEM_PROMPT word count is within 450 to 1440 words and avoids tables/emoji', () => {
+test('ALICE_SYSTEM_PROMPT word count is within 450 to 1480 words and avoids tables/emoji', () => {
   const words = countWords(ALICE_SYSTEM_PROMPT);
-  assert.ok(words >= 450 && words <= 1440, `expected word count between 450 and 1440, got ${words}`);
+  assert.ok(words >= 450 && words <= 1480, `expected word count between 450 and 1480, got ${words}`);
 
   assert.equal(ALICE_SYSTEM_PROMPT.includes('|---'), false, 'prompt must not contain markdown tables');
   assert.equal(/\p{Extended_Pictographic}/u.test(ALICE_SYSTEM_PROMPT), false, 'prompt must not contain emoji');
@@ -282,6 +284,15 @@ test('ALICE_SYSTEM_PROMPT encodes polish10 rules: remove_from_bag, pick-based sw
   assert.match(ALICE_SYSTEM_PROMPT, /at most once in a row/i);
 });
 
+test('ALICE_SYSTEM_PROMPT encodes polish12 rules: missing-only budget ask, pick brevity ending with Want to see it on you?, and no rack repeat or "they\'re in"', () => {
+  assert.match(ALICE_SYSTEM_PROMPT, /ask only for what is missing/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /if the occasion is known, ask just "What's the budget\?"/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /at most two sentences/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /end the same turn with "Want to see it on you\?"/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never say "they're in"/i);
+  assert.match(ALICE_SYSTEM_PROMPT, /never repeat that rack line or question/i);
+});
+
 test('banned corporate phrases never appear in prompt, greeting, filler bits, silence check-ins, nudges, or tool result texts', () => {
   const toolSource = fs.readFileSync(new URL('../src/agent/tools.ts', import.meta.url), 'utf8');
   const sampleBit = FILLER_BITS[0]!;
@@ -290,6 +301,7 @@ test('banned corporate phrases never appear in prompt, greeting, filler bits, si
     { label: 'ALICE_SYSTEM_PROMPT', text: ALICE_SYSTEM_PROMPT },
     { label: 'GREETING_INSTRUCTIONS', text: GREETING_INSTRUCTIONS },
     ...FILLER_BITS.map((bit) => ({ label: `FILLER_BITS[${bit.id}]`, text: `${bit.title} ${bit.text}` })),
+    ...SHORT_FILLER_BITS.map((bit) => ({ label: `SHORT_FILLER_BITS[${bit.id}]`, text: `${bit.title} ${bit.text}` })),
     {
       label: 'formatWorkingNoteWithBit',
       text: formatWorkingNoteWithBit(SLOW_TOOL_NOTES.build_outfits!, sampleBit),
@@ -297,6 +309,10 @@ test('banned corporate phrases never appear in prompt, greeting, filler bits, si
     {
       label: 'formatFillerBitInstruction',
       text: formatFillerBitInstruction('build_outfits', sampleBit),
+    },
+    {
+      label: 'formatShortFillerBitInstruction',
+      text: formatShortFillerBitInstruction('build_outfits', SHORT_FILLER_BITS[0]!),
     },
     ...FIRST_CHECKIN_INSTRUCTIONS.map((text, idx) => ({
       label: `FIRST_CHECKIN_INSTRUCTIONS[${idx}]`,

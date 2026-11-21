@@ -535,12 +535,22 @@ export default defineAgent({
 
     const model = new google.realtime.RealtimeModel(modelOptions);
 
+    // Track if Alice already delivered the rack line or occasion-vs-item question while show_rack ran,
+    // so the delayed show_rack tool response is delivered SILENT instead of triggering a repeat turn.
+    let rackActive = false;
+    let rackLineAlreadySpoken = false;
+    const RACK_OR_FORK_RE =
+      /\boff the racks?\b|\bpulled (?:a few|some) things\b|\bdressing for an occasion\b|\bone specific item\b|\bhunting for (?:one )?specific\b/i;
+
     // Patch every RealtimeSession as soon as the model creates it (before WebSocket traffic begins).
     const origCreateSession = model.session.bind(model);
     model.session = (sessionOpts) => {
       const rtSession = origCreateSession(sessionOpts);
       activeRealtimeSession = rtSession;
-      applyRealtimeSessionPatches(rtSession, { room: roomName });
+      applyRealtimeSessionPatches(rtSession, {
+        room: roomName,
+        shouldSilenceToolResult: (fr) => fr.name === 'show_rack' && rackLineAlreadySpoken,
+      });
       return rtSession;
     };
 
@@ -648,6 +658,7 @@ export default defineAgent({
         revealSequencer.isActive ||
         walkthrough.isActive,
       isExpress: () => callState.get().express,
+      getCallState: () => callState.get(),
       log: calllog,
     });
     silenceCheckInRef = silenceCheckIn;
@@ -679,10 +690,17 @@ export default defineAgent({
       walkthrough,
       sendWorkingNote: (params) => sendInterimToolNote(activeRealtimeSession, params),
       onToolStart: (ev) => {
+        if (ev.name === 'show_rack') {
+          rackActive = true;
+          rackLineAlreadySpoken = false;
+        }
         silenceCheckIn.onToolStart(ev.callId);
         revealSequencer.onToolStart(ev.callId, ev.name);
       },
       onToolEnd: (ev) => {
+        if (ev.name === 'show_rack') {
+          rackActive = false;
+        }
         silenceCheckIn.onToolEnd(ev.callId);
         revealSequencer.onToolEnd(ev.callId);
       },
@@ -752,6 +770,9 @@ export default defineAgent({
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev) => {
       if (ev.item.type === 'message' && ev.item.role === 'assistant') {
         const text = ev.item.textContent ?? '';
+        if (rackActive && RACK_OR_FORK_RE.test(text)) {
+          rackLineAlreadySpoken = true;
+        }
         resultNudger.onAssistantMessage(text);
         revealSequencer.onAssistantMessage();
         silenceCheckIn.onAssistantMessage(text, { interrupted: ev.item.interrupted });

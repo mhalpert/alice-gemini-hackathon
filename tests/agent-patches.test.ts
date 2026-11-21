@@ -116,6 +116,49 @@ test('patch (b) schedules set_department/remember SILENT, priority tools INTERRU
   assert.equal(vertexOut!.functionResponses![0]!.scheduling, FunctionResponseScheduling.WHEN_IDLE);
 });
 
+test('patch (b) schedules duplicate or already-spoken show_rack results SILENT to prevent a delayed repeat', () => {
+  let rackSpoken = false;
+  const fakeSession: PatchableRealtimeSession = {
+    handleInputSpeechStarted() {},
+    startNewGeneration() {},
+    getToolResultsForRealtime() {
+      return {
+        functionResponses: [
+          {
+            id: 'r1',
+            name: 'show_rack',
+            response: { output: 'Rack is on screen: 10 items in relaxed streetwear.' },
+            scheduling: FunctionResponseScheduling.WHEN_IDLE,
+          },
+          {
+            id: 'r2',
+            name: 'show_rack',
+            response: { output: 'Rack already shown.' },
+            scheduling: FunctionResponseScheduling.WHEN_IDLE,
+          },
+        ],
+      };
+    },
+  };
+
+  applyRealtimeSessionPatches(fakeSession, {
+    room: 'rack-patch-room',
+    log: () => {},
+    errorLog: () => {},
+    shouldSilenceToolResult: (fr) => fr.name === 'show_rack' && rackSpoken,
+  });
+
+  // Before rack line is spoken: first show_rack is WHEN_IDLE, duplicate "Rack already shown." is SILENT.
+  const out1 = fakeSession.getToolResultsForRealtime!({}, false)!;
+  assert.equal(out1.functionResponses![0]!.scheduling, FunctionResponseScheduling.WHEN_IDLE);
+  assert.equal(out1.functionResponses![1]!.scheduling, FunctionResponseScheduling.SILENT);
+
+  // Once rack line / question was already spoken: show_rack result is delivered SILENT so no repeat fires.
+  rackSpoken = true;
+  const out2 = fakeSession.getToolResultsForRealtime!({}, false)!;
+  assert.equal(out2.functionResponses![0]!.scheduling, FunctionResponseScheduling.SILENT);
+});
+
 test('createRepeatDetector logs repeat_detected on normalised exact or 60-char prefix match within 20s only', () => {
   let now = 10_000;
   const logs: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];

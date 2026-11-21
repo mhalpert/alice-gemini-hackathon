@@ -2,15 +2,22 @@ import { calllog } from '../calllog.ts';
 import type { AgentStateValue, TimerHandle } from './context.ts';
 import {
   type BitPicker,
+  type FillerBit,
+  LONG_BIT_WORD_LIMIT,
   MAX_BITS_PER_WAIT,
+  SHORT_FILLER_BITS,
+  countBitWords,
   createBitPicker,
   formatFillerBitInstruction,
+  formatShortFillerBitInstruction,
   formatWorkingNoteWithBit,
+  isLongBit,
 } from './bits.ts';
 
 export const DEFAULT_FILLER_INITIAL_DELAY_MS = 2_000;
 export const BUILD_OUTFITS_FILLER_DELAY_MS = 4_000;
 export const DEFAULT_FILLER_FOLLOWUP_DELAY_MS = 4_000;
+export const MAX_LONG_BITS_PER_BUILD = 1;
 
 export type FillerLogFn = (room: string, ev: string, data?: Record<string, unknown>) => void;
 
@@ -47,7 +54,7 @@ export interface ToolFillerOptions {
 export interface ToolFiller {
   onToolStart(ev: SlowToolStartEvent): void;
   onToolEnd(callId: string, toolName?: string): void;
-  onToolResult(ev: { callId: string; name?: string }): void;
+  onToolResult(ev: { callId: string; name?: string; text?: string }): void;
   onAgentStateChanged(nextState: AgentStateValue): void;
   onUserStateChanged(nextState: string): void;
   cancelAll(): void;
@@ -64,6 +71,7 @@ interface ActiveWait {
   startedAt: number;
   initialDelayMs: number;
   bitsSent: number;
+  longBitsSent: number;
   workingNoteSent: boolean;
   sawSpeech: boolean;
 }
@@ -73,7 +81,8 @@ interface ActiveWait {
  * in dead air. Skips fast results (< ~2s), sends the first bit via the working
  * note when available (or generateReply otherwise), follows up ~4s after Alice
  * stops talking if the tool is still running and nobody is speaking, caps at
- * three bits per wait, and stops immediately when the tool finishes.
+ * three bits per wait (and at most one long bit > 12 words per build_outfits),
+ * and stops immediately when the tool finishes so no bit starts after results land.
  */
 export function createToolFiller(options: ToolFillerOptions): ToolFiller {
   const logFn = options.log ?? calllog;
@@ -93,6 +102,8 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
   let syntheticIdCounter = 0;
 
   const activeWaits = new Map<string, ActiveWait>();
+  const endedCallIds = new Set<string>();
+  const usedShortBitIds = new Set<string>();
 
   function cancelTimer(): void {
     if (timer !== null) {
@@ -109,8 +120,8 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
     return latest;
   }
 
-  function isAnyoneSpeaking(): boolean {
-    return agentState === 'speaking' || userState === 'speaking';
+  function isAnyoneBusy(): boolean {
+    return agentState === 'speaking' || agentState === 'thinking' || userState === 'speaking';
   }
 
   function computeDelayMs(wait: ActiveWait): number {
@@ -121,16 +132,52 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
     return Math.max(followUpDelayMs, remainingInitial);
   }
 
+  function pickShortBit(): FillerBit | null {
+    for (const candidate of SHORT_FILLER_BITS) {
+      if (usedShortBitIds.has(candidate.id)) continue;
+      if (countBitWords(candidate.text) > LONG_BIT_WORD_LIMIT) continue;
+      usedShortBitIds.add(candidate.id);
+      return candidate;
+    }
+    return null;
+  }
+
+  function pickBitForWait(wait: ActiveWait): { bit: FillerBit; shortOnly: boolean } | null {
+    const mustUseShort =
+      wait.tool === 'build_outfits' && wait.longBitsSent >= MAX_LONG_BITS_PER_BUILD;
+
+    if (mustUseShort) {
+      const shortBit = pickShortBit();
+      return shortBit ? { bit: shortBit, shortOnly: true } : null;
+    }
+
+    const picked = bitPicker.pick(wait.key);
+    if (!picked) return null;
+    return { bit: picked, shortOnly: !isLongBit(picked) };
+  }
+
   function deliverBit(wait: ActiveWait): void {
     if (disposed || !activeWaits.has(wait.key)) return;
+    if (wait.callId && endedCallIds.has(wait.callId)) return;
     if (options.isSuppressed?.()) return;
-    if (isAnyoneSpeaking()) return;
+    if (isAnyoneBusy()) return;
     if (wait.bitsSent >= maxBitsPerWait) return;
 
-    const bit = bitPicker.pick(wait.key);
-    if (!bit) return;
+    const selection = pickBitForWait(wait);
+    if (!selection) return;
+    const { bit, shortOnly } = selection;
+    const bitWords = countBitWords(bit.text);
+    const bitIsLong = bitWords > LONG_BIT_WORD_LIMIT;
 
     wait.bitsSent += 1;
+    if (bitIsLong) {
+      wait.longBitsSent += 1;
+    }
+
+    const formatReply = (tool: string, chosen: FillerBit): string =>
+      shortOnly
+        ? formatShortFillerBitInstruction(tool, chosen)
+        : formatFillerBitInstruction(tool, chosen);
 
     // First bit uses the working note when available; subsequent bits (or fallback) use generateReply.
     if (!wait.workingNoteSent && options.sendWorkingNote) {
@@ -156,10 +203,12 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
         tool: wait.tool,
         call_id: wait.callId,
         count: wait.bitsSent,
+        words: bitWords,
+        long: bitIsLong,
         via: sent ? 'working_note' : 'reply_fallback',
       });
       if (!sent) {
-        triggerReply(wait, bit.id, formatFillerBitInstruction(wait.tool, bit));
+        triggerReply(wait, bit.id, formatReply(wait.tool, bit));
       }
     } else {
       logFn(options.room, 'filler_bit', {
@@ -168,9 +217,11 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
         tool: wait.tool,
         call_id: wait.callId,
         count: wait.bitsSent,
+        words: bitWords,
+        long: bitIsLong,
         via: 'reply',
       });
-      triggerReply(wait, bit.id, formatFillerBitInstruction(wait.tool, bit));
+      triggerReply(wait, bit.id, formatReply(wait.tool, bit));
     }
 
     // Re-arm follow-up timer in case the model remains idle; cancelled as soon as Alice speaks.
@@ -198,15 +249,17 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
 
     const wait = currentWait();
     if (!wait) return;
+    if (wait.callId && endedCallIds.has(wait.callId)) return;
     if (wait.bitsSent >= maxBitsPerWait) return;
-    if (isAnyoneSpeaking()) return;
+    if (isAnyoneBusy()) return;
 
     const delay = computeDelayMs(wait);
     timer = setTimeoutFn(() => {
       timer = null;
       if (disposed || !activeWaits.has(wait.key)) return;
+      if (wait.callId && endedCallIds.has(wait.callId)) return;
       if (options.isSuppressed?.()) return;
-      if (isAnyoneSpeaking()) return;
+      if (isAnyoneBusy()) return;
       deliverBit(wait);
     }, delay);
     timer.unref?.();
@@ -226,6 +279,9 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
   }
 
   function cancelWaitByIdOrTool(callId: string, toolName?: string): void {
+    if (callId) {
+      endedCallIds.add(callId);
+    }
     if (callId && activeWaits.has(callId)) {
       activeWaits.delete(callId);
       bitPicker.clearWait(callId);
@@ -272,6 +328,7 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
     onToolStart(ev: SlowToolStartEvent): void {
       if (disposed) return;
       if (options.isSuppressed?.()) return;
+      if (ev.callId && endedCallIds.has(ev.callId)) return;
       const key = ev.callId || `__slow_${++syntheticIdCounter}`;
       const wait: ActiveWait = {
         key,
@@ -281,8 +338,9 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
         startedAt: nowFn(),
         initialDelayMs: resolveInitialDelayMs(ev),
         bitsSent: 0,
+        longBitsSent: 0,
         workingNoteSent: false,
-        sawSpeech: isAnyoneSpeaking(),
+        sawSpeech: isAnyoneBusy(),
       };
       activeWaits.set(key, wait);
       scheduleNext();
@@ -293,14 +351,27 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
       cancelWaitByIdOrTool(callId, toolName);
     },
 
-    onToolResult(ev: { callId: string; name?: string }): void {
+    onToolResult(ev: { callId: string; name?: string; text?: string }): void {
       if (disposed) return;
+      if (ev.callId) {
+        endedCallIds.add(ev.callId);
+      }
+      // Do not cancel an unrelated active build_outfits wait when a duplicate build_outfits call is skipped.
+      if (
+        ev.name === 'build_outfits' &&
+        typeof ev.text === 'string' &&
+        /^Looks are already on their way/i.test(ev.text.trim()) &&
+        (!ev.callId || !activeWaits.has(ev.callId))
+      ) {
+        return;
+      }
       cancelWaitByIdOrTool(ev.callId, ev.name);
     },
 
     cancelAll(): void {
       cancelTimer();
-      for (const key of activeWaits.keys()) {
+      for (const [key, wait] of activeWaits.entries()) {
+        if (wait.callId) endedCallIds.add(wait.callId);
         bitPicker.clearWait(key);
       }
       activeWaits.clear();
@@ -312,15 +383,17 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
 
       if (activeWaits.size === 0) return;
 
-      if (nextState === 'speaking') {
-        for (const wait of activeWaits.values()) {
-          wait.sawSpeech = true;
+      if (nextState === 'speaking' || nextState === 'thinking') {
+        if (nextState === 'speaking') {
+          for (const wait of activeWaits.values()) {
+            wait.sawSpeech = true;
+          }
         }
         cancelTimer();
         return;
       }
 
-      if (!isAnyoneSpeaking()) {
+      if (!isAnyoneBusy()) {
         scheduleNext();
       }
     },
@@ -339,7 +412,7 @@ export function createToolFiller(options: ToolFillerOptions): ToolFiller {
         return;
       }
 
-      if (!isAnyoneSpeaking()) {
+      if (!isAnyoneBusy()) {
         scheduleNext();
       }
     },

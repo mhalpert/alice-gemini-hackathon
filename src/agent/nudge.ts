@@ -82,9 +82,9 @@ export function buildNudgeInstruction(toolName: string, resultText: string): str
       return 'Respond to the latest show_on_me tool result now.';
     }
     if (/do not ask for sizes yet/i.test(resultText)) {
-      return 'The studio try-on from show_on_me has arrived. React to the studio shot in ONE short line with big New York energy and do not ask for sizes yet.';
+      return 'The studio try-on from show_on_me has arrived. Make your very first words the reaction itself—zero lead-in or wind-up. React to the studio shot in ONE short line with big New York energy and do not ask for sizes yet.';
     }
-    return 'The try-on result from show_on_me has arrived. React to it with big New York energy now and follow up naturally.';
+    return 'The try-on result from show_on_me has arrived. Make your very first words the reaction itself—zero lead-in or wind-up. React to it with big New York energy now and follow up naturally.';
   }
 
   if (toolName === 'add_to_bag') {

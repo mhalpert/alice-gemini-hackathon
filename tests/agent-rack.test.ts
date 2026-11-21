@@ -213,7 +213,7 @@ test('show_rack happy path interleaves queries, drops id/url dupes and imageless
   // Tool result string matches contract.
   assert.equal(
     result,
-    'Rack is on screen: 12 items in relaxed streetwear. Say one short line that you pulled a few things off the racks that go with what they have on, then ask: dressing for an occasion, or hunting for one specific item?',
+    'Rack is on screen: 12 items in relaxed streetwear. Say one short line that you pulled a few things off the racks that go with what they have on (never say "they\'re in"), then ask: dressing for an occasion, or hunting for one specific item? If you already said this line or asked that question, stay silent and do not repeat it.',
   );
 
   // Department is NOT written to flow state.

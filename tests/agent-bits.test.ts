@@ -4,7 +4,10 @@ import { AppContextSender, type TimerHandle } from '../src/agent/context.ts';
 import {
   type BitTheme,
   FILLER_BITS,
+  LONG_BIT_WORD_LIMIT,
   MAX_BITS_PER_WAIT,
+  SHORT_FILLER_BITS,
+  countBitWords,
   createBitPicker,
   formatWorkingNoteWithBit,
 } from '../src/agent/bits.ts';
@@ -412,4 +415,97 @@ test('createToolFiller cancels any queued filler the moment onToolResult arrives
   assert.equal(workingNotes.length, 0);
   assert.equal(replies.length, 0);
   assert.equal(filler.isRunning, false);
+});
+
+test('build_outfits allows at most ONE long bit (>12 words) per build and starts zero bits once the tool result arrives', () => {
+  assert.equal(LONG_BIT_WORD_LIMIT, 12);
+  for (const shortBit of SHORT_FILLER_BITS) {
+    assert.ok(
+      countBitWords(shortBit.text) <= LONG_BIT_WORD_LIMIT,
+      `short bit ${shortBit.id} must be <= ${LONG_BIT_WORD_LIMIT} words`,
+    );
+    assert.equal(shortBit.text.includes('?'), false);
+  }
+
+  const clock = createFakeClock();
+  const workingNotes: FillerWorkingNoteParams[] = [];
+  const replies: Array<{ instructions: string }> = [];
+  const logs: Array<{ room: string; ev: string; data?: Record<string, unknown> }> = [];
+
+  const filler = createToolFiller({
+    room: 'filler-one-long',
+    initialAgentState: 'listening',
+    initialUserState: 'listening',
+    sendWorkingNote: (params) => {
+      workingNotes.push(params);
+      return true;
+    },
+    generateReply: (opts) => replies.push(opts),
+    log: (room, ev, data) => logs.push({ room, ev, data }),
+    now: clock.now,
+    setTimeoutFn: clock.setTimeoutFn,
+    clearTimeoutFn: clock.clearTimeoutFn,
+  });
+
+  // 1) Long build_outfits (90s): at most ONE long bit (>12 words), follow-ups are <= 12 words.
+  filler.onToolStart({
+    name: 'build_outfits',
+    callId: 'b-long-1',
+    baseNote: 'Pulling three killer outfits together now.',
+  });
+
+  // 4s -> bit #1 (the ONE long bit).
+  clock.advance(BUILD_OUTFITS_FILLER_DELAY_MS);
+  assert.equal(workingNotes.length, 1);
+
+  // Alice speaks bit #1, finishes, waits 4s -> bit #2 MUST be short (<= 12 words).
+  filler.onAgentStateChanged('speaking');
+  clock.advance(10_000);
+  filler.onAgentStateChanged('listening');
+  clock.advance(DEFAULT_FILLER_FOLLOWUP_DELAY_MS);
+  assert.equal(replies.length, 1);
+
+  // Alice speaks bit #2, finishes, waits 4s -> bit #3 MUST also be short (<= 12 words).
+  filler.onAgentStateChanged('speaking');
+  clock.advance(4_000);
+  filler.onAgentStateChanged('listening');
+  clock.advance(DEFAULT_FILLER_FOLLOWUP_DELAY_MS);
+  assert.equal(replies.length, 2);
+
+  const bitLogs = logs.filter((l) => l.ev === 'filler_bit');
+  assert.equal(bitLogs.length, 3);
+  const longLogs = bitLogs.filter((l) => l.data?.long === true);
+  assert.equal(longLogs.length, 1, 'build_outfits must allow at most ONE long bit (>12 words) per build');
+  for (const followUp of bitLogs.slice(1)) {
+    assert.equal(followUp.data?.long, false);
+    assert.ok(
+      typeof followUp.data?.words === 'number' && followUp.data.words <= LONG_BIT_WORD_LIMIT,
+      `follow-up bit must be <= ${LONG_BIT_WORD_LIMIT} words, got ${String(followUp.data?.words)}`,
+    );
+  }
+
+  // Tool result arrives while Alice is speaking bit #3 -> let sentence finish, queue NOTHING else!
+  filler.onAgentStateChanged('speaking');
+  clock.advance(1_000);
+  filler.onToolResult({ callId: 'b-long-1', name: 'build_outfits', text: 'Built 3 looks and they are now on screen.' });
+  filler.onAgentStateChanged('listening');
+  clock.advance(30_000);
+  assert.equal(workingNotes.length, 1);
+  assert.equal(replies.length, 2, 'no filler bit may start after tool result arrives');
+  assert.equal(clock.activeTimers(), 0);
+
+  // 2) Also verify no bit starts while agentState === 'thinking' or after onToolResult arrives right before timer fires.
+  filler.onToolStart({
+    name: 'build_outfits',
+    callId: 'b-think-2',
+    baseNote: 'Pulling three killer outfits together now.',
+  });
+  filler.onAgentStateChanged('thinking');
+  clock.advance(10_000);
+  assert.equal(workingNotes.length, 1, 'must never queue a filler bit while agent is thinking');
+  filler.onToolResult({ callId: 'b-think-2', name: 'build_outfits', text: 'Built 3 looks.' });
+  filler.onAgentStateChanged('listening');
+  clock.advance(20_000);
+  assert.equal(workingNotes.length, 1, 'must never start a filler bit once tool result has arrived');
+  assert.equal(replies.length, 2);
 });

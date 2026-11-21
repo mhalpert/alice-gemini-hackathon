@@ -1,11 +1,54 @@
 import { calllog } from '../calllog.ts';
 import type { AgentStateValue, TimerHandle } from './context.ts';
+import type { CallState } from './state.ts';
 
 export const DEFAULT_SILENCE_FIRST_MS = 9_000;
 export const DEFAULT_SILENCE_SECOND_MS = 12_000;
 export const DEFAULT_SILENCE_COOLDOWN_MS = 30_000;
+export const DEFAULT_DEAD_AIR_MS = 15_000;
 export const MAX_SILENCE_CHECKINS = 2;
 export const MAX_SILENCE_CHECKINS_PER_CALL = 4;
+
+export type DeadAirStage = 'looks' | 'picked' | 'revealed' | 'bagged';
+
+export interface DeadAirPrompt {
+  stage: DeadAirStage;
+  line: string;
+}
+
+export type DeadAirCallStateSlice = Pick<CallState, 'looks' | 'pickedLook' | 'revealsDone' | 'bag'>;
+
+export function pickDeadAirLine(
+  state: DeadAirCallStateSlice | null | undefined,
+): DeadAirPrompt | null {
+  if (!state) return null;
+
+  const hasBag =
+    state.bag !== null &&
+    ((Array.isArray(state.bag.stores) &&
+      state.bag.stores.some((s) => Array.isArray(s.added) && s.added.length > 0)) ||
+      (typeof state.bag.total === 'number' && state.bag.total > 0));
+  if (hasBag) {
+    return { stage: 'bagged', line: 'Want anything swapped or taken out?' };
+  }
+
+  if (state.pickedLook !== null) {
+    if (Array.isArray(state.revealsDone) && state.revealsDone.includes(state.pickedLook)) {
+      return { stage: 'revealed', line: "Give me your sizes and I'll bag it." };
+    }
+    return { stage: 'picked', line: 'Want to see it on you?' };
+  }
+
+  if (Array.isArray(state.looks) && state.looks.length > 0) {
+    return { stage: 'looks', line: 'Which one are we trying?' };
+  }
+
+  return null;
+}
+
+export function buildDeadAirInstruction(line: string): string {
+  return `The call went quiet. Say this one short next-step line in your voice as Alice, nothing else: "${line}"`;
+}
 
 export type SilenceLogFn = (room: string, ev: string, data?: Record<string, unknown>) => void;
 
@@ -59,6 +102,7 @@ export interface SilenceCheckInOptions {
   generateReply: (opts: { instructions: string }) => unknown;
   firstDelayMs?: number;
   secondDelayMs?: number;
+  deadAirMs?: number;
   cycleCooldownMs?: number;
   maxCheckIns?: number;
   maxCheckInsPerCall?: number;
@@ -66,6 +110,7 @@ export interface SilenceCheckInOptions {
   initialUserState?: string;
   isSuppressed?: () => boolean;
   isExpress?: () => boolean;
+  getCallState?: () => DeadAirCallStateSlice | null | undefined;
   log?: SilenceLogFn;
   now?: () => number;
   setTimeoutFn?: (fn: () => void, ms: number) => TimerHandle;
@@ -84,6 +129,7 @@ export interface SilenceCheckIn {
   readonly checkInCount: number;
   readonly totalCheckInCount: number;
   readonly isArmed: boolean;
+  readonly isDeadAirArmed: boolean;
 }
 
 /**
@@ -91,8 +137,11 @@ export interface SilenceCheckIn {
  * - Only arms when Alice's last finished line ended with a question mark.
  * - First check-in after ~9s, second ~12s later in different words, then quiet
  *   until the shopper speaks again.
- * - Enforces at least ~30s between the end of one check-in cycle and the start
- *   of another, and at most 4 check-ins across the entire call.
+ * - Also runs a separate 15s dead-air guard when neither side has spoken, no tool
+ *   is running, and no reveal beat is pending, sending one short next-step line
+ *   that fits the flow state and logging `dead_air_nudge`.
+ * - Shares a 30s cooldown and per-call maximum (4) across both check-ins and
+ *   dead-air nudges.
  * - Never fires while a tool is running, while the shopper or Alice is speaking,
  *   while a try-on extra announcement, filler bit, or result nudge is pending,
  *   or right after a goodbye.
@@ -102,6 +151,7 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
   const nowFn = options.now ?? (() => Date.now());
   const firstDelayMs = Math.max(0, options.firstDelayMs ?? DEFAULT_SILENCE_FIRST_MS);
   const secondDelayMs = Math.max(0, options.secondDelayMs ?? DEFAULT_SILENCE_SECOND_MS);
+  const deadAirMs = Math.max(0, options.deadAirMs ?? DEFAULT_DEAD_AIR_MS);
   const cycleCooldownMs = Math.max(0, options.cycleCooldownMs ?? DEFAULT_SILENCE_COOLDOWN_MS);
   const maxCheckIns = Math.max(0, options.maxCheckIns ?? MAX_SILENCE_CHECKINS);
   const maxCheckInsPerCall = Math.max(
@@ -116,18 +166,22 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
   let userState: string = options.initialUserState ?? 'listening';
   let disposed = false;
   let timer: TimerHandle | null = null;
+  let deadAirTimer: TimerHandle | null = null;
   let awaitingShopper = false;
   let suppressedAfterGoodbye = false;
   let pendingExternalReply = false;
   let turnEndedWithQuestion: boolean | null = null;
   let waitingForTranscriptAfterSpeech = false;
   let activeCheckInSpeech = false;
+  let activeDeadAirSpeech = false;
+  let deadAirFiredSinceActivity = false;
   let checkInCount = 0;
   let totalCheckInCount = 0;
   let lastCycleEndedAt: number | null = null;
   let firstWordingIdx = 0;
   let secondWordingIdx = 0;
   let armedAt = 0;
+  let deadAirArmedAt = 0;
   let syntheticToolCounter = 0;
 
   const activeTools = new Set<string>();
@@ -137,6 +191,18 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
       clearTimeoutFn(timer);
       timer = null;
     }
+  }
+
+  function cancelDeadAirTimer(): void {
+    if (deadAirTimer !== null) {
+      clearTimeoutFn(deadAirTimer);
+      deadAirTimer = null;
+    }
+  }
+
+  function cancelAllTimers(): void {
+    cancelTimer();
+    cancelDeadAirTimer();
   }
 
   function isBlocked(): boolean {
@@ -150,6 +216,22 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
     if (agentState === 'speaking' || agentState === 'thinking') return true;
     if (userState === 'speaking') return true;
     if (options.isSuppressed?.()) return true;
+    return false;
+  }
+
+  function isDeadAirBlocked(): boolean {
+    if (disposed) return true;
+    if (!options.getCallState) return true;
+    if (awaitingShopper || checkInCount > 0) return true;
+    if (deadAirFiredSinceActivity) return true;
+    if (suppressedAfterGoodbye) return true;
+    if (pendingExternalReply) return true;
+    if (totalCheckInCount >= maxCheckInsPerCall) return true;
+    if (activeTools.size > 0) return true;
+    if (agentState === 'speaking' || agentState === 'thinking') return true;
+    if (userState === 'speaking') return true;
+    if (options.isSuppressed?.()) return true;
+    if (!pickDeadAirLine(options.getCallState())) return true;
     return false;
   }
 
@@ -181,10 +263,22 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
     return delay;
   }
 
+  function computeDeadAirDelayMs(now: number): number {
+    let delay = deadAirMs;
+    if (lastCycleEndedAt !== null) {
+      const remainingCooldown = lastCycleEndedAt + cycleCooldownMs - now;
+      if (remainingCooldown > delay) {
+        delay = remainingCooldown;
+      }
+    }
+    return delay;
+  }
+
   function scheduleIfReady(): void {
     cancelTimer();
     if (isBlocked()) return;
 
+    cancelDeadAirTimer();
     const now = nowFn();
     const delayMs = computeNextDelayMs(now);
     armedAt = now;
@@ -237,13 +331,67 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
     timer.unref?.();
   }
 
+  function scheduleDeadAirIfReady(): void {
+    cancelDeadAirTimer();
+    if (isDeadAirBlocked()) return;
+
+    const now = nowFn();
+    const delayMs = computeDeadAirDelayMs(now);
+    deadAirArmedAt = now;
+
+    deadAirTimer = setTimeoutFn(() => {
+      deadAirTimer = null;
+      if (isDeadAirBlocked()) return;
+
+      const fireNow = nowFn();
+      if (lastCycleEndedAt !== null) {
+        const remaining = lastCycleEndedAt + cycleCooldownMs - fireNow;
+        if (remaining > 0) {
+          scheduleDeadAirIfReady();
+          return;
+        }
+      }
+
+      const prompt = pickDeadAirLine(options.getCallState?.());
+      if (!prompt) return;
+
+      totalCheckInCount += 1;
+      activeDeadAirSpeech = true;
+      deadAirFiredSinceActivity = true;
+      lastCycleEndedAt = fireNow;
+
+      const totalCount = totalCheckInCount;
+      const waitMs = Math.max(0, Math.round(fireNow - deadAirArmedAt));
+
+      logFn(options.room, 'dead_air_nudge', {
+        stage: prompt.stage,
+        line: prompt.line,
+        total_count: totalCount,
+        wait_ms: waitMs,
+      });
+
+      try {
+        options.generateReply({ instructions: buildDeadAirInstruction(prompt.line) });
+      } catch (err) {
+        logFn(options.room, 'session_error', {
+          source: 'dead_air_nudge',
+          stage: prompt.stage,
+          error: err instanceof Error ? err : new Error(String(err)),
+        });
+      }
+    }, delayMs);
+    deadAirTimer.unref?.();
+  }
+
   function resetOnShopper(): void {
-    cancelTimer();
-    if (activeCheckInSpeech) {
+    cancelAllTimers();
+    if (activeCheckInSpeech || activeDeadAirSpeech) {
       lastCycleEndedAt = nowFn();
       activeCheckInSpeech = false;
+      activeDeadAirSpeech = false;
     }
     checkInCount = 0;
+    deadAirFiredSinceActivity = false;
     suppressedAfterGoodbye = false;
     pendingExternalReply = false;
     waitingForTranscriptAfterSpeech = false;
@@ -263,28 +411,39 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
       return timer !== null;
     },
 
+    get isDeadAirArmed(): boolean {
+      return deadAirTimer !== null;
+    },
+
     onAgentStateChanged(nextState: AgentStateValue): void {
       if (disposed) return;
       const prevState = agentState;
       agentState = nextState;
 
       if (nextState === 'speaking') {
-        cancelTimer();
+        cancelAllTimers();
         pendingExternalReply = false;
-        if (!activeCheckInSpeech && checkInCount === 0) {
+        if (!activeCheckInSpeech && !activeDeadAirSpeech && checkInCount === 0) {
           turnEndedWithQuestion = null;
           waitingForTranscriptAfterSpeech = false;
           awaitingShopper = false;
+          deadAirFiredSinceActivity = false;
         }
         return;
       }
 
       if (nextState === 'thinking') {
-        cancelTimer();
+        cancelAllTimers();
         return;
       }
 
       if (prevState === 'speaking' && (nextState === 'listening' || nextState === 'idle')) {
+        if (activeDeadAirSpeech) {
+          activeDeadAirSpeech = false;
+          lastCycleEndedAt = nowFn();
+          return;
+        }
+
         if (activeCheckInSpeech) {
           activeCheckInSpeech = false;
           lastCycleEndedAt = nowFn();
@@ -312,7 +471,7 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
         if (suppressedAfterGoodbye || pendingExternalReply || options.isSuppressed?.()) {
           awaitingShopper = false;
           waitingForTranscriptAfterSpeech = false;
-          cancelTimer();
+          cancelAllTimers();
           return;
         }
 
@@ -324,17 +483,24 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
           awaitingShopper = false;
           waitingForTranscriptAfterSpeech = false;
           cancelTimer();
+          scheduleDeadAirIfReady();
         } else {
-          // Transcript has not arrived yet; wait for onAssistantMessage before arming.
+          // Transcript has not arrived yet; wait for onAssistantMessage before arming question check-in,
+          // while allowing dead-air guard to arm in case the turn has no question or transcript.
           awaitingShopper = false;
           waitingForTranscriptAfterSpeech = true;
           cancelTimer();
+          scheduleDeadAirIfReady();
         }
         return;
       }
 
-      if ((nextState === 'listening' || nextState === 'idle') && awaitingShopper && timer === null) {
-        scheduleIfReady();
+      if (nextState === 'listening' || nextState === 'idle') {
+        if (awaitingShopper && timer === null) {
+          scheduleIfReady();
+        } else if (!awaitingShopper && deadAirTimer === null) {
+          scheduleDeadAirIfReady();
+        }
       }
     },
 
@@ -350,6 +516,8 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
 
       if (awaitingShopper && timer === null) {
         scheduleIfReady();
+      } else if (!awaitingShopper && deadAirTimer === null) {
+        scheduleDeadAirIfReady();
       }
     },
 
@@ -362,12 +530,12 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
         awaitingShopper = false;
         waitingForTranscriptAfterSpeech = false;
         turnEndedWithQuestion = false;
-        cancelTimer();
+        cancelAllTimers();
         return;
       }
 
-      // Transcript of a check-in utterance itself must not cancel the second check-in.
-      if (activeCheckInSpeech || checkInCount > 0) {
+      // Transcript of a check-in or dead-air utterance itself must not re-arm another prompt.
+      if (activeCheckInSpeech || activeDeadAirSpeech || checkInCount > 0) {
         return;
       }
 
@@ -376,6 +544,9 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
         awaitingShopper = false;
         waitingForTranscriptAfterSpeech = false;
         cancelTimer();
+        if (agentState === 'listening' || agentState === 'idle') {
+          scheduleDeadAirIfReady();
+        }
         return;
       }
 
@@ -395,10 +566,16 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
         } else {
           awaitingShopper = false;
           cancelTimer();
+          if (agentState === 'listening' || agentState === 'idle') {
+            scheduleDeadAirIfReady();
+          }
         }
       } else if (!isQuestion) {
         awaitingShopper = false;
         cancelTimer();
+        if (agentState === 'listening' || agentState === 'idle') {
+          scheduleDeadAirIfReady();
+        }
       }
     },
 
@@ -406,6 +583,9 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
       if (disposed) return;
       resetOnShopper();
       awaitingShopper = false;
+      if (userState !== 'speaking' && (agentState === 'listening' || agentState === 'idle')) {
+        scheduleDeadAirIfReady();
+      }
     },
 
     onToolStart(callId: string): void {
@@ -416,7 +596,7 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
       awaitingShopper = false;
       waitingForTranscriptAfterSpeech = false;
       turnEndedWithQuestion = null;
-      cancelTimer();
+      cancelAllTimers();
     },
 
     onToolEnd(callId: string): void {
@@ -426,7 +606,11 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
       } else {
         activeTools.clear();
       }
-      // Do not arm immediately on tool end; wait until Alice speaks the result and finishes a question.
+      // Do not arm question check-in on tool end; wait until Alice speaks and asks a question.
+      // Arm dead-air guard if all tools finished while neither side is speaking.
+      if (activeTools.size === 0 && !awaitingShopper) {
+        scheduleDeadAirIfReady();
+      }
     },
 
     onExternalReply(): void {
@@ -435,17 +619,18 @@ export function createSilenceCheckIn(options: SilenceCheckInOptions): SilenceChe
       awaitingShopper = false;
       waitingForTranscriptAfterSpeech = false;
       turnEndedWithQuestion = null;
-      cancelTimer();
+      cancelAllTimers();
     },
 
     dispose(): void {
       disposed = true;
-      cancelTimer();
+      cancelAllTimers();
       activeTools.clear();
       awaitingShopper = false;
       waitingForTranscriptAfterSpeech = false;
       pendingExternalReply = false;
       activeCheckInSpeech = false;
+      activeDeadAirSpeech = false;
     },
   };
 }
