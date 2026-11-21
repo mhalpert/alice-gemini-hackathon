@@ -89,6 +89,8 @@ export interface PageActions {
   showSearch: { query: string; items: Item[]; title?: string; rack?: boolean }; // title replaces the "Results for" heading; rack shows up to 12 items
   showProduct: { item: Item; images: string[]; slot: string; why: string; sizes: string[]; details: string[]; description: string };
   hideProduct: Record<string, never>;
+  showPiece: { outfit: number; slot: string; item: Item; image: string; index: number; count: number; note: string; point?: { x: number; y: number } };
+  hidePiece: Record<string, never>;
 }
 
 export type PageActionName = keyof PageActions;

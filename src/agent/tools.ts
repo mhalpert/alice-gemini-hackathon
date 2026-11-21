@@ -31,11 +31,17 @@ import {
   createBitPicker,
   formatWorkingNoteWithBit,
 } from './bits.ts';
-import type {
-  ExtraAssetStatus,
-  RevealSequencer,
-  TryOnExtraKind,
+import {
+  type ExtraAssetStatus,
+  type RevealSequencer,
+  type TryOnExtraKind,
+  buildStudioRevealLine,
 } from './extras.ts';
+import {
+  type WalkthroughController,
+  buildWalkthroughPickInstruction,
+  isExpressModeState,
+} from './walkthrough.ts';
 import { loadConfig } from './config.ts';
 import {
   BUILD_OUTFITS_FILLER_DELAY_MS,
@@ -327,6 +333,7 @@ export interface ToolRuntimeOptions {
   orderController?: OrderController;
   bitPicker?: BitPicker;
   revealSequencer?: RevealSequencer;
+  walkthrough?: WalkthroughController;
   sendWorkingNote?: (params: WorkingNoteParams) => boolean | void;
   onToolStart?: (params: { name: string; callId: string }) => void;
   onToolEnd?: (params: { name: string; callId: string }) => void;
@@ -1211,7 +1218,21 @@ function combineBagNotAdded(entries: Iterable<BaggedLookState>): BagNotAdded[] {
  * IMPORTANT: Do NOT set `name` on any entry; @livekit/agents 1.10 rejects named entries in object maps.
  */
 export function createAgentTools(options: ToolRuntimeOptions) {
-  const wrapper = createToolWrapper(options);
+  const wrapper = createToolWrapper({
+    ...options,
+    onToolStart: (ev) => {
+      if (
+        ev.name === 'show_on_me' ||
+        ev.name === 'swap_piece' ||
+        ev.name === 'add_to_bag' ||
+        ev.name === 'pick_outfit' ||
+        ev.name === 'show_all_looks'
+      ) {
+        options.walkthrough?.stop(ev.name);
+      }
+      options.onToolStart?.(ev);
+    },
+  });
   const logFn = options.log ?? calllog;
   const nowFn = options.now ?? (() => Date.now());
   const setTimeoutFn: (fn: () => void, ms: number) => TimerLike =
@@ -1301,7 +1322,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
     string,
     { scene: ExtraAssetStatus; video: ExtraAssetStatus }
   >();
+  const extrasUrlsByVersion = new Map<string, { scene?: string; video?: string }>();
   const extrasSettingByVersion = new Map<string, string>();
+  let studioRevealCursor = 0;
   const baggedResults = new Map<string, string>();
   const baggedLookTotals = new Map<string, number>();
   const baggedLooks = new Map<string, BaggedLookState>();
@@ -1421,6 +1444,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       'abort',
       () => {
         cancelWalk();
+        options.walkthrough?.stop('aborted');
         options.revealSequencer?.cancel();
         for (const handle of activeTimers) {
           clearTimeoutFn(handle);
@@ -1561,6 +1585,9 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       }
 
       statusEntry[r.kind] = 'ready';
+      const urlEntry = extrasUrlsByVersion.get(key) ?? {};
+      urlEntry[r.kind] = cleanUrl;
+      extrasUrlsByVersion.set(key, urlEntry);
 
       stateStore.dispatch({
         type: 'set_tryon_extra',
@@ -1568,8 +1595,6 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         kind: r.kind,
         url: cleanUrl,
       });
-      await page.send('tryOnReady', { outfit: lookNumber, url: cleanUrl, kind: r.kind });
-      if (!isCurrentMediaVersion(lookNumber, job.version)) return;
 
       const extraSetting =
         explicitSetting?.trim() ||
@@ -1586,6 +1611,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
       options.revealSequencer?.onExtraReady(lookNumber, r.kind, {
         version: job.version,
         setting: extraSetting,
+        url: cleanUrl,
       });
     };
 
@@ -2131,6 +2157,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           };
 
           cancelWalk();
+          options.walkthrough?.stop('build_outfits');
           const buildStarted = nowFn();
           const subtitle = `${occasion} · ${formatPrice(effectiveBudget)} budget`;
           const delivered = new Set<number>();
@@ -2160,6 +2187,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
               extrasStartedVersions.clear();
               extrasHandledKinds.clear();
               extrasStatusByVersion.clear();
+              extrasUrlsByVersion.clear();
               extrasSettingByVersion.clear();
               orderController.invalidateReview();
             }
@@ -2327,9 +2355,19 @@ export function createAgentTools(options: ToolRuntimeOptions) {
         maybeStartExtrasForLook(lookNumber);
         wrapper.invalidate('pick_outfit');
         const reply = await page.send('highlight', { outfit: lookNumber, piece: null });
-        startHighlightWalk(outfit);
 
         const st = stateStore.get();
+        const detailBySlot = Object.fromEntries(
+          outfit.pieces.map((p) => [p.slot, extractHeroFact(p)]),
+        );
+        const walkthroughActive = Boolean(
+          options.walkthrough &&
+            !isExpressModeState(st) &&
+            options.walkthrough.start(outfit, { detailBySlot }),
+        );
+        if (!walkthroughActive) {
+          startHighlightWalk(outfit);
+        }
         const tryOnInfo = st.tryOn[lookNumber];
         let tryOnText = 'Try-on has not started yet.';
         if (tryOnInfo?.status === 'ready') {
@@ -2369,7 +2407,7 @@ export function createAgentTools(options: ToolRuntimeOptions) {
           ...heroLines,
           ...(otherLine ? [otherLine] : []),
           ...(swapNote ? [swapNote] : []),
-          pickGuidance,
+          walkthroughActive ? buildWalkthroughPickInstruction() : pickGuidance,
         ].join('\n');
       }),
     }),
@@ -2426,12 +2464,15 @@ export function createAgentTools(options: ToolRuntimeOptions) {
             }
             const stNow = stateStore.get();
             const tracked = verKey ? extrasStatusByVersion.get(verKey) : undefined;
+            const trackedUrls = verKey ? extrasUrlsByVersion.get(verKey) : undefined;
             const extrasNow = stNow.tryOnExtras[lookNum];
 
             const sceneStatus: ExtraAssetStatus =
               tracked?.scene ?? (extrasNow?.scene ? 'ready' : 'absent');
             const videoStatus: ExtraAssetStatus =
               tracked?.video ?? (extrasNow?.video ? 'ready' : 'absent');
+            const sceneUrl = trackedUrls?.scene ?? extrasNow?.scene;
+            const videoUrl = trackedUrls?.video ?? extrasNow?.video;
 
             const moreBeatsComing =
               sceneStatus === 'ready' ||
@@ -2440,36 +2481,39 @@ export function createAgentTools(options: ToolRuntimeOptions) {
               videoStatus === 'pending';
 
             const setting =
-              (verKey ? extrasSettingByVersion.get(verKey) : '') ||
-              deriveFallbackSetting(stNow.occasion ?? '', stNow.where ?? undefined);
+              deriveFallbackSetting(stNow.occasion ?? '', stNow.where ?? undefined) ||
+              (verKey ? (extrasSettingByVersion.get(verKey) ?? '') : '');
 
-            options.revealSequencer?.startStudio({
-              outfit: lookNum,
-              version: currentVer,
-              setting,
-              scene: sceneStatus,
-              video: videoStatus,
-              sizesAlreadyPrompted: !moreBeatsComing,
-              getSizesInstruction: () =>
-                buildShowOnMeSizesOnlyInstruction(
-                  outfitsByNumber.get(lookNum) ?? outfit,
-                  stateStore.get().sizes,
-                  stateStore.get().express,
-                ),
-            });
+            const studioLine =
+              options.revealSequencer?.startStudio({
+                outfit: lookNum,
+                version: currentVer,
+                setting,
+                scene: sceneStatus,
+                video: videoStatus,
+                ...(sceneUrl ? { sceneUrl } : {}),
+                ...(videoUrl ? { videoUrl } : {}),
+                sizesAlreadyPrompted: !moreBeatsComing,
+                getSizesInstruction: () =>
+                  buildShowOnMeSizesOnlyInstruction(
+                    outfitsByNumber.get(lookNum) ?? outfit,
+                    stateStore.get().sizes,
+                    stateStore.get().express,
+                  ),
+              }) ?? buildStudioRevealLine(studioRevealCursor++);
 
             if (moreBeatsComing) {
               if (renderedOnModel) {
-                return `Look ${lookNum} (${outfit.name}) is now revealed on screen on a model because the camera is off. Say the look is on screen on a model and that turning the camera on lets you show it on them; never say you cannot overlay it. React to the studio shot in ONE short line with loud New York friend energy, and do not ask for sizes yet—more views of this look are coming right up.`;
+                return `Look ${lookNum} (${outfit.name}) is now revealed on screen on a model because the camera is off. Say the look is on screen on a model and that turning the camera on lets you show it on them; never say you cannot overlay it. Open with "${studioLine}" then react to the studio shot in ONE short line with loud New York friend energy, and do not ask for sizes yet—more views of this look are coming right up.`;
               }
-              return `Try-on for Look ${lookNum} (${outfit.name}) is now revealed on screen. React to the studio shot in ONE short line with loud New York friend energy, and do not ask for sizes yet—more views of this look are coming right up.`;
+              return `Try-on for Look ${lookNum} (${outfit.name}) is now revealed on screen. Open with "${studioLine}" then react to the studio shot in ONE short line with loud New York friend energy, and do not ask for sizes yet—more views of this look are coming right up.`;
             }
 
             const sizeNextStep = buildShowOnMeSizeNextStep(outfit, stNow.sizes, stNow.express);
             if (renderedOnModel) {
-              return `Look ${lookNum} (${outfit.name}) is now revealed on screen on a model because the camera is off. Say the look is on screen on a model and that turning the camera on lets you show it on them; never say you cannot overlay it. ${sizeNextStep}`;
+              return `Look ${lookNum} (${outfit.name}) is now revealed on screen on a model because the camera is off. Say the look is on screen on a model and that turning the camera on lets you show it on them; never say you cannot overlay it. Open with "${studioLine}" ${sizeNextStep}`;
             }
-            return `Try-on for Look ${lookNum} (${outfit.name}) is now revealed on screen. ${sizeNextStep}`;
+            return `Try-on for Look ${lookNum} (${outfit.name}) is now revealed on screen. Open with "${studioLine}" ${sizeNextStep}`;
           }
           return renderedOnModel
             ? `Try-on for Look ${lookNum} (on a model because the camera is off) is ready, but the page did not confirm revealing it.`
