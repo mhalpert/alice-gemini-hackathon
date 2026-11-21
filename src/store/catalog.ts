@@ -54,6 +54,10 @@ export interface SearchOpts {
   shops?: string[];
 }
 
+export interface PhotoSearchOpts extends SearchOpts {
+  query?: string;
+}
+
 export interface LookupEntry {
   item: Item | null;
   available: boolean;
@@ -80,6 +84,22 @@ export interface SizeVariantOpts {
 
 export interface CatalogClient {
   search(query: string, gender: Gender, opts?: SearchOpts): Promise<SearchResult>;
+  /**
+   * Search curated stores using a shopper photo (JPEG bytes, <= 2.5 MB) as Shop MCP's similarity hint.
+   *
+   * Photo-only gives the closest match to what the person is wearing; adding `query` makes the text
+   * dominate (measured: "men's casual" returned twelve tees), so callers should pass `query` only as
+   * the fallback text.
+   *
+   * Privacy: this sends the shopper's camera frame to Shop (a third party); callers decide whether to
+   * send it. Image bytes are never written to disk, logs, errors, or the saved-results store.
+   */
+  searchByPhoto(
+    jpeg: Buffer | Uint8Array,
+    gender: Gender,
+    opts?: PhotoSearchOpts,
+  ): Promise<SearchResult>;
+  searchLike(ids: string[], gender: Gender, opts?: PhotoSearchOpts): Promise<SearchResult>;
   lookup(ids: string[]): Promise<Map<string, LookupEntry>>;
   getProduct(id: string, selections?: ProductSelection[]): Promise<ProductDetail | null>;
   productImages(item: Item): Promise<string[]>;
@@ -89,6 +109,8 @@ export interface CatalogClient {
 const FRESH_SAVED_MS = 60 * 60 * 1000;
 const LOOKUP_BATCH_SIZE = 10;
 const GET_PRODUCT_TIMEOUT_MS = 3000;
+const PHOTO_SEARCH_TIMEOUT_MS = 4000;
+const MAX_PHOTO_BYTES = 2_500_000;
 
 export type SavedMode = 'fallback' | 'fresh' | 'off';
 
@@ -537,6 +559,137 @@ export function createCatalog(deps?: {
       logEvent('store_search', { query, gender, source: 'empty', n: 0, ms });
       return { items: [], source: 'empty', ms };
     }
+  }
+
+  async function runLikeSearch(
+    kind: 'photo' | 'like',
+    likeEntries: unknown[],
+    gender: Gender,
+    opts?: PhotoSearchOpts,
+  ): Promise<SearchResult> {
+    const t0 = now();
+    const shops = opts?.shops ?? ALL_SITES;
+    const limit = Math.min(opts?.limit ?? 24, 50);
+    const maxPrice = opts?.maxPrice;
+    const queryText =
+      typeof opts?.query === 'string' && opts.query.trim() ? opts.query.trim() : undefined;
+
+    try {
+      const filters: Record<string, unknown> = {
+        shops,
+        attributes: [{ name: 'Target gender', values: [gender === 'men' ? 'Male' : 'Female'] }],
+        available: true,
+        ...(maxPrice ? { price: { max: Math.round(maxPrice * 100) } } : {}),
+      };
+
+      const catalogArgs: Record<string, unknown> = {
+        ...(queryText ? { query: queryText } : {}),
+        like: likeEntries,
+        filters,
+        context: CONTEXT,
+        pagination: { limit },
+      };
+
+      const data = await mcp.call(
+        'search_catalog',
+        { catalog: catalogArgs },
+        { timeoutMs: PHOTO_SEARCH_TIMEOUT_MS },
+      );
+
+      const rawProducts = Array.isArray(data?.products) ? data.products : [];
+      const items: Item[] = [];
+      for (const product of rawProducts) {
+        if (wrongDepartment(product, gender)) continue;
+        const mapped = toItem(product, gender);
+        if (!mapped) continue;
+        if (maxPrice !== undefined && mapped.price > maxPrice) continue;
+        items.push(mapped);
+      }
+
+      const ms = Math.max(0, now() - t0);
+      const source: SearchResult['source'] = items.length > 0 ? 'live' : 'empty';
+      console.log(`[store] ${kind} search ${gender} ${items.length} items ${ms}ms`);
+      logEvent('store_search', {
+        kind,
+        query: queryText ?? '',
+        gender,
+        source,
+        n: items.length,
+        ms,
+      });
+      return { items, source, ms };
+    } catch {
+      if (queryText) {
+        return search(queryText, gender, opts);
+      }
+      const ms = Math.max(0, now() - t0);
+      console.log(`[store] ${kind} search ${gender} 0 items ${ms}ms`);
+      logEvent('store_search', {
+        kind,
+        query: '',
+        gender,
+        source: 'empty',
+        n: 0,
+        ms,
+      });
+      return { items: [], source: 'empty', ms };
+    }
+  }
+
+  async function searchByPhoto(
+    jpeg: Buffer | Uint8Array,
+    gender: Gender,
+    opts?: PhotoSearchOpts,
+  ): Promise<SearchResult> {
+    const t0 = now();
+    const queryText =
+      typeof opts?.query === 'string' && opts.query.trim() ? opts.query.trim() : '';
+
+    if (!jpeg || jpeg.byteLength === 0) {
+      const ms = Math.max(0, now() - t0);
+      console.log(`[store] photo search ${gender} refused: empty image`);
+      logEvent('store_search', { kind: 'photo', query: queryText, gender, source: 'empty', n: 0, ms });
+      return { items: [], source: 'empty', ms };
+    }
+
+    if (jpeg.byteLength > MAX_PHOTO_BYTES) {
+      const ms = Math.max(0, now() - t0);
+      console.log(
+        `[store] photo search ${gender} refused: image ${jpeg.byteLength} bytes exceeds 2.5 MB limit`,
+      );
+      logEvent('store_search', { kind: 'photo', query: queryText, gender, source: 'empty', n: 0, ms });
+      return { items: [], source: 'empty', ms };
+    }
+
+    const base64 = Buffer.from(jpeg.buffer, jpeg.byteOffset, jpeg.byteLength).toString('base64');
+    return runLikeSearch(
+      'photo',
+      [{ image: { content_type: 'image/jpeg', data: base64 } }],
+      gender,
+      opts,
+    );
+  }
+
+  async function searchLike(
+    ids: string[],
+    gender: Gender,
+    opts?: PhotoSearchOpts,
+  ): Promise<SearchResult> {
+    const cleanIds = Array.isArray(ids)
+      ? ids.map((s) => (typeof s === 'string' ? s.trim() : '')).filter(Boolean).slice(0, 2)
+      : [];
+    if (cleanIds.length === 0) {
+      if (typeof opts?.query === 'string' && opts.query.trim()) {
+        return search(opts.query.trim(), gender, opts);
+      }
+      return { items: [], source: 'empty', ms: 0 };
+    }
+    return runLikeSearch(
+      'like',
+      cleanIds.map((id) => ({ id })),
+      gender,
+      opts,
+    );
   }
 
   async function lookup(ids: string[]): Promise<Map<string, LookupEntry>> {
@@ -1176,6 +1329,8 @@ function matchCompanionSizeValue(
 
   return {
     search,
+    searchByPhoto,
+    searchLike,
     lookup,
     getProduct,
     productImages,
@@ -1186,6 +1341,18 @@ function matchCompanionSizeValue(
 const defaultCatalog = createCatalog();
 
 export const search = defaultCatalog.search;
+/**
+ * Search curated stores using a shopper photo (JPEG bytes, <= 2.5 MB) as Shop MCP's similarity hint.
+ *
+ * Photo-only gives the closest match to what the person is wearing; adding `query` makes the text
+ * dominate (measured: "men's casual" returned twelve tees), so callers should pass `query` only as
+ * the fallback text.
+ *
+ * Privacy: this sends the shopper's camera frame to Shop (a third party); callers decide whether to
+ * send it. Image bytes are never written to disk, logs, errors, or the saved-results store.
+ */
+export const searchByPhoto = defaultCatalog.searchByPhoto;
+export const searchLike = defaultCatalog.searchLike;
 export const lookup = defaultCatalog.lookup;
 export const getProduct = defaultCatalog.getProduct;
 export const productImages = defaultCatalog.productImages;
