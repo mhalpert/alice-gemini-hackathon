@@ -1392,7 +1392,10 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         const isDirectLocal =
           isLoopbackHost(socketAddr) && !proxied && isLocalHostHeader(req.headers.host);
         const isLocalCaller = !trustProxy && isDirectLocal;
-        if (!expectedPasscode && !isLocalCaller) {
+        // ALICE_OPEN_ACCESS=1: explicit opt-in to skip the call passcode (e.g. the site is
+        // already behind proxy-level basic auth). Default behaviour is unchanged.
+        const openAccess = env.ALICE_OPEN_ACCESS?.trim() === '1';
+        if (!expectedPasscode && !isLocalCaller && !openAccess) {
           if (proxied && !warnedProxiedNoPasscode) {
             warnedProxiedNoPasscode = true;
             console.warn(
@@ -2584,7 +2587,11 @@ if (import.meta.main) {
     console.log(
       `[server] listening on ${scheme}://${displayHost}:${port} livekit=${livekitConfigured} passcode=${passcodeRequired} trust_proxy=${trustProxy} calls_per_hour=${callsPerHourLabel} max_active_calls=${maxActiveCallsLabel}`,
     );
-    if (trustProxy && !passcodeRequired) {
+    if (process.env.ALICE_OPEN_ACCESS?.trim() === '1' && !passcodeRequired) {
+      console.warn(
+        '[server] ALICE_OPEN_ACCESS=1 with empty ALICE_PASSCODE — /api/token needs no passcode; protect the site at the proxy (e.g. basic auth).',
+      );
+    } else if (trustProxy && !passcodeRequired) {
       console.error(
         `[server] ERROR: ALICE_TRUST_PROXY=1 with empty ALICE_PASSCODE — every /api/token request will be refused (403 passcode_not_configured); set ALICE_PASSCODE (at least ${MIN_PROXY_PASSCODE_LEN} characters) in .env.local.`,
       );
