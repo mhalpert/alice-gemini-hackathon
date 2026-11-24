@@ -43,8 +43,14 @@ import {
 } from './patches.ts';
 import { createToolResultNudger } from './nudge.ts';
 import { createOrderController } from './order.ts';
+import {
+  createMemorySync,
+  initialStateFromMemory,
+  readCallMemory,
+  returningShopper,
+} from './memory.ts';
 import { createPageSender } from './page.ts';
-import { GREETING_INSTRUCTIONS, buildSystemPrompt } from './prompt.ts';
+import { buildGreetingInstructions, buildSystemPrompt } from './prompt.ts';
 import { createSilenceCheckIn, type SilenceCheckIn } from './silence.ts';
 import { createCallStateStore } from './state.ts';
 import {
@@ -574,16 +580,37 @@ export default defineAgent({
 
     let toolFillerRef: ReturnType<typeof createToolFiller> | null = null;
 
-    const callState = createCallStateStore({
-      roomName,
-      appContext,
-      onExpressChange: (express) => {
-        if (express) {
-          toolFillerRef?.cancelAll();
-        }
-      },
-      log: calllog,
+    // Shopper accounts: the server's note for this call (null when accounts are off).
+    // A signed-in shopper's name, department, sizes and notes seed the call state, and
+    // changes to them go back to the page to be saved.
+    const callMemory = readCallMemory(ctx.job.metadata);
+    const memorySync = createMemorySync({
+      enabled: callMemory?.accounts === true,
+      page,
+      log: (ev, data) => calllog(roomName, ev, data),
     });
+    if (callMemory?.accounts) {
+      calllog(roomName, 'call_memory', {
+        signed_in: callMemory.shopper !== null,
+        returning: returningShopper(callMemory) !== null,
+        facts: callMemory.shopper?.facts.length ?? 0,
+        sizes: Object.keys(callMemory.shopper?.sizes ?? {}).length,
+      });
+    }
+
+    const callState = memorySync.wrap(
+      createCallStateStore({
+        roomName,
+        appContext,
+        onExpressChange: (express) => {
+          if (express) {
+            toolFillerRef?.cancelAll();
+          }
+        },
+        log: calllog,
+        initial: initialStateFromMemory(callMemory),
+      }),
+    );
 
     const vision = config.vision
       ? createVisionController({
@@ -846,6 +873,8 @@ export default defineAgent({
         ...(ev.error ? { error: ev.error } : {}),
       });
       toolAbort.abort();
+      // Last chance to hand unsent memory to the page; it fails quietly if the page is gone.
+      void memorySync.flush().finally(() => memorySync.stop());
       resultNudger.dispose();
       revealSequencer.dispose();
       walkthrough.dispose();
@@ -861,6 +890,7 @@ export default defineAgent({
     ctx.addShutdownCallback(async () => {
       endCallCleanup.cleanup();
       toolAbort.abort();
+      memorySync.stop();
       resultNudger.dispose();
       revealSequencer.dispose();
       walkthrough.dispose();
@@ -965,7 +995,7 @@ export default defineAgent({
     appContext.flushNow();
 
     session.generateReply({
-      instructions: GREETING_INSTRUCTIONS,
+      instructions: buildGreetingInstructions(returningShopper(callMemory)),
     });
   },
 });

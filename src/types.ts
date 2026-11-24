@@ -91,6 +91,9 @@ export interface PageActions {
   hideProduct: Record<string, never>;
   showPiece: { outfit: number; slot: string; item: Item; image: string; index: number; count: number; note: string; point?: { x: number; y: number } };
   hidePiece: Record<string, never>;
+  // What Alice has learned about the shopper, for the page to save to their account when
+  // they are signed in. Sent only when the server has shopper accounts switched on.
+  saveMemory: { name: string | null; department: Gender | null; sizes: Record<string, string>; facts: string[] };
 }
 
 export type PageActionName = keyof PageActions;
