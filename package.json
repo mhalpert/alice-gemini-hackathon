@@ -27,6 +27,7 @@
     "capsule:check": "node scripts/capsule-check.ts",
     "inspector:check": "node scripts/inspector-check.ts",
     "extras:check": "node scripts/extras-check.ts",
+    "accounts:check": "node scripts/accounts-check.ts",
     "rehearsal": "node --env-file-if-exists=.env.local scripts/backend-rehearsal.ts",
     "harness:media": "node scripts/harness/make-media.ts",
     "harness": "node scripts/harness/run-call.ts"

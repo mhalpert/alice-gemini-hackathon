@@ -185,6 +185,33 @@ are fixed on `main`: the token endpoint needs a passcode from another machine, o
 lookups cannot trigger paid calls, logs mask secrets, image downloads are limited to store
 CDNs, and renders are capped per call.
 
+## Added after the hackathon: shopper accounts
+
+Not part of what was built or judged on November 21. Off unless `ALICE_ACCOUNTS=on`; with
+it off the page, the call token and the agent behave exactly as they did on the day.
+
+With it on, the page gets a Sign in button. A shopper can create an account with an email
+address and a password, and Alice then remembers them between calls: their name, men's or
+women's, their sizes, and the short notes she makes during a call ("hates wool"). The
+account panel shows everything she has kept, with Forget everything, Sign out and Delete
+account.
+
+- **What is stored:** the email address, a scrypt hash of the password, hashed session
+  tokens, and that memory. No photos, addresses or payment details, and no record of the
+  conversation, the looks shown or anything bought.
+- **Where:** one SQLite file (`ALICE_DB_PATH`, default `data/alice.db`), opened only by the
+  web server. On a host that replaces the container on each deploy, it needs a disk that
+  survives the deploy.
+- **How Alice gets it:** when a signed-in shopper starts a call, the server puts their
+  memory in the agent dispatch inside the signed call token. During the call the agent
+  sends what it learns to the page (the `saveMemory` page action) and the page saves it
+  with the shopper's own session. The agent never opens the database.
+- **Checks:** `npm test` covers the storage, the routes and the agent side.
+  `npm run accounts:check` drives the real page in a browser at desktop and phone width,
+  with no model or store calls.
+- **Not checked yet:** a real call with accounts on. The address is not verified by email,
+  and there is no password reset.
+
 ## Where things are
 
 | Folder | What is in it | Owner |
@@ -193,5 +220,6 @@ CDNs, and renders are capped per call.
 | `src/brain/`, `src/library/`, `eval/` | Outfit planning, picking, the critic, the ready-made looks | Jing |
 | `src/store/`, `src/media/`, `server.ts` | Store search, carts, try-on and renders, the web server | Soham |
 | `public/`, `src/types.ts` | The store page, the call layer, the shared types | Arjun |
+| `src/accounts/` | Shopper accounts and what Alice remembers between calls (after the hackathon) | Arjun |
 | `scripts/harness/` | A scripted shopper that makes a real call and grades it | Mike |
 | `tests/` | Unit tests (`npm test`) | Everyone |

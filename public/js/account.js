@@ -279,8 +279,13 @@ export function mountAccount(options = {}) {
 
   function focusFirst() {
     const target = sheetEl.querySelector('input') || sheetEl.querySelector('.account-body button') || sheetEl;
-    // After the slide-in starts, so the browser does not scroll the page to an off-screen field.
-    requestAnimationFrame(() => target.focus({ preventScroll: true }));
+    target.focus({ preventScroll: true });
+    if (document.activeElement === target) return;
+    // The panel was not focusable yet (it was still hidden). Try once more on the next
+    // frame, but never pull focus away from wherever the shopper has put it since.
+    requestAnimationFrame(() => {
+      if (state.open && !sheetEl.contains(document.activeElement)) target.focus({ preventScroll: true });
+    });
   }
 
   function setBusy(busy) {
