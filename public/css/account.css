@@ -1,0 +1,390 @@
+/* Shopper accounts: the masthead button and the account panel.
+   Uses the tokens and the panel, button and focus styles from store.css. */
+
+/* The masthead button: a small dot marks "signed in". */
+.account-btn-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--ivory);
+  opacity: 0;
+  transform: scale(0.4);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.account-btn.is-signed-in .account-btn-dot {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* Above the call layer (z 60), so the panel is usable before and during a call. */
+.panel-layer--account {
+  z-index: 70;
+}
+
+.panel-sheet--account {
+  width: min(420px, 100vw);
+}
+
+.panel-sheet--account:focus {
+  outline: none;
+}
+
+.account-title {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 28px;
+  font-weight: 500;
+  line-height: 1.1;
+  color: var(--ink);
+}
+
+.account-body {
+  padding: 20px 24px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.account-lede {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--ink);
+}
+
+.account-fineprint,
+.account-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-muted);
+}
+
+/* Sign in / Create account switch */
+.account-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border: 1px solid var(--line-strong);
+}
+
+.account-tab {
+  padding: 11px 10px;
+  background: transparent;
+  border: 0;
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background-color 180ms ease, color 180ms ease;
+}
+
+.account-tab + .account-tab {
+  border-left: 1px solid var(--line-strong);
+}
+
+.account-tab:hover {
+  color: var(--ink);
+}
+
+.account-tab.is-active {
+  background: var(--ink);
+  color: var(--ivory);
+}
+
+.account-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.account-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.account-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+
+.account-input {
+  width: 100%;
+  height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 0;
+  background: var(--surface);
+  font: inherit;
+  /* 16px keeps iOS Safari from zooming the page when a field takes focus. */
+  font-size: 16px;
+  line-height: 1.2;
+  color: var(--ink);
+  transition: border-color 180ms ease;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.account-input:hover {
+  border-color: var(--ink-muted);
+}
+
+.account-input:focus {
+  border-color: var(--ink);
+}
+
+.account-input:disabled {
+  opacity: 0.6;
+}
+
+.account-submit {
+  width: 100%;
+  min-height: 44px;
+}
+
+.account-status {
+  margin: 0;
+  min-height: 18px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--ink-muted);
+}
+
+.account-status:empty {
+  display: none;
+}
+
+.account-status--error {
+  color: var(--accent);
+}
+
+/* Sign in with Shop */
+.account-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-subtle);
+}
+
+.account-divider::before,
+.account-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.account-shop-btn {
+  width: 100%;
+  min-height: 44px;
+}
+
+.account-shop-code {
+  margin: 0;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  font-family: var(--serif);
+  font-size: 30px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  line-height: 1.1;
+  text-align: center;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+a.account-submit {
+  text-decoration: none;
+}
+
+/* Signed in */
+.account-signed-in {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+
+.account-signed-in strong {
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.account-subtitle {
+  margin: 4px 0 -8px;
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+
+.account-memory {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 76px 1fr;
+  border-top: 1px solid var(--line);
+}
+
+.account-memory dt,
+.account-memory dd {
+  margin: 0;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.account-memory dt {
+  color: var(--ink-muted);
+}
+
+.account-memory dd {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.account-chips,
+.account-notes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.account-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.account-chip {
+  padding: 3px 9px;
+  border: 1px solid var(--line-strong);
+  font-size: 12px;
+  line-height: 1.5;
+  text-transform: capitalize;
+}
+
+.account-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.account-empty {
+  margin: 0;
+  padding: 14px 16px;
+  background: var(--board);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink-muted);
+}
+
+.account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.account-actions .btn-primary,
+.account-actions .btn-secondary {
+  min-height: 44px;
+}
+
+.account-actions .btn-secondary:disabled,
+.account-actions .btn-primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+  pointer-events: none;
+}
+
+.account-link-btn {
+  margin-left: auto;
+  min-height: 44px;
+  padding: 0 4px;
+  background: transparent;
+  border: 0;
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 13px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.account-link-btn:hover {
+  color: var(--accent);
+}
+
+.account-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+}
+
+.account-confirm-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+/* The same focus ring the rest of the store uses. */
+.account-btn:focus-visible,
+.account-tab:focus-visible,
+.account-input:focus-visible,
+.account-link-btn:focus-visible,
+.panel-sheet--account .panel-close-btn:focus-visible,
+.panel-sheet--account .btn-primary:focus-visible,
+.panel-sheet--account .btn-secondary:focus-visible {
+  outline: 1.5px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* Keep the call card clear of the panel, as the bag does. */
+body.has-boutique.account-open #call .call-start {
+  inset: auto auto 24px 24px;
+}
+
+@media (max-width: 640px) {
+  .account-body {
+    padding: 18px 16px 24px;
+  }
+
+  .account-memory {
+    grid-template-columns: 64px 1fr;
+  }
+
+  .account-link-btn {
+    margin-left: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .account-btn-dot {
+    transition: none;
+  }
+}

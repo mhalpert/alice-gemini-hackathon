@@ -7,6 +7,10 @@ import net from 'node:net';
 import path from 'node:path';
 import { AccessToken, RoomAgentDispatch, RoomConfiguration, RoomServiceClient } from 'livekit-server-sdk';
 import { calllog as defaultCalllog } from './src/calllog.ts';
+import { openAccountsDb, resolveDbPath } from './src/accounts/db.ts';
+import { createAccountRoutes } from './src/accounts/http.ts';
+import { createAccounts, type Accounts } from './src/accounts/index.ts';
+import { createShopSignIn, type ShopSignIn } from './src/accounts/shop-signin.ts';
 import type { Gender, Item, Outfit, Piece, SearchResult } from './src/types.ts';
 import type { ProductDetail, SearchOpts, SizeVariantOpts, SizeVariantResult } from './src/store/catalog.ts';
 import { sizeVariant as defaultSizeVariant } from './src/store/catalog.ts';
@@ -89,6 +93,10 @@ export interface AliceServerOptions {
   remoteAddress?: (req: IncomingMessage) => string | undefined;
   now?: () => number;
   activeCallsClient?: ActiveCallsClient;
+  /** Shopper accounts service; tests pass one on an in-memory database. */
+  accounts?: Accounts;
+  /** "Sign in with Shop" flow; tests pass one that talks to a stand-in for Shop. */
+  shopSignIn?: ShopSignIn;
 }
 
 export interface AliceHttpsServerOptions extends AliceServerOptions {
@@ -1003,6 +1011,34 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
     }
   }
 
+  // Shopper accounts (src/accounts/). Off unless ALICE_ACCOUNTS is on; the database file
+  // is opened the first time an account route or a signed-in call needs it.
+  let accountsService: Accounts | null = opts.accounts ?? null;
+  let shopSignInService: ShopSignIn | null = opts.shopSignIn ?? null;
+  const accountRoutes = createAccountRoutes({
+    getAccounts(env) {
+      if (!accountsService) {
+        accountsService = createAccounts({
+          db: openAccountsDb({ path: resolveDbPath(env.ALICE_DB_PATH) }),
+          now: nowFn,
+        });
+      }
+      return accountsService;
+    },
+    getShopSignIn() {
+      if (!shopSignInService) {
+        shopSignInService = createShopSignIn({ now: nowFn, log: logServerEvent });
+      }
+      return shopSignInService;
+    },
+    sendJson,
+    readJsonBody: readStrictJsonBody,
+    clientAddress: (req, env) => clientAddress(req, { env, remoteAddress: opts.remoteAddress }),
+    originMatchesHost,
+    log: logServerEvent,
+    now: nowFn,
+  });
+
   function sweepBucketMap(buckets: Map<string, number[]>, cutoff: number): void {
     if (buckets.size > 1000) {
       for (const [key, timestamps] of buckets) {
@@ -1584,7 +1620,10 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
 
         const identity = `${SHOPPER_IDENTITY_PREFIX}${crypto.randomBytes(4).toString('hex')}`;
         const trimmedName = typeof body.name === 'string' ? body.name.trim().slice(0, 40) : '';
-        const displayName = trimmedName || 'Shopper';
+        // A signed-in shopper: their saved name, and what Alice remembers, travel to the
+        // agent inside the signed token. Null when accounts are off.
+        const shopperCall = accountRoutes.callContext(req, env);
+        const displayName = trimmedName || shopperCall?.displayName?.slice(0, 40) || 'Shopper';
 
         const at = new AccessToken(apiKey, apiSecret, {
           identity,
@@ -1600,7 +1639,12 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
           canUpdateOwnMetadata: true,
         });
         at.roomConfig = new RoomConfiguration({
-          agents: [new RoomAgentDispatch({ agentName: agent })],
+          agents: [
+            new RoomAgentDispatch({
+              agentName: agent,
+              ...(shopperCall ? { metadata: shopperCall.dispatchMetadata } : {}),
+            }),
+          ],
         });
 
         let token: string;
@@ -2024,6 +2068,12 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
           ...addrLog,
         });
         sendJson(res, 200, payload, { 'Cache-Control': 'no-store' });
+        return;
+      }
+
+      // 3a-2. Shopper accounts: /api/account and the routes under it. Answers nothing
+      // (and falls through to the 404 below) unless ALICE_ACCOUNTS is on.
+      if (await accountRoutes.handle(req, res, rawPathname, env)) {
         return;
       }
 

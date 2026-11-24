@@ -185,6 +185,48 @@ are fixed on `main`: the token endpoint needs a passcode from another machine, o
 lookups cannot trigger paid calls, logs mask secrets, image downloads are limited to store
 CDNs, and renders are capped per call.
 
+## Added after the hackathon: shopper accounts
+
+Not part of what was built or judged on November 21. Off unless `ALICE_ACCOUNTS=on`; with
+it off the page, the call token and the agent behave exactly as they did on the day.
+
+With it on, the page gets a Sign in button. A shopper can create an account with an email
+address and a password, and Alice then remembers them between calls: their name, men's or
+women's, their sizes, and the short notes she makes during a call ("hates wool"). The
+account panel shows everything she has kept, with Forget everything, Sign out and Delete
+account.
+
+- **What is stored:** the email address, a scrypt hash of the password, hashed session
+  tokens and one-call save tickets, and that memory. No photos, addresses or payment details, and no record of the
+  conversation, the looks shown or anything bought.
+- **Where:** one SQLite file (`ALICE_DB_PATH`, default `data/alice.db`), opened only by the
+  web server. On a host that replaces the container on each deploy, it needs a disk that
+  survives the deploy.
+- **How Alice gets it:** when a signed-in shopper starts a call, the server puts their
+  memory in the agent dispatch inside the signed call token, with a one-call ticket for
+  that account. During the call the agent sends what it learns to the page (the
+  `saveMemory` page action) and the page saves it with the shopper's own session. The
+  server accepts a save only when the ticket and the session belong to the same account,
+  so one person's call can never write into another person's account. The agent never
+  opens the database.
+- **Sign in with Shop (`ALICE_ACCOUNTS_SHOP=on`, also off by default):** a second way in.
+  The shopper approves on Shop's own page and Shop tells the server who they are in a
+  signed ID token; the server keeps Shop's id for them, their email address and first
+  name, and discards the access token. It uses Shop's public prototype client. Shop's
+  docs say an app that is distributed needs its own registered client, so this is for
+  the prototype only.
+- **Checks:** `npm test` covers the storage, the routes, the Shop sign-in (against a
+  stand-in for Shop, with real signature checks) and the agent side.
+  `npm run accounts:check` drives the real page in a browser at desktop and phone width,
+  with no model or store calls.
+- **Not checked yet:** a real call with accounts on, and a real Shop sign-in.
+- **Known gaps:** the address is not verified by email, there is no password reset or
+  change, and nothing clears out unused accounts. Off localhost the cookies assume HTTPS.
+  The sign-in limits count per visitor address, so they depend on the server seeing each
+  visitor's real address (`clientAddress` in `server.ts`); behind a proxy on another
+  address every visitor shares one count today, which is safe but lets one person use up
+  the sign-in allowance for everyone.
+
 ## Where things are
 
 | Folder | What is in it | Owner |
@@ -193,5 +235,6 @@ CDNs, and renders are capped per call.
 | `src/brain/`, `src/library/`, `eval/` | Outfit planning, picking, the critic, the ready-made looks | Jing |
 | `src/store/`, `src/media/`, `server.ts` | Store search, carts, try-on and renders, the web server | Soham |
 | `public/`, `src/types.ts` | The store page, the call layer, the shared types | Arjun |
+| `src/accounts/` | Shopper accounts and what Alice remembers between calls (after the hackathon) | Arjun |
 | `scripts/harness/` | A scripted shopper that makes a real call and grades it | Mike |
 | `tests/` | Unit tests (`npm test`) | Everyone |
