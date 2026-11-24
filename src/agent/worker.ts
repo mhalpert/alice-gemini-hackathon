@@ -585,7 +585,7 @@ export default defineAgent({
     // changes to them go back to the page to be saved.
     const callMemory = readCallMemory(ctx.job.metadata);
     const memorySync = createMemorySync({
-      enabled: callMemory?.accounts === true,
+      ticket: callMemory?.ticket,
       page,
       log: (ev, data) => calllog(roomName, ev, data),
     });

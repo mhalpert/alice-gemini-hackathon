@@ -18,8 +18,12 @@ import {
 export const CALL_MEMORY_VERSION = 1;
 /** The agent keeps at most this many notes per call (MAX_FACTS in src/agent/state.ts). */
 export const CALL_MEMORY_MAX_FACTS = 20;
-/** Generous bound on the encoded note; real ones are a few hundred bytes. */
-export const CALL_MEMORY_MAX_BYTES = 8 * 1024;
+/**
+ * Bound on the encoded note. It rides inside the call token, which the browser sends in a
+ * URL when it connects, so it has to stay small. Past this, the oldest notes are left out.
+ */
+export const CALL_MEMORY_MAX_BYTES = 3 * 1024;
+const TICKET_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
 
 export interface CallShopper {
   name: string | null;
@@ -34,6 +38,12 @@ export interface CallMemory {
   accounts: boolean;
   /** The signed-in shopper's memory, or null when nobody is signed in. */
   shopper: CallShopper | null;
+  /**
+   * Proof that this call was started by one particular account. The agent sends it back
+   * with every saveMemory; the server refuses a save whose ticket belongs to a different
+   * account than the browser's session. Null when nobody was signed in.
+   */
+  ticket: string | null;
 }
 
 export function toCallShopper(name: unknown, memory: ShopperMemory | null | undefined): CallShopper {
@@ -45,15 +55,24 @@ export function toCallShopper(name: unknown, memory: ShopperMemory | null | unde
   };
 }
 
-export function encodeCallMemory(input: { accounts: boolean; shopper: CallShopper | null }): string {
+export function cleanTicket(value: unknown): string | null {
+  return typeof value === 'string' && TICKET_PATTERN.test(value) ? value : null;
+}
+
+export function encodeCallMemory(input: {
+  accounts: boolean;
+  shopper: CallShopper | null;
+  ticket?: string | null;
+}): string {
   const note: CallMemory = {
     v: CALL_MEMORY_VERSION,
     accounts: input.accounts === true,
     shopper: input.shopper ? toCallShopper(input.shopper.name, { ...input.shopper, updated_at: null }) : null,
+    ticket: cleanTicket(input.ticket),
   };
   let text = JSON.stringify(note);
-  // Should never trigger with the caps in memory.ts; if it somehow does, drop notes
-  // (oldest first) rather than send a token that is too large to use.
+  // A shopper with many long notes does not fit: leave out the oldest notes rather than
+  // send a call token that is too large to connect with. They stay stored on the server.
   while (Buffer.byteLength(text) > CALL_MEMORY_MAX_BYTES && note.shopper && note.shopper.facts.length > 0) {
     note.shopper.facts = note.shopper.facts.slice(1);
     text = JSON.stringify(note);
@@ -84,7 +103,7 @@ export function decodeCallMemory(raw: unknown): CallMemory | null {
       updated_at: null,
     });
   }
-  return { v: CALL_MEMORY_VERSION, accounts: note.accounts === true, shopper };
+  return { v: CALL_MEMORY_VERSION, accounts: note.accounts === true, shopper, ticket: cleanTicket(note.ticket) };
 }
 
 export function isReturningShopper(shopper: CallShopper | null | undefined): boolean {

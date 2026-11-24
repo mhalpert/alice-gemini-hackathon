@@ -3,7 +3,8 @@
 // Starts the web server on a free port with accounts switched on and a throwaway
 // database, then drives the real page in Chromium at desktop (1440) and phone (390)
 // width: create account, save memory the way the agent does, reload, mint a call token
-// and read the note the agent would get, sign out, sign in, forget, delete.
+// and read the note the agent would get, sign out, sign in, forget, delete, and sign in
+// with Shop (against a stand-in for Shop that the script approves).
 //
 // It makes no model calls and no store calls (the store routes are stubbed to fail fast),
 // uses made-up LiveKit keys (the token is signed locally and never used), and costs nothing.
@@ -18,6 +19,7 @@ import { chromium, type Browser, type Page } from 'playwright';
 
 import { createAliceServer } from '../server.ts';
 import { decodeCallMemory } from '../src/accounts/call-memory.ts';
+import type { ShopSignIn } from '../src/accounts/shop-signin.ts';
 
 const PASSWORD = 'correct horse battery';
 const FACTS = ['Likes emerald green', 'Hates wool'];
@@ -35,6 +37,30 @@ interface Stage {
   ok: boolean;
   detail?: string;
 }
+
+// A stand-in for Shop's sign-in: the script decides when "the shopper approves".
+const fakeShop = {
+  approved: false,
+  who: 'nobody',
+  flows: new Set<string>(),
+};
+const shopSignIn: ShopSignIn = {
+  async start() {
+    const id = crypto.randomUUID();
+    fakeShop.flows.add(id);
+    return { ok: true, flow_id: id, url: 'https://accounts.shop.app/activate?user_code=TEST-CODE', code: 'TEST-CODE', expires_in_s: 600, interval_s: 1 };
+  },
+  async poll(id) {
+    if (typeof id !== 'string' || !fakeShop.flows.has(id)) return { status: 'unknown_flow' };
+    if (!fakeShop.approved) return { status: 'pending', interval_s: 1 };
+    fakeShop.flows.delete(id);
+    return { status: 'signed_in', identity: { sub: `shop-${fakeShop.who}`, email: `shop+${fakeShop.who}@example.com`, email_verified: true, name: 'Priya' } };
+  },
+  cancel(id) {
+    if (typeof id === 'string') fakeShop.flows.delete(id);
+  },
+  pendingCount: () => fakeShop.flows.size,
+};
 
 async function runAt(browser: Browser, baseUrl: string, label: string, viewport: { width: number; height: number }, mobile: boolean): Promise<Stage[]> {
   const stages: Stage[] = [];
@@ -71,6 +97,17 @@ async function runAt(browser: Browser, baseUrl: string, label: string, viewport:
     await page.locator('.account-btn').click();
     await dialog.waitFor({ state: 'visible' });
     await page.waitForFunction(() => document.querySelector('.panel-layer--account')?.classList.contains('is-open'));
+  };
+
+  // What the agent would hold: the save ticket from a call token minted by this browser.
+  const callNote = async () => {
+    const token = await page.evaluate(async () => {
+      const res = await fetch('/api/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      return res.ok ? ((await res.json()) as { token: string }).token : `HTTP ${res.status}`;
+    });
+    assert.ok(!token.startsWith('HTTP'), `token mint failed: ${token}`);
+    const payload = JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8'));
+    return { payload, note: decodeCallMemory(payload.roomConfig.agents[0].metadata) };
   };
 
   const memoryRows = (): Promise<string[]> =>
@@ -127,9 +164,11 @@ async function runAt(browser: Browser, baseUrl: string, label: string, viewport:
     });
 
     await stage('saveMemory (what the agent calls) saves and shows in the panel', async () => {
+      const ticket = (await callNote()).note?.ticket;
+      assert.ok(ticket, 'a signed-in call has a save ticket');
       const reply = await page.evaluate(
-        (facts) => (window as any).alice.handlers.saveMemory({ name: 'Priya', department: 'women', sizes: { top: 'M', shoes: '8' }, facts }),
-        FACTS,
+        ([facts, t]) => (window as any).alice.handlers.saveMemory({ ticket: t, name: 'Priya', department: 'women', sizes: { top: 'M', shoes: '8' }, facts }),
+        [FACTS, ticket] as const,
       );
       assert.deepEqual(reply, { ok: true });
       await page.locator('.account-notes li').nth(1).waitFor();
@@ -137,8 +176,10 @@ async function runAt(browser: Browser, baseUrl: string, label: string, viewport:
     });
 
     await stage('text from memory is shown as text, never run as markup', async () => {
-      await page.evaluate(() =>
-        (window as any).alice.handlers.saveMemory({ name: 'Priya', department: 'women', sizes: {}, facts: ['<img src=x onerror="window.__pwned=1">'] }),
+      const ticket = (await callNote()).note?.ticket;
+      await page.evaluate(
+        (t) => (window as any).alice.handlers.saveMemory({ ticket: t, name: 'Priya', department: 'women', sizes: {}, facts: ['<img src=x onerror="window.__pwned=1">'] }),
+        ticket,
       );
       await page.locator('.account-notes li').nth(2).waitFor();
       assert.equal(await page.locator('.account-notes li').nth(2).textContent(), '<img src=x onerror="window.__pwned=1">');
@@ -156,15 +197,10 @@ async function runAt(browser: Browser, baseUrl: string, label: string, viewport:
     });
 
     await stage('call token carries the memory to the agent, signed inside the token', async () => {
-      const token = await page.evaluate(async () => {
-        const res = await fetch('/api/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-        return res.ok ? ((await res.json()) as { token: string }).token : `HTTP ${res.status}`;
-      });
-      assert.ok(!token.startsWith('HTTP'), `token mint failed: ${token}`);
-      const payload = JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8'));
+      const { payload, note } = await callNote();
       assert.equal(payload.name, 'Priya');
-      const note = decodeCallMemory(payload.roomConfig.agents[0].metadata);
       assert.equal(note?.accounts, true);
+      assert.match(note?.ticket ?? '', /^[A-Za-z0-9_-]{32}$/);
       assert.equal(note?.shopper?.department, 'women');
       assert.deepEqual(note?.shopper?.sizes, { top: 'M', shoes: '8' });
       assert.deepEqual(note?.shopper?.facts.slice(0, 2), FACTS);
@@ -184,7 +220,7 @@ async function runAt(browser: Browser, baseUrl: string, label: string, viewport:
       await status.filter({ hasText: 'signed out' }).waitFor();
       assert.equal(await page.locator('.account-btn').getAttribute('aria-label'), 'Sign in');
       // Signed out: what the agent sends is dropped, not saved.
-      assert.deepEqual(await page.evaluate(() => (window as any).alice.handlers.saveMemory({ name: null, department: null, sizes: {}, facts: ['should not be saved'] })), { ok: true });
+      assert.deepEqual(await page.evaluate(() => (window as any).alice.handlers.saveMemory({ ticket: 'A'.repeat(32), name: null, department: null, sizes: {}, facts: ['should not be saved'] })), { ok: true });
       await page.locator('#account-email').fill(EMAIL);
       await page.locator('#account-password').fill('wrong password here');
       await page.locator('.account-submit').click();
@@ -223,6 +259,45 @@ async function runAt(browser: Browser, baseUrl: string, label: string, viewport:
       assert.equal((await context.cookies()).some((c) => c.name === 'alice_session'), false, 'cookie cleared');
     });
 
+    await stage('sign in with Shop: shows the code and a link to Shop, then signs in once approved', async () => {
+      fakeShop.approved = false;
+      fakeShop.who = label;
+      await page.getByRole('button', { name: 'Sign in with Shop' }).click();
+      await page.locator('.account-shop-code').filter({ hasText: 'TEST-CODE' }).waitFor();
+      const link = page.getByRole('link', { name: 'Open Shop' });
+      assert.equal(await link.getAttribute('href'), 'https://accounts.shop.app/activate?user_code=TEST-CODE');
+      assert.equal(await link.getAttribute('target'), '_blank');
+      assert.match((await link.getAttribute('rel')) ?? '', /noopener/);
+      await status.filter({ hasText: 'Waiting for your approval' }).waitFor();
+      assert.equal(await page.locator('.account-btn').getAttribute('aria-label'), 'Sign in', 'not signed in until Shop says so');
+      fakeShop.approved = true;
+      await page.locator('.account-signed-in').filter({ hasText: `shop+${label}@example.com` }).waitFor();
+      assert.deepEqual(await memoryRows(), ['Name: Priya']);
+      const names = (await context.cookies()).map((c) => c.name);
+      assert.ok(names.includes('alice_session'));
+      assert.ok(!names.includes('alice_shop_flow'), 'the spent sign-in marker is cleared');
+    });
+
+    await stage('a Shop sign-in can be cancelled, and closing the panel gives it up', async () => {
+      await page.getByRole('button', { name: 'Sign out' }).click();
+      await status.filter({ hasText: 'signed out' }).waitFor();
+      fakeShop.approved = false;
+      await page.getByRole('button', { name: 'Sign in with Shop' }).click();
+      await page.locator('.account-shop-code').waitFor();
+      await page.getByRole('button', { name: 'Cancel' }).click();
+      await page.locator('#account-email').waitFor();
+      await page.waitForFunction(() => true);
+      await page.getByRole('button', { name: 'Sign in with Shop' }).click();
+      await page.locator('.account-shop-code').waitFor();
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.querySelector('.panel-layer--account')?.classList.contains('is-open'));
+      await page.waitForTimeout(300);
+      assert.equal(fakeShop.flows.size, 0, 'no sign-in is left waiting');
+      fakeShop.approved = true;
+      await page.waitForTimeout(2500);
+      assert.equal(await page.locator('.account-btn').getAttribute('aria-label'), 'Sign in', 'a given-up sign-in never completes');
+    });
+
     await stage('no errors in the browser console', async () => {
       assert.deepEqual(consoleErrors, []);
     });
@@ -239,6 +314,7 @@ async function main(): Promise<number> {
   const server = createAliceServer({
     env: {
       ALICE_ACCOUNTS: 'on',
+      ALICE_ACCOUNTS_SHOP: 'on',
       ALICE_DB_PATH: path.join(dataDir, 'alice.db'),
       LIVEKIT_URL: 'wss://example.invalid',
       LIVEKIT_API_KEY: 'APIaccountscheck',
@@ -247,6 +323,7 @@ async function main(): Promise<number> {
     calllog: () => {},
     store: { storefront: offline, searchMixed: offline, search: offline, getProduct: offline, sizeVariant: offline, createCart: offline },
     loadLibrary: async () => null,
+    shopSignIn,
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

@@ -30,19 +30,38 @@ export function readCallMemory(metadata: unknown): CallMemory | null {
   return decodeCallMemory(metadata);
 }
 
+// The call state is shown to the model as one line: "shopper=Ana; sizes={top:M}; notes=[a | b]".
+// Stored text is someone's typing, so the characters that give that line its structure are
+// taken out before it goes in. Otherwise a saved note could pose as other fields.
+const STATE_LINE_SYNTAX = /[[\]{}|;=]/g;
+
+export function plainForStateLine(text: string): string {
+  return text.replace(STATE_LINE_SYNTAX, ' ').replace(/\s+/g, ' ').trim();
+}
+
 /** The slice of call state a returning shopper starts with. Empty for everyone else. */
 export function initialStateFromMemory(memory: CallMemory | null): Partial<CallState> {
   const shopper = memory?.shopper;
   if (!shopper || !isReturningShopper(shopper)) return {};
+  const name = shopper.name ? plainForStateLine(shopper.name) : '';
+  const sizes: Record<string, string> = {};
+  for (const [slot, size] of Object.entries(shopper.sizes)) {
+    const cleanSlot = plainForStateLine(slot);
+    const cleanSize = plainForStateLine(size);
+    if (cleanSlot && cleanSize) sizes[cleanSlot] = cleanSize;
+  }
+  const facts = shopper.facts.map(plainForStateLine).filter(Boolean);
   return {
-    ...(shopper.name ? { shopperName: shopper.name } : {}),
+    ...(name ? { shopperName: name } : {}),
     ...(shopper.department ? { department: shopper.department } : {}),
-    ...(Object.keys(shopper.sizes).length > 0 ? { sizes: { ...shopper.sizes } } : {}),
-    ...(shopper.facts.length > 0 ? { facts: [...shopper.facts] } : {}),
+    ...(Object.keys(sizes).length > 0 ? { sizes } : {}),
+    ...(facts.length > 0 ? { facts } : {}),
   };
 }
 
-export function memoryFromState(state: CallState): PageActions['saveMemory'] {
+export type MemorySnapshot = Omit<PageActions['saveMemory'], 'ticket'>;
+
+export function memoryFromState(state: CallState): MemorySnapshot {
   return {
     name: cleanName(state.shopperName),
     department: cleanDepartment(state.department),
@@ -60,8 +79,11 @@ export function returningShopper(memory: CallMemory | null): CallShopper | null 
 }
 
 export interface MemorySyncOptions {
-  /** False when the server did not switch accounts on: the sync then does nothing at all. */
-  enabled: boolean;
+  /**
+   * The server's proof of which account started this call. Without one (accounts off, or
+   * nobody signed in when the call began) nothing can be saved, so the sync does nothing.
+   */
+  ticket: string | null | undefined;
   page: Pick<PageSender, 'send'>;
   debounceMs?: number;
   schedule?: (fn: () => void, ms: number) => unknown;
@@ -84,6 +106,8 @@ export function createMemorySync(options: MemorySyncOptions): MemorySync {
     options.clearSchedule ?? ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
   const log = options.log ?? (() => {});
 
+  const ticket = typeof options.ticket === 'string' && options.ticket ? options.ticket : null;
+  const enabled = ticket !== null;
   let wrapped: CallStateStore | null = null;
   let lastSent = '';
   let timer: unknown = null;
@@ -98,7 +122,7 @@ export function createMemorySync(options: MemorySyncOptions): MemorySync {
   }
 
   async function sendNow(): Promise<void> {
-    if (!options.enabled || !wrapped) return;
+    if (!enabled || !wrapped) return;
     // One send at a time; a change that lands meanwhile is picked up by the loop below.
     if (sending) {
       await sending;
@@ -108,7 +132,7 @@ export function createMemorySync(options: MemorySyncOptions): MemorySync {
     if (encoded === lastSent) return;
     const run = (async () => {
       try {
-        const reply = await options.page.send('saveMemory', payload);
+        const reply = await options.page.send('saveMemory', { ticket: ticket!, ...payload });
         if (reply.ok) {
           lastSent = encoded;
           log('memory_sent', { facts: payload.facts.length, sizes: Object.keys(payload.sizes).length });
@@ -129,7 +153,7 @@ export function createMemorySync(options: MemorySyncOptions): MemorySync {
   }
 
   function queue(): void {
-    if (!options.enabled || stopped) return;
+    if (!enabled || stopped) return;
     cancelTimer();
     timer = schedule(() => {
       timer = null;

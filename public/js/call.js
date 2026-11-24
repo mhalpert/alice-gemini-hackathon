@@ -440,9 +440,12 @@ export function mountCall(root, { handlers = {} } = {}) {
   const linkCode = readLinkCode();
 
   // A dev link can carry ?token=...&url=... ; otherwise the server hands out a token.
+  // Only on this machine: on a real site such a link would let whoever wrote it connect a
+  // visitor's page to a room of their own and drive the page from there.
   async function getToken(passcode) {
     const query = new URLSearchParams(location.search);
-    if (query.get('token') && query.get('url')) return { token: query.get('token'), url: query.get('url') };
+    const onThisMachine = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+    if (onThisMachine && query.get('token') && query.get('url')) return { token: query.get('token'), url: query.get('url') };
     const res = await fetch('/api/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

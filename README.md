@@ -203,14 +203,29 @@ account.
   web server. On a host that replaces the container on each deploy, it needs a disk that
   survives the deploy.
 - **How Alice gets it:** when a signed-in shopper starts a call, the server puts their
-  memory in the agent dispatch inside the signed call token. During the call the agent
-  sends what it learns to the page (the `saveMemory` page action) and the page saves it
-  with the shopper's own session. The agent never opens the database.
-- **Checks:** `npm test` covers the storage, the routes and the agent side.
+  memory in the agent dispatch inside the signed call token, with a one-call ticket for
+  that account. During the call the agent sends what it learns to the page (the
+  `saveMemory` page action) and the page saves it with the shopper's own session. The
+  server accepts a save only when the ticket and the session belong to the same account,
+  so one person's call can never write into another person's account. The agent never
+  opens the database.
+- **Sign in with Shop (`ALICE_ACCOUNTS_SHOP=on`, also off by default):** a second way in.
+  The shopper approves on Shop's own page and Shop tells the server who they are in a
+  signed ID token; the server keeps Shop's id for them, their email address and first
+  name, and discards the access token. It uses Shop's public prototype client. Shop's
+  docs say an app that is distributed needs its own registered client, so this is for
+  the prototype only.
+- **Checks:** `npm test` covers the storage, the routes, the Shop sign-in (against a
+  stand-in for Shop, with real signature checks) and the agent side.
   `npm run accounts:check` drives the real page in a browser at desktop and phone width,
   with no model or store calls.
-- **Not checked yet:** a real call with accounts on. The address is not verified by email,
-  and there is no password reset.
+- **Not checked yet:** a real call with accounts on, and a real Shop sign-in.
+- **Known gaps:** the address is not verified by email, there is no password reset or
+  change, and nothing clears out unused accounts. Off localhost the cookies assume HTTPS.
+  The sign-in limits count per visitor address, so they depend on the server seeing each
+  visitor's real address (`clientAddress` in `server.ts`); behind a proxy on another
+  address every visitor shares one count today, which is safe but lets one person use up
+  the sign-in allowance for everyone.
 
 ## Where things are
 

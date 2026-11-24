@@ -28,6 +28,8 @@ interface Harness {
   port: number;
   accounts: Accounts;
   logs: { room: string; ev: string; data: unknown }[];
+  /** Mints a call token as this signed-in browser and returns the save ticket inside it. */
+  ticket(cookie: string): Promise<string>;
   call(
     method: string,
     pathname: string,
@@ -61,12 +63,14 @@ async function withAccountsServer(
     hashConcurrency: options.hashConcurrency,
     hashQueue: options.hashQueue,
   });
-  const env = { ALICE_ACCOUNTS: 'on', ...(options.env ?? {}) };
+  const env = { ALICE_ACCOUNTS: 'on', ...LIVEKIT_ENV, ...(options.env ?? {}) };
   const server = createAliceServer({
     publicDir,
     tryonDir: publicDir,
     env,
     now: options.now,
+    // Tests pick the visitor's network address with a header; default is the real socket.
+    remoteAddress: (req) => (typeof req.headers['x-test-ip'] === 'string' ? req.headers['x-test-ip'] : req.socket.remoteAddress),
     calllog: (room: string, ev: string, data?: unknown) => {
       logs.push({ room, ev, data });
     },
@@ -101,8 +105,16 @@ async function withAccountsServer(
       req.end();
     });
 
+  const ticket = async (cookie: string): Promise<string> => {
+    const minted = await call('POST', '/api/token', { body: {}, cookie });
+    assert.equal(minted.status, 200, 'token mint for a ticket');
+    const note = decodeCallMemory(decodeJwtPayload(minted.json.token).roomConfig.agents[0].metadata);
+    assert.ok(note?.ticket, 'a signed-in call gets a save ticket');
+    return note.ticket;
+  };
+
   try {
-    await fn({ baseUrl: `http://127.0.0.1:${port}`, port, accounts, logs, call });
+    await fn({ baseUrl: `http://127.0.0.1:${port}`, port, accounts, logs, call, ticket });
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     fs.rmSync(publicDir, { recursive: true, force: true });
@@ -159,7 +171,7 @@ describe('/api/account routes', () => {
       const before = await call('GET', '/api/account');
       assert.equal(before.status, 200);
       assert.equal(before.headers['cache-control'], 'no-store');
-      assert.deepEqual(before.json, { enabled: true, account: null, min_password_length: 10 });
+      assert.deepEqual(before.json, { enabled: true, account: null, min_password_length: 10, shop_sign_in: false });
 
       const up = await call('POST', '/api/account/signup', {
         body: { email: ' Priya@Example.com ', password: PASSWORD, name: ' Priya ' },
@@ -190,7 +202,24 @@ describe('/api/account routes', () => {
         body: { email: EMAIL, password: PASSWORD },
         headers: { 'X-Forwarded-Proto': 'https' },
       });
-      assert.match(up.headers['set-cookie']![0]!, /; Secure$/);
+      assert.match(up.headers['set-cookie']![0]!, /^__Host-alice_session=[A-Za-z0-9_-]{43}; Path=\/; .*; Secure$/);
+      // Over HTTPS only the "__Host-" cookie counts: one without the prefix, which a page
+      // on a sibling subdomain could have planted, is ignored.
+      const token = up.headers['set-cookie']![0]!.split(';')[0]!.split('=')[1]!;
+      const https = { 'X-Forwarded-Proto': 'https' };
+      assert.equal((await call('GET', '/api/account', { cookie: `__Host-alice_session=${token}`, headers: https })).json.account.email, EMAIL);
+      assert.equal((await call('GET', '/api/account', { cookie: `alice_session=${token}`, headers: https })).json.account, null);
+    });
+  });
+
+  it('treat any host that is not this machine as HTTPS, so the session never travels in the clear', async () => {
+    await withAccountsServer({}, async ({ call }) => {
+      const up = await call('POST', '/api/account/signup', {
+        body: { email: EMAIL, password: PASSWORD },
+        headers: { Host: 'alice.example' },
+      });
+      assert.equal(up.status, 201);
+      assert.match(up.headers['set-cookie']![0]!, /^__Host-alice_session=.*; Secure$/);
     });
   });
 
@@ -238,10 +267,11 @@ describe('/api/account routes', () => {
   });
 
   it('refuse requests a cross-site page could make', async () => {
-    await withAccountsServer({}, async ({ call, port }) => {
+    await withAccountsServer({}, async ({ call, port, ticket }) => {
       const up = await call('POST', '/api/account/signup', { body: { email: EMAIL, password: PASSWORD } });
       const cookie = cookieFrom(up);
-      const body = { facts: ['planted by another site'] };
+      const saveTicket = await ticket(cookie);
+      const body = { ticket: saveTicket, facts: ['planted by another site'] };
 
       const foreignOrigin = await call('PUT', '/api/account/memory', { body, cookie, headers: { Origin: 'https://evil.example' } });
       assert.equal(foreignOrigin.status, 403);
@@ -268,19 +298,19 @@ describe('/api/account routes', () => {
 
       // The page's own requests pass: same origin, with or without a proxy rewriting Host.
       const own = await call('PUT', '/api/account/memory', {
-        body: { facts: ['Likes green'] },
+        body: { ticket: saveTicket, facts: ['Likes green'] },
         cookie,
         headers: { Origin: `http://127.0.0.1:${port}`, 'Sec-Fetch-Site': 'same-origin' },
       });
       assert.equal(own.status, 200);
       const proxied = await call('PUT', '/api/account/memory', {
-        body: { facts: ['Hates wool'] },
-        cookie,
+        body: { ticket: saveTicket, facts: ['Hates wool'] },
+        cookie: `__Host-${cookie}`,
         headers: { Origin: 'https://alice.example', 'X-Forwarded-Host': 'alice.example', 'X-Forwarded-Proto': 'https' },
       });
       assert.equal(proxied.status, 200);
       const spoofed = await call('PUT', '/api/account/memory', {
-        body: { facts: ['planted'] },
+        body: { ticket: saveTicket, facts: ['planted'] },
         cookie,
         headers: { Origin: 'https://evil.example', 'X-Forwarded-Host': 'alice.example' },
       });
@@ -289,7 +319,7 @@ describe('/api/account routes', () => {
   });
 
   it('save, merge, show and forget what Alice remembers, for the signed-in shopper only', async () => {
-    await withAccountsServer({}, async ({ call }) => {
+    await withAccountsServer({}, async ({ call, ticket }) => {
       assert.equal((await call('PUT', '/api/account/memory', { body: { facts: ['x'] } })).status, 401);
       assert.equal((await call('DELETE', '/api/account/memory', { body: {} })).status, 401);
       assert.equal((await call('DELETE', '/api/account', { body: {} })).status, 401);
@@ -297,9 +327,10 @@ describe('/api/account routes', () => {
       const a = cookieFrom(await call('POST', '/api/account/signup', { body: { email: EMAIL, password: PASSWORD } }));
       const b = cookieFrom(await call('POST', '/api/account/signup', { body: { email: 'sam@example.com', password: PASSWORD } }));
 
+      const ticketA = await ticket(a);
       const saved = await call('PUT', '/api/account/memory', {
         cookie: a,
-        body: { name: 'Priya', department: 'women', sizes: { Top: 'M', shoes: 8 }, facts: ['Likes green', '  '] },
+        body: { ticket: ticketA, name: 'Priya', department: 'women', sizes: { Top: 'M', shoes: 8 }, facts: ['Likes green', '  '] },
       });
       assert.equal(saved.status, 200);
       assert.equal(saved.json.account.name, 'Priya');
@@ -309,9 +340,13 @@ describe('/api/account routes', () => {
 
       const merged = await call('PUT', '/api/account/memory', {
         cookie: a,
-        body: { name: '', department: 'kids', sizes: { bottom: '30' }, facts: ['Hates wool', 'likes green'] },
+        body: { ticket: ticketA, name: '', department: 'kids', sizes: { bottom: '30' }, facts: ['Hates wool', 'likes green'] },
       });
       assert.equal(merged.json.account.name, 'Priya');
+      // Alice fills in a missing name but never replaces one: a note about someone else
+      // ("her name is Maya") must not rename the account.
+      const renamed = await call('PUT', '/api/account/memory', { cookie: a, body: { ticket: ticketA, name: 'Maya' } });
+      assert.equal(renamed.json.account.name, 'Priya');
       assert.equal(merged.json.memory.department, 'women');
       assert.deepEqual(merged.json.memory.sizes, { top: 'M', shoes: '8', bottom: '30' });
       assert.deepEqual(merged.json.memory.facts, ['Hates wool', 'likes green']);
@@ -326,9 +361,9 @@ describe('/api/account routes', () => {
   });
 
   it('delete an account and everything stored with it', async () => {
-    await withAccountsServer({}, async ({ call, accounts }) => {
+    await withAccountsServer({}, async ({ call, accounts, ticket }) => {
       const cookie = cookieFrom(await call('POST', '/api/account/signup', { body: { email: EMAIL, password: PASSWORD } }));
-      await call('PUT', '/api/account/memory', { cookie, body: { facts: ['Likes green'] } });
+      await call('PUT', '/api/account/memory', { cookie, body: { ticket: await ticket(cookie), facts: ['Likes green'] } });
       const gone = await call('DELETE', '/api/account', { cookie, body: {} });
       assert.equal(gone.status, 200);
       assert.match(gone.headers['set-cookie']![0]!, /Max-Age=0/);
@@ -437,16 +472,105 @@ describe('/api/account routes', () => {
     });
   });
 
+  it('only accept a memory save from the call its own account started', async () => {
+    await withAccountsServer({}, async ({ call, ticket }) => {
+      const a = cookieFrom(await call('POST', '/api/account/signup', { body: { email: 'a@example.com', password: PASSWORD, name: 'Ana' } }));
+      const b = cookieFrom(await call('POST', '/api/account/signup', { body: { email: 'b@example.com', password: PASSWORD, name: 'Bo' } }));
+      const ticketA = await ticket(a);
+      const fromAnasCall = { ticket: ticketA, department: 'women', sizes: { top: 'M' }, facts: ['Ana likes green'] };
+
+      // Ana's call is still running in one tab; in another tab this browser is now Bo.
+      const crossed = await call('PUT', '/api/account/memory', { cookie: b, body: fromAnasCall });
+      assert.equal(crossed.status, 403);
+      assert.equal(crossed.json.error, 'wrong_call');
+      assert.deepEqual((await call('GET', '/api/account', { cookie: b })).json.memory.facts, []);
+
+      // No ticket, a made-up one, or a stranger's room sending saves: all refused.
+      for (const bad of [undefined, '', 'A'.repeat(32), 42, { ticket: ticketA }]) {
+        const r = await call('PUT', '/api/account/memory', { cookie: a, body: { ticket: bad, facts: ['planted'] } });
+        assert.equal(r.status, 403, `ticket ${JSON.stringify(bad)}`);
+      }
+
+      // The right pair works.
+      assert.equal((await call('PUT', '/api/account/memory', { cookie: a, body: fromAnasCall })).status, 200);
+
+      // "Forget everything" also stops the call in progress from saving it all back.
+      assert.equal((await call('DELETE', '/api/account/memory', { cookie: a, body: {} })).status, 200);
+      assert.equal((await call('PUT', '/api/account/memory', { cookie: a, body: fromAnasCall })).status, 403);
+      assert.deepEqual((await call('GET', '/api/account', { cookie: a })).json.memory.facts, []);
+      // Her next call gets a new ticket and saves normally.
+      assert.equal((await call('PUT', '/api/account/memory', { cookie: a, body: { ...fromAnasCall, ticket: await ticket(a) } })).status, 200);
+    });
+  });
+
+  it('do not let memory from a deleted account come back under the same address', async () => {
+    await withAccountsServer({}, async ({ call, ticket }) => {
+      const first = cookieFrom(await call('POST', '/api/account/signup', { body: { email: EMAIL, password: PASSWORD } }));
+      const oldTicket = await ticket(first);
+      await call('DELETE', '/api/account', { cookie: first, body: {} });
+      const second = cookieFrom(await call('POST', '/api/account/signup', { body: { email: EMAIL, password: PASSWORD } }));
+      const replay = await call('PUT', '/api/account/memory', { cookie: second, body: { ticket: oldTicket, facts: ['from the deleted account'] } });
+      assert.equal(replay.status, 403);
+      assert.deepEqual((await call('GET', '/api/account', { cookie: second })).json.memory.facts, []);
+    });
+  });
+
+  it('do not let a stranger lock an owner out by guessing at their address', async () => {
+    await withAccountsServer({}, async ({ call }) => {
+      await call('POST', '/api/account/signup', { body: { email: EMAIL, password: PASSWORD } });
+      const stranger = { 'X-Test-Ip': '203.0.113.9' };
+      const owner = { 'X-Test-Ip': '198.51.100.7' };
+      for (let i = 0; i < 8; i += 1) {
+        assert.equal((await call('POST', '/api/account/signin', { body: { email: EMAIL, password: `guess number ${i}` }, headers: stranger })).status, 401);
+      }
+      assert.equal((await call('POST', '/api/account/signin', { body: { email: EMAIL, password: PASSWORD }, headers: stranger })).status, 429, 'the guesser is stopped');
+      assert.equal((await call('POST', '/api/account/signin', { body: { email: EMAIL, password: PASSWORD }, headers: owner })).status, 200, 'the owner still gets in');
+    });
+  });
+
+  it('count guesses and sign-ups before the slow part, so a burst cannot outrun the limits', async () => {
+    await withAccountsServer({}, async ({ call, accounts }) => {
+      await call('POST', '/api/account/signup', { body: { email: EMAIL, password: PASSWORD }, headers: { 'X-Test-Ip': '192.0.2.1' } });
+      const guesses = await Promise.all(
+        Array.from({ length: 20 }, (_, i) =>
+          call('POST', '/api/account/signin', { body: { email: EMAIL, password: `parallel guess ${i}` }, headers: { 'X-Test-Ip': '203.0.113.9' } }),
+        ),
+      );
+      const checked = guesses.filter((r) => r.status === 401).length;
+      assert.ok(checked <= 8, `at most 8 guesses reach the password check, got ${checked}`);
+      assert.ok(guesses.every((r) => r.status === 401 || r.status === 429 || r.status === 503));
+
+      const before = accounts.countAccounts();
+      const signUps = await Promise.all(
+        Array.from({ length: 20 }, (_, i) =>
+          call('POST', '/api/account/signup', { body: { email: `burst${i}@example.com`, password: PASSWORD }, headers: { 'X-Test-Ip': '203.0.113.50' } }),
+        ),
+      );
+      assert.ok(accounts.countAccounts() - before <= 5, `at most 5 accounts an hour per address, got ${accounts.countAccounts() - before}`);
+      assert.ok(signUps.every((r) => [201, 429, 503].includes(r.status)));
+    });
+    await withAccountsServer({ env: { ALICE_ACCOUNTS_MAX: '3' } }, async ({ call, accounts }) => {
+      await Promise.all(
+        Array.from({ length: 12 }, (_, i) =>
+          call('POST', '/api/account/signup', { body: { email: `cap${i}@example.com`, password: PASSWORD }, headers: { 'X-Test-Ip': `192.0.2.${i + 10}` } }),
+        ),
+      );
+      assert.ok(accounts.countAccounts() <= 3, `the total cap holds under a burst, got ${accounts.countAccounts()}`);
+    });
+  });
+
   it('never write an email address, a password or a session token to the server log', async () => {
-    await withAccountsServer({}, async ({ call, logs }) => {
+    await withAccountsServer({}, async ({ call, logs, ticket }) => {
       const up = await call('POST', '/api/account/signup', { body: { email: EMAIL, password: PASSWORD, name: 'Priya' } });
       const cookie = cookieFrom(up);
+      const saveTicket = await ticket(cookie);
       await call('POST', '/api/account/signin', { body: { email: EMAIL, password: 'wrong password here' } });
-      await call('PUT', '/api/account/memory', { cookie, body: { facts: ['Likes green linen'] } });
+      const saved = await call('PUT', '/api/account/memory', { cookie, body: { ticket: saveTicket, facts: ['Likes green linen'] } });
+      assert.equal(saved.status, 200);
       await call('DELETE', '/api/account', { cookie, body: {} });
       const dump = JSON.stringify(logs);
       assert.ok(logs.some((l) => l.ev === 'account'));
-      for (const secret of [EMAIL, 'priya', PASSWORD, 'wrong password here', cookie.split('=')[1]!, 'Likes green linen']) {
+      for (const secret of [EMAIL, 'priya', PASSWORD, 'wrong password here', cookie.split('=')[1]!, 'Likes green linen', saveTicket]) {
         assert.ok(!dump.includes(secret), `log must not contain ${secret}`);
       }
     });
@@ -455,12 +579,12 @@ describe('/api/account routes', () => {
 
 describe('call token with accounts', () => {
   it('carries a signed-in shopper\'s name and memory to the agent, signed inside the token', async () => {
-    await withAccountsServer({ env: LIVEKIT_ENV }, async ({ call }) => {
+    await withAccountsServer({ env: LIVEKIT_ENV }, async ({ call, ticket }) => {
       const cookie = cookieFrom(
         await call('POST', '/api/account/signup', { body: { email: EMAIL, password: PASSWORD, name: 'Priya' } }),
       );
       const facts = Array.from({ length: 30 }, (_, i) => `note ${i}`);
-      await call('PUT', '/api/account/memory', { cookie, body: { department: 'women', sizes: { top: 'M' }, facts } });
+      await call('PUT', '/api/account/memory', { cookie, body: { ticket: await ticket(cookie), department: 'women', sizes: { top: 'M' }, facts } });
 
       const minted = await call('POST', '/api/token', { body: {}, cookie });
       assert.equal(minted.status, 200);
@@ -476,6 +600,7 @@ describe('call token with accounts', () => {
       // The agent keeps 20 notes per call, so the newest 20 travel.
       assert.equal(note.shopper?.facts.length, 20);
       assert.equal(note.shopper?.facts.at(-1), 'note 29');
+      assert.match(note.ticket ?? '', /^[A-Za-z0-9_-]{32}$/, 'a ticket ties saves from this call to this account');
       // Nothing that identifies the account is in the token.
       assert.ok(!minted.json.token.includes(EMAIL));
       assert.ok(!JSON.stringify(payload).includes(EMAIL));
@@ -493,7 +618,7 @@ describe('call token with accounts', () => {
       assert.equal(minted.status, 200);
       const payload = decodeJwtPayload(minted.json.token);
       assert.equal(payload.name, 'Shopper');
-      assert.deepEqual(decodeCallMemory(payload.roomConfig.agents[0].metadata), { v: 1, accounts: true, shopper: null });
+      assert.deepEqual(decodeCallMemory(payload.roomConfig.agents[0].metadata), { v: 1, accounts: true, shopper: null, ticket: null });
 
       const stale = await call('POST', '/api/token', { body: {}, cookie: `alice_session=${'B'.repeat(43)}` });
       assert.equal(decodeCallMemory(decodeJwtPayload(stale.json.token).roomConfig.agents[0].metadata)?.shopper, null);

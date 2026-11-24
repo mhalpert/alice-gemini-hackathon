@@ -48,13 +48,25 @@ export interface SessionGrant {
 export type SignUpFailure =
   | { ok: false; code: 'invalid_email' }
   | { ok: false; code: 'weak_password'; problem: PasswordProblem }
-  | { ok: false; code: 'email_taken' };
+  | { ok: false; code: 'email_taken' }
+  | { ok: false; code: 'accounts_full' };
 
 export type SignUpResult = { ok: true; account: PublicAccount; session: SessionGrant } | SignUpFailure;
 
 export type SignInResult =
   | { ok: true; account: PublicAccount; session: SessionGrant }
   | { ok: false; code: 'bad_credentials' };
+
+/** Who an outside sign-in (Shop) says the shopper is. `sub` is that provider's stable id. */
+export interface ProviderIdentity {
+  sub: string;
+  email?: string | null;
+  name?: string | null;
+}
+
+export type ProviderSignInResult =
+  | { ok: true; account: PublicAccount; session: SessionGrant; created: boolean }
+  | { ok: false; code: 'accounts_full' | 'invalid_identity' };
 
 export interface AccountsOptions {
   db?: AccountsDb;
@@ -68,8 +80,20 @@ export interface AccountsOptions {
 }
 
 export interface Accounts {
-  signUp(input: { email: unknown; password: unknown; display_name?: unknown }): Promise<SignUpResult>;
+  signUp(input: {
+    email: unknown;
+    password: unknown;
+    display_name?: unknown;
+    /** Refuse (accounts_full) rather than go past this many accounts. */
+    max_accounts?: number;
+  }): Promise<SignUpResult>;
   signIn(input: { email: unknown; password: unknown }): Promise<SignInResult>;
+  /**
+   * Signs in the shopper Shop vouched for, creating their account the first time. A Shop
+   * account and a password account with the same email address stay two accounts: the
+   * password one never proved it owns the address.
+   */
+  signInWithShop(identity: ProviderIdentity, opts?: { maxAccounts?: number }): ProviderSignInResult;
   sessionAccount(token: unknown): PublicAccount | null;
   signOut(token: unknown): boolean;
   signOutEverywhere(accountId: string): number;
@@ -155,6 +179,15 @@ export function createAccounts(opts?: AccountsOptions): Accounts {
     insertPasswordAccount: db.prepare(
       "INSERT INTO accounts (id, provider, email, password_hash, display_name, created_at, updated_at) VALUES (?, 'password', ?, ?, ?, ?, ?)",
     ),
+    accountByProviderSub: db.prepare(
+      'SELECT id, provider, email, display_name, password_hash, created_at FROM accounts WHERE provider = ? AND provider_sub = ?',
+    ),
+    insertShopAccount: db.prepare(
+      "INSERT INTO accounts (id, provider, email, provider_sub, display_name, created_at, updated_at) VALUES (?, 'shop', ?, ?, ?, ?, ?)",
+    ),
+    updateShopProfile: db.prepare(
+      'UPDATE accounts SET email = COALESCE(?, email), display_name = COALESCE(display_name, ?), updated_at = ? WHERE id = ?',
+    ),
     updateHash: db.prepare('UPDATE accounts SET password_hash = ?, updated_at = ? WHERE id = ?'),
     updateName: db.prepare('UPDATE accounts SET display_name = ?, updated_at = ? WHERE id = ?'),
     deleteAccount: db.prepare('DELETE FROM accounts WHERE id = ?'),
@@ -213,6 +246,7 @@ export function createAccounts(opts?: AccountsOptions): Accounts {
     email: unknown;
     password: unknown;
     display_name?: unknown;
+    max_accounts?: number;
   }): Promise<SignUpResult> {
     const email = normalizeEmail(input.email);
     if (!email) return { ok: false, code: 'invalid_email' };
@@ -226,10 +260,14 @@ export function createAccounts(opts?: AccountsOptions): Accounts {
     const t = now();
 
     try {
-      const session = transaction(() => {
+      // The cap is checked in the same transaction as the insert, so sign-ups that were
+      // all hashing at once cannot slip past it together.
+      const session = transaction((): SessionGrant | null => {
+        if (typeof input.max_accounts === 'number' && countAccounts() >= input.max_accounts) return null;
         q.insertPasswordAccount.run(id, email, passwordHash, displayName, t, t);
         return createSession(id);
       });
+      if (!session) return { ok: false, code: 'accounts_full' };
       const row = q.accountById.get(id) as AccountRow | undefined;
       if (!row) throw new Error('account vanished after insert');
       return { ok: true, account: toPublic(row), session };
@@ -250,11 +288,41 @@ export function createAccounts(opts?: AccountsOptions): Accounts {
     if (!row || !matches) return { ok: false, code: 'bad_credentials' };
 
     if (needsRehash(row.password_hash, scrypt)) {
-      const upgraded = await gate(() => hashPassword(input.password as string, scrypt));
-      q.updateHash.run(upgraded, now(), row.id);
+      // An upgrade, not part of signing in: if the server is too busy for it, skip it
+      // this time rather than turn a correct password away.
+      try {
+        const upgraded = await gate(() => hashPassword(input.password as string, scrypt));
+        q.updateHash.run(upgraded, now(), row.id);
+      } catch {
+        // tried again at the next sign-in
+      }
     }
     const session = transaction(() => createSession(row.id));
     return { ok: true, account: toPublic(row), session };
+  }
+
+  function signInWithShop(identity: ProviderIdentity, limits?: { maxAccounts?: number }): ProviderSignInResult {
+    const sub = typeof identity?.sub === 'string' ? identity.sub.trim() : '';
+    if (!sub || sub.length > 255) return { ok: false, code: 'invalid_identity' };
+    const email = normalizeEmail(identity.email);
+    const name = cleanName(identity.name);
+    return transaction((): ProviderSignInResult => {
+      const t = now();
+      const existing = q.accountByProviderSub.get('shop', sub) as AccountRow | undefined;
+      if (existing) {
+        // Keep the address current; keep a name the shopper already has with Alice.
+        q.updateShopProfile.run(email, name, t, existing.id);
+        const row = q.accountById.get(existing.id) as AccountRow;
+        return { ok: true, account: toPublic(row), session: createSession(row.id), created: false };
+      }
+      if (typeof limits?.maxAccounts === 'number' && countAccounts() >= limits.maxAccounts) {
+        return { ok: false, code: 'accounts_full' };
+      }
+      const id = crypto.randomUUID();
+      q.insertShopAccount.run(id, email, sub, name, t, t);
+      const row = q.accountById.get(id) as AccountRow;
+      return { ok: true, account: toPublic(row), session: createSession(id), created: true };
+    });
   }
 
   function sessionAccount(token: unknown): PublicAccount | null {
@@ -333,6 +401,7 @@ export function createAccounts(opts?: AccountsOptions): Accounts {
   return {
     signUp,
     signIn,
+    signInWithShop,
     sessionAccount,
     signOut,
     signOutEverywhere,

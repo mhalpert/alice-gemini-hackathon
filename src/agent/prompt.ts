@@ -47,7 +47,9 @@ export const GREETING_INSTRUCTIONS =
 
 // A name is only ever put into instructions when it looks like a name. Anything else a
 // shopper saved as their name stays out of the instruction text.
-const GREETABLE_NAME = /^\p{L}[\p{L}\p{M}' -]{0,29}$/u;
+// One or two words of letters (apostrophes and hyphens allowed), so a "name" cannot
+// smuggle a sentence of instructions into the greeting.
+const GREETABLE_NAME = /^\p{L}[\p{L}\p{M}'-]{0,19}(?: \p{L}[\p{L}\p{M}'-]{0,19})?$/u;
 
 /**
  * The opening line. A signed-in shopper Alice has styled before is greeted as a regular,

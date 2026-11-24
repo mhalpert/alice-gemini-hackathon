@@ -11,8 +11,10 @@ export interface ScryptParams {
   p: number;
 }
 
-// 128 * N * r bytes of memory per hash = 32 MiB. Raise N when the server has room.
-export const DEFAULT_SCRYPT: ScryptParams = { N: 32768, r: 8, p: 1 };
+// 128 * N * r bytes of memory per hash = 32 MiB, run three times over (p). This is one of
+// the scrypt settings OWASP's password storage guidance lists. Raise N when the server
+// has the memory for it; older hashes are upgraded at the next sign-in.
+export const DEFAULT_SCRYPT: ScryptParams = { N: 32768, r: 8, p: 3 };
 const KEY_LENGTH = 32;
 const SALT_LENGTH = 16;
 const PREFIX = 'scrypt';

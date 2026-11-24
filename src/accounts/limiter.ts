@@ -14,6 +14,8 @@ export interface AttemptLimiter {
   blocked(key: string): boolean;
   /** Counts one try. Returns true when this try is still within the limit. */
   hit(key: string): boolean;
+  /** Gives back one counted try (for work that was refused before it really ran). */
+  unhit(key: string): void;
   /** Seconds until the key may try again (0 when it is not blocked). */
   retryAfterS(key: string): number;
   reset(key: string): void;
@@ -69,6 +71,12 @@ export function createAttemptLimiter(opts: AttemptLimiterOptions): AttemptLimite
       }
       bucket.count += 1;
       return bucket.count <= max;
+    },
+    unhit(key) {
+      const bucket = live(key);
+      if (!bucket) return;
+      bucket.count -= 1;
+      if (bucket.count <= 0) buckets.delete(key);
     },
     retryAfterS(key) {
       const bucket = live(key);

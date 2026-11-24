@@ -10,6 +10,7 @@ import { calllog as defaultCalllog } from './src/calllog.ts';
 import { openAccountsDb, resolveDbPath } from './src/accounts/db.ts';
 import { createAccountRoutes } from './src/accounts/http.ts';
 import { createAccounts, type Accounts } from './src/accounts/index.ts';
+import { createShopSignIn, type ShopSignIn } from './src/accounts/shop-signin.ts';
 import type { Gender, Item, Outfit, Piece, SearchResult } from './src/types.ts';
 import type { ProductDetail, SearchOpts, SizeVariantOpts, SizeVariantResult } from './src/store/catalog.ts';
 import { sizeVariant as defaultSizeVariant } from './src/store/catalog.ts';
@@ -94,6 +95,8 @@ export interface AliceServerOptions {
   activeCallsClient?: ActiveCallsClient;
   /** Shopper accounts service; tests pass one on an in-memory database. */
   accounts?: Accounts;
+  /** "Sign in with Shop" flow; tests pass one that talks to a stand-in for Shop. */
+  shopSignIn?: ShopSignIn;
 }
 
 export interface AliceHttpsServerOptions extends AliceServerOptions {
@@ -1011,6 +1014,7 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
   // Shopper accounts (src/accounts/). Off unless ALICE_ACCOUNTS is on; the database file
   // is opened the first time an account route or a signed-in call needs it.
   let accountsService: Accounts | null = opts.accounts ?? null;
+  let shopSignInService: ShopSignIn | null = opts.shopSignIn ?? null;
   const accountRoutes = createAccountRoutes({
     getAccounts(env) {
       if (!accountsService) {
@@ -1020,6 +1024,12 @@ export function createAliceHandler(opts: AliceServerOptions = {}): RequestListen
         });
       }
       return accountsService;
+    },
+    getShopSignIn() {
+      if (!shopSignInService) {
+        shopSignInService = createShopSignIn({ now: nowFn, log: logServerEvent });
+      }
+      return shopSignInService;
     },
     sendJson,
     readJsonBody: readStrictJsonBody,

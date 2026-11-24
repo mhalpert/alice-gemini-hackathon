@@ -8,7 +8,7 @@
 
 const API = '/api/account';
 const SAVE_DELAY_MS = 400;
-const LIVE_POLL_MS = 1000;
+const REFRESH_RETRY_MS = [2000, 6000, 15000];
 
 const MESSAGES = {
   invalid_email: "That email address doesn't look right.",
@@ -18,6 +18,10 @@ const MESSAGES = {
   slow_down: 'Too many tries. Wait a few minutes and try again.',
   accounts_full: 'New accounts are closed for now.',
   busy: 'Alice is busy right now. Try again in a moment.',
+  shop_unavailable: "Shop isn't reachable right now. Try again in a moment.",
+  shop_denied: 'The Shop sign-in was declined.',
+  shop_expired: 'That sign-in ran out of time. Try again.',
+  shop_failed: "The Shop sign-in didn't go through. Try again.",
   accounts_unavailable: 'Accounts are not available right now. Try again in a moment.',
   not_signed_in: 'You have been signed out. Sign in again.',
   offline: "Couldn't reach Alice. Check your connection and try again.",
@@ -119,13 +123,13 @@ export function mountAccount(options = {}) {
     notice: '',
     confirm: null, // null | 'forget' | 'delete'
     open: false,
+    shopEnabled: false,
+    shop: null, // while waiting for approval at Shop: { url, code, intervalMs, timer }
   };
 
-  // Memory is saved only for the account that was signed in before the call began. If
-  // someone signs out, or a different person signs in, in the middle of a call, nothing
-  // more from that call is saved: what Alice learned belongs to whoever started it.
-  let eligibleEmail = null;
-  let mutedForThisCall = false;
+  // Which account a save belongs to is decided by the server: every saveMemory from the
+  // agent carries a ticket for the account that started the call, and the server refuses
+  // it when this browser is signed in as anyone else.
   let pendingSave = null;
   let saveTimer = null;
   let saving = false;
@@ -137,15 +141,8 @@ export function mountAccount(options = {}) {
   let titleEl = null;
   let bodyEl = null;
 
-  function syncEligibility() {
-    if (isLive()) return;
-    eligibleEmail = state.account ? state.account.email : null;
-    mutedForThisCall = false;
-  }
-  setInterval(syncEligibility, LIVE_POLL_MS);
-
   function canSaveNow() {
-    return Boolean(state.enabled && state.account && !mutedForThisCall && state.account.email === eligibleEmail);
+    return Boolean(state.enabled && state.account);
   }
 
   // ---- the masthead button ----------------------------------------------------------
@@ -265,6 +262,8 @@ export function mountAccount(options = {}) {
 
   function close() {
     if (!state.open || !layerEl) return;
+    // Leaving the panel gives up a Shop sign-in that is still waiting.
+    if (state.shop) void cancelShop();
     state.open = false;
     layerEl.classList.remove('is-open');
     layerEl.setAttribute('aria-hidden', 'true');
@@ -296,6 +295,11 @@ export function mountAccount(options = {}) {
     sheetEl.setAttribute('aria-busy', busy ? 'true' : 'false');
   }
 
+  // The DOM's own replaceChildren would print a nested list, or a skipped (null) part, as text.
+  function setBody(...children) {
+    bodyEl.replaceChildren(...children.flat(Infinity).filter((child) => child !== null && child !== undefined && child !== false));
+  }
+
   function statusLine() {
     if (state.error) return el('p', { className: 'account-status account-status--error', role: 'alert' }, state.error);
     if (state.notice) return el('p', { className: 'account-status', role: 'status' }, state.notice);
@@ -323,6 +327,10 @@ export function mountAccount(options = {}) {
   // ---- signed out: sign in or create an account ------------------------------------
 
   function renderSignedOut() {
+    if (state.shop) {
+      renderShopWaiting();
+      return;
+    }
     const creating = state.view === 'signup';
     titleEl.textContent = creating ? 'Create account' : 'Sign in';
 
@@ -380,7 +388,7 @@ export function mountAccount(options = {}) {
       el('button', { type: 'submit', className: 'btn-primary account-submit' }, creating ? 'Create account' : 'Sign in'),
     );
 
-    bodyEl.replaceChildren(
+    setBody(
       el(
         'p',
         { className: 'account-lede' },
@@ -388,8 +396,132 @@ export function mountAccount(options = {}) {
       ),
       el('div', { className: 'account-tabs', role: 'tablist', 'aria-label': 'Sign in or create an account' }, tab('signin', 'Sign in'), tab('signup', 'Create account')),
       form,
+      state.shopEnabled
+        ? [
+            el('p', { className: 'account-divider', 'aria-hidden': 'true' }, el('span', null, 'or')),
+            el('button', { type: 'button', className: 'btn-secondary account-shop-btn', onClick: () => startShop() }, 'Sign in with Shop'),
+          ]
+        : null,
       el('p', { className: 'account-fineprint' }, 'Alice keeps no photos, addresses or payment details here.'),
     );
+  }
+
+  // ---- signed out: sign in with Shop ---------------------------------------------------
+
+  function renderShopWaiting() {
+    titleEl.textContent = 'Sign in with Shop';
+    const shop = state.shop;
+    // Only ever link to an https page; the server already checked it is Shop's own.
+    const safeUrl = typeof shop.url === 'string' && shop.url.startsWith('https://') ? shop.url : null;
+    setBody(
+      el('p', { className: 'account-lede' }, 'Open Shop, check the code matches, and approve. This panel signs you in as soon as you do.'),
+      shop.code ? el('p', { className: 'account-shop-code', 'aria-label': `Code ${shop.code}` }, shop.code) : null,
+      safeUrl
+        ? el('a', { className: 'btn-primary account-submit', href: safeUrl, target: '_blank', rel: 'noopener noreferrer' }, 'Open Shop')
+        : null,
+      el('p', { className: 'account-status', role: 'status' }, 'Waiting for your approval in Shop…'),
+      el('div', { className: 'account-actions' }, el('button', { type: 'button', className: 'btn-secondary', onClick: () => cancelShop(true) }, 'Cancel')),
+      el('p', { className: 'account-fineprint' }, 'Alice learns who you are from Shop: your email address and first name. She keeps nothing else from it.'),
+    );
+  }
+
+  function stopShopTimer() {
+    if (state.shop && state.shop.timer !== null) {
+      clearTimeout(state.shop.timer);
+      state.shop.timer = null;
+    }
+  }
+
+  function endShop(message, isError) {
+    stopShopTimer();
+    state.shop = null;
+    state.error = isError ? message : '';
+    state.notice = isError ? '' : message;
+    if (state.open) {
+      render();
+      focusFirst();
+    }
+  }
+
+  async function startShop() {
+    if (state.busy || state.shop) return;
+    setBusy(true);
+    const reply = await request('POST', '/shop/start', {});
+    setBusy(false);
+    if (reply.status !== 200 || !reply.data || typeof reply.data.url !== 'string') {
+      state.error = messageFor(reply);
+      state.notice = '';
+      render();
+      return;
+    }
+    state.error = '';
+    state.notice = '';
+    state.shop = {
+      url: reply.data.url,
+      code: typeof reply.data.code === 'string' ? reply.data.code : null,
+      intervalMs: Math.max(2000, Number(reply.data.interval_s || 5) * 1000),
+      timer: null,
+    };
+    render();
+    focusFirst();
+    scheduleShopPoll();
+  }
+
+  function scheduleShopPoll() {
+    if (!state.shop) return;
+    stopShopTimer();
+    state.shop.timer = setTimeout(pollShop, state.shop.intervalMs);
+  }
+
+  async function pollShop() {
+    const waiting = state.shop;
+    if (!waiting) return;
+    waiting.timer = null;
+    const reply = await request('POST', '/shop/poll', {});
+    if (state.shop !== waiting) return; // cancelled while the request was out
+    const status = reply.data && reply.data.status;
+    if (reply.status === 200 && status === 'signed_in') {
+      stopShopTimer();
+      state.shop = null;
+      state.account = reply.data.account;
+      state.memory = reply.data.memory;
+      state.error = '';
+      state.notice = isLive() ? "You're signed in. Alice will know you from your next call." : "You're signed in.";
+      if (state.open) {
+        render();
+        focusFirst();
+      } else {
+        renderButton();
+      }
+      return;
+    }
+    if (reply.status === 200 && status === 'pending') {
+      waiting.intervalMs = Math.max(2000, Number(reply.data.interval_s || 5) * 1000);
+      scheduleShopPoll();
+      return;
+    }
+    if (reply.status === 200 && status === 'denied') return endShop(MESSAGES.shop_denied, true);
+    if (reply.status === 200 && status === 'expired') return endShop(MESSAGES.shop_expired, true);
+    if (reply.status === 0 || reply.status === 429) {
+      // Offline for a moment, or asked to slow down: keep waiting, a little more patiently.
+      waiting.intervalMs = Math.min(30000, waiting.intervalMs + 2000);
+      scheduleShopPoll();
+      return;
+    }
+    endShop(reply.status === 200 ? MESSAGES.shop_failed : messageFor(reply), true);
+  }
+
+  async function cancelShop(showNotice) {
+    if (!state.shop) return;
+    stopShopTimer();
+    state.shop = null;
+    void request('POST', '/shop/cancel', {});
+    if (showNotice && state.open) {
+      state.error = '';
+      state.notice = '';
+      render();
+      focusFirst();
+    }
   }
 
   async function submitCredentials(event) {
@@ -429,7 +561,6 @@ export function mountAccount(options = {}) {
         : creating
           ? "You're in. Start a call and Alice will remember what she learns."
           : '';
-      syncEligibility();
       render();
       focusFirst();
       return;
@@ -489,7 +620,7 @@ export function mountAccount(options = {}) {
       );
     }
 
-    bodyEl.replaceChildren(
+    setBody(
       el('p', { className: 'account-signed-in' }, 'Signed in as ', el('strong', null, state.account.email || 'your account')),
       el('h3', { className: 'account-subtitle' }, 'What Alice remembers'),
       remembers,
@@ -530,7 +661,6 @@ export function mountAccount(options = {}) {
     state.error = '';
     state.notice = notice || '';
     pendingSave = null;
-    syncEligibility();
   }
 
   async function signOut() {
@@ -565,9 +695,8 @@ export function mountAccount(options = {}) {
     state.memory = reply.data.memory;
     state.confirm = null;
     pendingSave = null;
-    // During a call Alice still holds what she learned, and would simply save it again.
-    mutedForThisCall = isLive();
-    state.notice = mutedForThisCall ? 'Forgotten. Nothing more from this call will be saved.' : 'Forgotten.';
+    // During a call Alice still holds what she learned; the server now refuses saves from it.
+    state.notice = isLive() ? 'Forgotten. Nothing more from this call will be saved.' : 'Forgotten.';
     render();
     focusFirst();
   }
@@ -592,14 +721,20 @@ export function mountAccount(options = {}) {
   async function refresh() {
     const reply = await request('GET', '');
     if (reply.status !== 200 || !reply.data || reply.data.enabled !== true) {
-      // 404 means accounts are switched off. Anything else: leave what is showing alone.
-      if (reply.status === 404) state.enabled = false;
-      return;
+      // 404 means accounts are switched off. Anything else (offline, busy, an error) is
+      // passing: leave what is showing alone and let the caller try again.
+      if (reply.status === 404) {
+        state.enabled = false;
+        return 'off';
+      }
+      return 'retry';
     }
     state.enabled = true;
     state.account = reply.data.account || null;
     state.memory = reply.data.memory || null;
+    state.shopEnabled = reply.data.shop_sign_in === true;
     renderButton();
+    return 'ok';
   }
 
   async function flushSave() {
@@ -610,12 +745,12 @@ export function mountAccount(options = {}) {
       return;
     }
     const body = pendingSave;
-    const savedFor = state.account.email;
+    const savedFor = state.account;
     pendingSave = null;
     saving = true;
     const reply = await request('PUT', '/memory', body);
     saving = false;
-    if (reply.status === 200 && state.account && state.account.email === savedFor) {
+    if (reply.status === 200 && state.account === savedFor) {
       state.account = reply.data.account;
       state.memory = reply.data.memory;
       if (state.open && !state.confirm && !state.busy) renderKeepingFocus();
@@ -631,9 +766,11 @@ export function mountAccount(options = {}) {
   // Page action. Must answer at once (the agent is waiting), so the save runs afterwards.
   function saveMemory(payload) {
     if (!payload || typeof payload !== 'object') return { ok: false, error: 'saveMemory needs an object' };
-    if (!canSaveNow()) return { ok: true };
+    // No ticket means the call was not started by a signed-in shopper: nothing to save.
+    if (!canSaveNow() || typeof payload.ticket !== 'string' || !payload.ticket) return { ok: true };
     // The agent sends everything it knows each time, so the newest call replaces the last.
     pendingSave = {
+      ticket: payload.ticket,
       name: typeof payload.name === 'string' ? payload.name : null,
       department: payload.department === 'men' || payload.department === 'women' ? payload.department : null,
       sizes: payload.sizes && typeof payload.sizes === 'object' && !Array.isArray(payload.sizes) ? payload.sizes : {},
@@ -643,8 +780,16 @@ export function mountAccount(options = {}) {
     return { ok: true };
   }
 
-  const ready = refresh().then(() => {
-    syncEligibility();
+  // A slow start or a busy moment must not hide the button for the whole visit.
+  async function firstRefresh() {
+    for (let attempt = 0; ; attempt += 1) {
+      const outcome = await refresh();
+      if (outcome !== 'retry' || attempt >= REFRESH_RETRY_MS.length) return;
+      await new Promise((resolve) => setTimeout(resolve, REFRESH_RETRY_MS[attempt]));
+    }
+  }
+
+  const ready = firstRefresh().then(() => {
     mountButton();
     if (state.enabled && location.hash === '#account') {
       history.replaceState(null, '', location.pathname + location.search);

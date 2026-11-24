@@ -310,6 +310,20 @@ describe('attempt limiter', () => {
     assert.equal(limiter.hit('k'), true);
   });
 
+  it('gives a counted try back', () => {
+    const limiter = createAttemptLimiter({ max: 2, windowMs: 1_000, now: () => 0 });
+    limiter.hit('k');
+    limiter.hit('k');
+    assert.equal(limiter.blocked('k'), true);
+    limiter.unhit('k');
+    assert.equal(limiter.blocked('k'), false);
+    limiter.unhit('k');
+    limiter.unhit('k');
+    limiter.unhit('never-seen');
+    assert.equal(limiter.size(), 0);
+    assert.equal(limiter.hit('k'), true);
+  });
+
   it('can be reset for a key and never tracks more keys than its cap', () => {
     let t = 0;
     const limiter = createAttemptLimiter({ max: 1, windowMs: 1_000, now: () => t, maxKeys: 5 });
@@ -372,6 +386,16 @@ describe('accounts service', () => {
     assert.deepEqual(await accounts.signUp({ email: 'a@b.co', password: undefined }), { ok: false, code: 'weak_password', problem: 'not_text' });
     assert.equal((await accounts.signUp({ email: 'a@b.co', password: GOOD_PASSWORD })).ok, true);
     assert.deepEqual(await accounts.signUp({ email: 'A@B.co', password: 'another long password' }), { ok: false, code: 'email_taken' });
+  });
+
+  it('holds the account cap even when sign-ups are hashing at the same time', async () => {
+    const { accounts } = makeAccounts();
+    const results = await Promise.all(
+      Array.from({ length: 6 }, (_, i) => accounts.signUp({ email: `cap${i}@example.com`, password: GOOD_PASSWORD, max_accounts: 2 })),
+    );
+    assert.equal(results.filter((r) => r.ok).length, 2);
+    assert.ok(results.filter((r) => !r.ok).every((r) => !r.ok && r.code === 'accounts_full'));
+    assert.equal(accounts.countAccounts(), 2);
   });
 
   it('lets exactly one of two simultaneous sign-ups for the same address win', async () => {
