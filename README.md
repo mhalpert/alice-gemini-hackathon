@@ -197,7 +197,7 @@ account panel shows everything she has kept, with Forget everything, Sign out an
 account.
 
 - **What is stored:** the email address, a scrypt hash of the password, hashed session
-  tokens, and that memory. No photos, addresses or payment details, and no record of the
+  tokens and one-call save tickets, and that memory. No photos, addresses or payment details, and no record of the
   conversation, the looks shown or anything bought.
 - **Where:** one SQLite file (`ALICE_DB_PATH`, default `data/alice.db`), opened only by the
   web server. On a host that replaces the container on each deploy, it needs a disk that

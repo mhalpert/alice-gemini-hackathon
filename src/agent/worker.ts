@@ -45,6 +45,7 @@ import { createToolResultNudger } from './nudge.ts';
 import { createOrderController } from './order.ts';
 import {
   createMemorySync,
+  greetingFor,
   initialStateFromMemory,
   readCallMemory,
   returningShopper,
@@ -995,7 +996,7 @@ export default defineAgent({
     appContext.flushNow();
 
     session.generateReply({
-      instructions: buildGreetingInstructions(returningShopper(callMemory)),
+      instructions: buildGreetingInstructions(greetingFor(callMemory)),
     });
   },
 });

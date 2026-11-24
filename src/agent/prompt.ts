@@ -52,18 +52,26 @@ export const GREETING_INSTRUCTIONS =
 const GREETABLE_NAME = /^\p{L}[\p{L}\p{M}'-]{0,19}(?: \p{L}[\p{L}\p{M}'-]{0,19})?$/u;
 
 /**
- * The opening line. A signed-in shopper Alice has styled before is greeted as a regular,
- * by name when one is on file, and is not asked for their name again.
+ * The opening line for a signed-in shopper. A name on file is used and not asked for
+ * again. Only a shopper Alice has styled before (`returning`) is greeted as a regular:
+ * someone on their first call may already have a name, from signing up, and is new.
  */
 export function buildGreetingInstructions(
-  returning?: { name?: string | null } | null,
+  shopper?: { name?: string | null; returning?: boolean } | null,
 ): string {
-  if (!returning) return GREETING_INSTRUCTIONS;
-  const name = typeof returning.name === 'string' ? returning.name.trim() : '';
-  if (name && GREETABLE_NAME.test(name)) {
-    return `Greet ${name} by name as Alice with loud, fast New York stylist energy, like a regular walking back into your shop. Do not ask for their name and do not recite what you remember about them—one short punchy line, nothing else.`;
+  if (!shopper) return GREETING_INSTRUCTIONS;
+  const raw = typeof shopper.name === 'string' ? shopper.name.trim() : '';
+  const name = raw && GREETABLE_NAME.test(raw) ? raw : '';
+  if (shopper.returning === true) {
+    if (name) {
+      return `Greet ${name} by name as Alice with loud, fast New York stylist energy, like a regular walking back into your shop. Do not ask for their name and do not recite what you remember about them—one short punchy line, nothing else.`;
+    }
+    return 'Greet the shopper as Alice with loud, fast New York stylist energy, like a regular walking back into your shop, and ask for their name—one short punchy line, nothing else.';
   }
-  return 'Greet the shopper as Alice with loud, fast New York stylist energy, like a regular walking back into your shop, and ask for their name—one short punchy line, nothing else.';
+  if (name) {
+    return `Greet ${name} by name as Alice with loud, fast New York stylist energy. Do not ask for their name—one short punchy line, nothing else.`;
+  }
+  return GREETING_INSTRUCTIONS;
 }
 
 const CARTS_ONLY_SENTENCE =

@@ -503,6 +503,37 @@ describe('/api/account routes', () => {
     });
   });
 
+  it('keep a call\'s saves working across a server restart', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'alice-acct-restart-'));
+    const env = { ALICE_DB_PATH: path.join(dir, 'alice.db') };
+    let cookie = '';
+    let saveTicket = '';
+    await withAccountsServer({ env, injectAccounts: false }, async ({ call, ticket }) => {
+      cookie = cookieFrom(await call('POST', '/api/account/signup', { body: { email: EMAIL, password: PASSWORD } }));
+      saveTicket = await ticket(cookie);
+    });
+    // A new process on the same database file, as after a redeploy mid-call.
+    await withAccountsServer({ env, injectAccounts: false }, async ({ call }) => {
+      const saved = await call('PUT', '/api/account/memory', { cookie, body: { ticket: saveTicket, facts: ['Learned before the restart'] } });
+      assert.equal(saved.status, 200);
+      assert.deepEqual(saved.json.memory.facts, ['Learned before the restart']);
+    });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('end the session a browser had when it creates a different account', async () => {
+    await withAccountsServer({}, async ({ call }) => {
+      const a = cookieFrom(await call('POST', '/api/account/signup', { body: { email: 'a@example.com', password: PASSWORD } }));
+      const b = cookieFrom(await call('POST', '/api/account/signup', { body: { email: 'b@example.com', password: PASSWORD }, cookie: a }));
+      assert.equal((await call('GET', '/api/account', { cookie: b })).json.account.email, 'b@example.com');
+      assert.equal((await call('GET', '/api/account', { cookie: a })).json.account, null, 'the first session is over');
+      // A refused sign-up leaves the current session alone.
+      const refused = await call('POST', '/api/account/signup', { body: { email: 'b@example.com', password: PASSWORD }, cookie: b });
+      assert.equal(refused.status, 409);
+      assert.equal((await call('GET', '/api/account', { cookie: b })).json.account.email, 'b@example.com');
+    });
+  });
+
   it('do not let memory from a deleted account come back under the same address', async () => {
     await withAccountsServer({}, async ({ call, ticket }) => {
       const first = cookieFrom(await call('POST', '/api/account/signup', { body: { email: EMAIL, password: PASSWORD } }));

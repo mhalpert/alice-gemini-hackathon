@@ -8,7 +8,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 export const DEFAULT_DB_PATH = path.join('data', 'alice.db');
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export interface AccountsDb {
   readonly db: DatabaseSync;
@@ -64,6 +64,18 @@ const MIGRATIONS: readonly string[] = [
     facts_json TEXT NOT NULL DEFAULT '[]',
     updated_at INTEGER NOT NULL
   ) STRICT;
+  `,
+  // v2: one-call save tickets. Kept in the file, not in memory, so a restart or a
+  // redeploy in the middle of a call does not make the rest of that call unsaveable.
+  `
+  CREATE TABLE call_tickets (
+    ticket_hash TEXT PRIMARY KEY,
+    account_id  TEXT NOT NULL REFERENCES accounts (id) ON DELETE CASCADE,
+    created_at  INTEGER NOT NULL,
+    expires_at  INTEGER NOT NULL
+  ) STRICT;
+  CREATE INDEX call_tickets_account ON call_tickets (account_id, created_at);
+  CREATE INDEX call_tickets_expires ON call_tickets (expires_at);
   `,
 ];
 

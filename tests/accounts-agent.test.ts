@@ -6,11 +6,13 @@ import {
   CALL_MEMORY_MAX_FACTS,
   decodeCallMemory,
   encodeCallMemory,
+  hasShopperDetails,
   isReturningShopper,
   toCallShopper,
 } from '../src/accounts/call-memory.ts';
 import {
   createMemorySync,
+  greetingFor,
   initialStateFromMemory,
   memoryFromState,
   plainForStateLine,
@@ -118,6 +120,12 @@ describe('call memory note (server to agent)', () => {
     assert.equal(isReturningShopper(odd!.shopper), true);
     assert.equal(isReturningShopper({ name: null, department: null, sizes: {}, facts: [] }), false);
     assert.equal(isReturningShopper(null), false);
+    // A name alone (every new account can have one) is not "has been styled before".
+    const nameOnly = { name: 'Priya', department: null, sizes: {}, facts: [] };
+    assert.equal(isReturningShopper(nameOnly), false);
+    assert.equal(hasShopperDetails(nameOnly), true);
+    assert.equal(hasShopperDetails({ name: null, department: null, sizes: {}, facts: [] }), false);
+    assert.equal(isReturningShopper({ ...nameOnly, sizes: { top: 'M' } }), true);
   });
 });
 
@@ -129,12 +137,15 @@ describe('agent: starting a call with memory', () => {
     assert.equal(state.shopperName, 'Priya');
     assert.equal(state.department, 'women');
     assert.deepEqual(state.sizes, { top: 'M' });
-    assert.deepEqual(state.facts, ['Likes green', 'Hates wool']);
+    // Notes from before are labelled, so an old occasion or budget is not taken for today's.
+    assert.deepEqual(state.facts, ['earlier call: Likes green', 'earlier call: Hates wool']);
     const line = summarize(state);
     assert.match(line, /shopper=Priya/);
     assert.match(line, /dept=women/);
     assert.match(line, /sizes=\{top:M\}/);
-    assert.match(line, /notes=\[Likes green \| Hates wool\]/);
+    assert.match(line, /notes=\[earlier call: Likes green \| earlier call: Hates wool\]/);
+    // Saved back, they are the plain notes again, with nothing added or doubled.
+    assert.deepEqual(memoryFromState(state).facts, ['Likes green', 'Hates wool']);
     // The seed is a copy: changing the call does not reach back into the note.
     store.dispatch({ type: 'merge_sizes', sizes: { shoes: '8' } });
     assert.deepEqual(memory!.shopper!.sizes, { top: 'M' });
@@ -179,18 +190,38 @@ describe('agent: starting a call with memory', () => {
   it('greets a returning shopper as a regular and never asks a known name again', () => {
     assert.equal(buildGreetingInstructions(null), GREETING_INSTRUCTIONS);
     assert.equal(buildGreetingInstructions(undefined), GREETING_INSTRUCTIONS);
+    assert.equal(buildGreetingInstructions({ name: null, returning: false }), GREETING_INSTRUCTIONS);
 
-    const named = buildGreetingInstructions({ name: 'Priya' });
+    const named = buildGreetingInstructions({ name: 'Priya', returning: true });
     assert.match(named, /Greet Priya by name/);
+    assert.match(named, /regular/);
     assert.match(named, /Do not ask for their name/);
     assert.equal(named.includes('\n'), false);
 
-    const unnamed = buildGreetingInstructions({ name: null });
+    const unnamed = buildGreetingInstructions({ name: null, returning: true });
     assert.match(unnamed, /regular/);
     assert.match(unnamed, /ask for their name/);
     assert.equal(unnamed.includes('\n'), false);
 
-    assert.match(buildGreetingInstructions({ name: `Zo${String.fromCodePoint(0xeb)} O'Neil-Smith` }), /Greet Zo. O'Neil-Smith by name/u);
+    assert.match(buildGreetingInstructions({ name: `Zo${String.fromCodePoint(0xeb)} O'Neil-Smith`, returning: true }), /Greet Zo. O'Neil-Smith by name/u);
+  });
+
+  it('does not greet someone on their first call as a regular, even when it knows their name', () => {
+    const firstCall = buildGreetingInstructions({ name: 'Priya', returning: false });
+    assert.match(firstCall, /Greet Priya by name/);
+    assert.match(firstCall, /Do not ask for their name/);
+    assert.ok(!/regular|walking back|remember/.test(firstCall), firstCall);
+    assert.equal(firstCall.includes('\n'), false);
+
+    // From the server's note: a new account with only a sign-up name, then the same shopper a call later.
+    const fresh = readCallMemory(encodeCallMemory({ accounts: true, ticket: TICKET, shopper: { name: 'Priya', department: null, sizes: {}, facts: [] } }));
+    assert.deepEqual(greetingFor(fresh), { name: 'Priya', returning: false });
+    assert.equal(returningShopper(fresh), null);
+    assert.deepEqual(initialStateFromMemory(fresh), { shopperName: 'Priya' }, 'the name still starts the call');
+    const back = readCallMemory(encodeCallMemory({ accounts: true, ticket: TICKET, shopper: PRIYA }));
+    assert.deepEqual(greetingFor(back), { name: 'Priya', returning: true });
+    assert.equal(greetingFor(readCallMemory(encodeCallMemory({ accounts: true, shopper: null }))), null);
+    assert.equal(greetingFor(null), null);
   });
 
   it('never copies a saved name into the instructions unless it looks like a name', () => {
@@ -206,8 +237,10 @@ describe('agent: starting a call with memory', () => {
       '',
       '   ',
     ]) {
-      const text = buildGreetingInstructions({ name: hostile });
-      assert.equal(text, buildGreetingInstructions({ name: null }), `should not embed ${JSON.stringify(hostile)}`);
+      for (const returning of [true, false]) {
+        const text = buildGreetingInstructions({ name: hostile, returning });
+        assert.equal(text, buildGreetingInstructions({ name: null, returning }), `should not embed ${JSON.stringify(hostile)}`);
+      }
     }
   });
 });
@@ -253,9 +286,6 @@ describe('agent: saving memory during a call', () => {
 
     store.dispatch({ type: 'set_camera', camera: 'on' });
     assert.equal(timers.pending(), 0);
-    // Repeating something already known changes nothing, so nothing is queued.
-    assert.deepEqual(store.dispatch({ type: 'add_fact', fact: 'likes GREEN' }), []);
-    assert.equal(timers.pending(), 0);
     await sync.flush();
     assert.equal(sent.length, 0, 'what the call started with is already saved');
 
@@ -267,6 +297,30 @@ describe('agent: saving memory during a call', () => {
 
     await sync.flush();
     assert.equal(sent.length, 1);
+
+    // Saying again what Alice already knew from before adds nothing new to save.
+    store.dispatch({ type: 'add_fact', fact: 'hates WOOL' });
+    await sync.flush();
+    assert.equal(sent.length, 2);
+    assert.deepEqual(sent[1]!.payload.facts, ['Likes green', 'Prefers gold jewellery', 'hates WOOL']);
+  });
+
+  it('does not keep notes that only mattered inside one call', async () => {
+    const timers = makeScheduler();
+    const { page, sent } = makePage();
+    const sync = createMemorySync({ ticket: TICKET, page, schedule: timers.schedule, clearSchedule: timers.clearSchedule });
+    const store = sync.wrap(createCallStateStore({ roomName: 'r', log: () => {} }));
+    store.dispatch({ type: 'add_fact', fact: 'Second outfit offered' });
+    await sync.flush();
+    assert.equal(sent.length, 0, 'a flow marker alone is nothing to save');
+    store.dispatch({ type: 'add_fact', fact: 'Likes linen' });
+    store.dispatch({ type: 'add_fact', fact: 'offered a second look already' });
+    await sync.flush();
+    assert.equal(sent.length, 1);
+    assert.deepEqual(sent[0]!.payload.facts, ['Likes linen']);
+    // The call itself still has the marker; only what is saved leaves it out.
+    assert.equal(store.get().facts.length, 3);
+    assert.equal(store.get().secondOutfitOffered, true);
   });
 
   it('does nothing at all without a ticket: accounts off, or nobody signed in when the call began', async () => {

@@ -70,6 +70,9 @@ function makeFakeShop(opts: { now?: () => number } = {}) {
     if (url.endsWith('/oauth/token')) {
       const next = tokenScript.shift() ?? { error: 'authorization_pending' };
       if (next.__throw) throw new Error('network down');
+      if (typeof next.__status === 'number') {
+        return new Response(typeof next.__body === 'string' ? next.__body : '{}', { status: next.__status });
+      }
       return json(next.error ? 400 : 200, next);
     }
     return json(404, {});
@@ -214,6 +217,33 @@ describe('sign in with Shop: the flow', () => {
     shop.tokenScript.push({ __throw: true });
     t += 5_000;
     assert.deepEqual(await flow.poll(started.flow_id), { status: 'pending', interval_s: 5 });
+    shop.approve();
+    t += 5_000;
+    assert.equal((await flow.poll(started.flow_id)).status, 'signed_in');
+  });
+
+  it('keeps waiting when Shop itself has a bad moment', async () => {
+    let t = 1_000_000_000_000;
+    const shop = makeFakeShop({ now: () => t });
+    const logs: string[] = [];
+    const flow = createShopSignIn({ fetch: shop.fetchImpl, now: () => t, log: (_ev, data) => logs.push(String(data?.result ?? '')) });
+    const started = await flow.start();
+    assert.ok(started.ok);
+    if (!started.ok) return;
+    const badMoments = [
+      { __status: 502, __body: '<html>Bad Gateway</html>' },
+      { __status: 503 },
+      { __status: 429 },
+      { __status: 200, __body: 'not json at all' },
+    ];
+    for (const moment of badMoments) {
+      shop.tokenScript.push(moment);
+      t += 5_000;
+      assert.deepEqual(await flow.poll(started.flow_id), { status: 'pending', interval_s: 5 }, JSON.stringify(moment));
+      assert.equal(flow.pendingCount(), 1, 'the sign-in is still alive');
+    }
+    assert.equal(logs.filter((r) => r === 'retry').length, badMoments.length);
+    // The shopper's approval, a moment later, still lands.
     shop.approve();
     t += 5_000;
     assert.equal((await flow.poll(started.flow_id)).status, 'signed_in');

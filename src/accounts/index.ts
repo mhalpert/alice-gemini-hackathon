@@ -3,6 +3,7 @@
 // This module has no HTTP in it. server.ts turns requests into calls here and owns the
 // cookie; tests drive it directly with an in-memory database and a fake clock.
 import crypto from 'node:crypto';
+import { cleanTicket } from './call-memory.ts';
 import { openAccountsDb, type AccountsDb } from './db.ts';
 import {
   cleanName,
@@ -102,6 +103,15 @@ export interface Accounts {
   getMemory(accountId: string): ShopperMemory;
   saveMemory(accountId: string, patch: MemoryPatch): ShopperMemory;
   clearMemory(accountId: string): void;
+  /**
+   * Makes the one-call ticket that ties memory saves to the account that started a call.
+   * Only its hash is stored. It survives a server restart.
+   */
+  issueCallTicket(accountId: string): string;
+  /** The account a ticket was made for, or null when it is unknown, expired or malformed. */
+  callTicketAccount(ticket: unknown): string | null;
+  /** Ends every ticket an account has out: calls in progress can no longer save to it. */
+  revokeCallTickets(accountId: string): number;
   countAccounts(): number;
   pruneExpired(): number;
   close(): void;
@@ -110,6 +120,8 @@ export interface Accounts {
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const MAX_SESSIONS_PER_ACCOUNT = 10;
 export const MAX_EMAIL_LENGTH = 254;
+export const CALL_TICKET_TTL_MS = 3 * 60 * 60 * 1000;
+export const MAX_CALL_TICKETS_PER_ACCOUNT = 20;
 const LAST_SEEN_WRITE_INTERVAL_MS = 60_000;
 const SESSION_TOKEN_BYTES = 32;
 const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
@@ -219,6 +231,18 @@ export function createAccounts(opts?: AccountsOptions): Accounts {
     ),
     deleteMemory: db.prepare('DELETE FROM memory WHERE account_id = ?'),
     countAccounts: db.prepare('SELECT count(*) AS n FROM accounts'),
+    insertTicket: db.prepare(
+      'INSERT INTO call_tickets (ticket_hash, account_id, created_at, expires_at) VALUES (?, ?, ?, ?)',
+    ),
+    ticketByHash: db.prepare('SELECT account_id, expires_at FROM call_tickets WHERE ticket_hash = ?'),
+    deleteTicket: db.prepare('DELETE FROM call_tickets WHERE ticket_hash = ?'),
+    deleteTicketsFor: db.prepare('DELETE FROM call_tickets WHERE account_id = ?'),
+    deleteExpiredTickets: db.prepare('DELETE FROM call_tickets WHERE expires_at <= ?'),
+    trimTickets: db.prepare(
+      `DELETE FROM call_tickets WHERE account_id = ? AND ticket_hash NOT IN (
+         SELECT ticket_hash FROM call_tickets WHERE account_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?
+       )`,
+    ),
   };
 
   function transaction<T>(work: () => T): T {
@@ -390,11 +414,39 @@ export function createAccounts(opts?: AccountsOptions): Accounts {
     q.deleteMemory.run(accountId);
   }
 
+  function issueCallTicket(accountId: string): string {
+    const ticket = crypto.randomBytes(24).toString('base64url');
+    const t = now();
+    transaction(() => {
+      q.insertTicket.run(hashSessionToken(ticket), accountId, t, t + CALL_TICKET_TTL_MS);
+      q.trimTickets.run(accountId, accountId, MAX_CALL_TICKETS_PER_ACCOUNT);
+    });
+    return ticket;
+  }
+
+  function callTicketAccount(raw: unknown): string | null {
+    const ticket = cleanTicket(raw);
+    if (!ticket) return null;
+    const hash = hashSessionToken(ticket);
+    const row = q.ticketByHash.get(hash) as { account_id: string; expires_at: number } | undefined;
+    if (!row) return null;
+    if (row.expires_at <= now()) {
+      q.deleteTicket.run(hash);
+      return null;
+    }
+    return row.account_id;
+  }
+
+  function revokeCallTickets(accountId: string): number {
+    return Number(q.deleteTicketsFor.run(accountId).changes);
+  }
+
   function countAccounts(): number {
     return Number((q.countAccounts.get() as { n: number } | undefined)?.n ?? 0);
   }
 
   function pruneExpired(): number {
+    q.deleteExpiredTickets.run(now());
     return Number(q.deleteExpired.run(now()).changes);
   }
 
@@ -410,6 +462,9 @@ export function createAccounts(opts?: AccountsOptions): Accounts {
     getMemory,
     saveMemory,
     clearMemory,
+    issueCallTicket,
+    callTicketAccount,
+    revokeCallTickets,
     countAccounts,
     pruneExpired,
     close: () => handle.close(),

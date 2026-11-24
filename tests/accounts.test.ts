@@ -44,6 +44,15 @@ function tempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'alice-accounts-'));
 }
 
+function openAccountsDbRows(file: string): unknown[] {
+  const raw = new DatabaseSync(file, { readOnly: true });
+  try {
+    return raw.prepare('SELECT * FROM call_tickets').all();
+  } finally {
+    raw.close();
+  }
+}
+
 function makeAccounts(extra?: { now?: () => number; sessionTtlMs?: number; maxSessionsPerAccount?: number }): {
   accounts: Accounts;
   raw: DatabaseSync;
@@ -62,7 +71,7 @@ describe('accounts db', () => {
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
       .all()
       .map((r) => (r as { name: string }).name);
-    assert.deepEqual(tables, ['accounts', 'memory', 'sessions']);
+    assert.deepEqual(tables, ['accounts', 'call_tickets', 'memory', 'sessions']);
     handle.close();
     handle.close(); // closing twice is harmless
   });
@@ -87,6 +96,26 @@ describe('accounts db', () => {
     if (process.platform !== 'win32') {
       assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('upgrades a database from the first schema version without losing what is in it', () => {
+    const dir = tempDir();
+    const file = path.join(dir, 'alice.db');
+    const first = openAccountsDb({ path: file });
+    first.db
+      .prepare("INSERT INTO accounts (id, provider, email, password_hash, created_at, updated_at) VALUES ('a1', 'password', 'a@b.co', 'x', 1, 1)")
+      .run();
+    // Put the file back to how version 1 left it: no ticket table.
+    first.db.exec('DROP TABLE call_tickets');
+    first.db.exec('PRAGMA user_version = 1');
+    first.close();
+
+    const upgraded = openAccountsDb({ path: file });
+    assert.equal((upgraded.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, SCHEMA_VERSION);
+    assert.equal((upgraded.db.prepare('SELECT count(*) AS n FROM call_tickets').get() as { n: number }).n, 0);
+    assert.equal((upgraded.db.prepare('SELECT email FROM accounts').get() as { email: string }).email, 'a@b.co');
+    upgraded.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -266,6 +295,18 @@ describe('shopper memory rules', () => {
     assert.equal(kept[0], 'fact 15');
     assert.equal(kept.at(-1), `fact ${MAX_FACTS + 14}`);
     assert.equal(cleanFacts(['x'.repeat(MAX_FACT_LENGTH + 50)])[0]!.length, MAX_FACT_LENGTH);
+  });
+
+  it('takes the call-state line\'s punctuation out once, so a note is never stored twice', () => {
+    assert.deepEqual(cleanFacts(['prefers earth tones; no brights', 'size = M | L', '[]{}|;=']), ['prefers earth tones no brights', 'size M L']);
+    assert.equal(cleanName('Ana; dept=men'), 'Ana dept men');
+    assert.deepEqual(cleanSizes({ top: 'M | L', bottom: '{30}' }), { top: 'M L', bottom: '30' });
+    // What the next call sends back is the cleaned text; it must match what is stored.
+    const stored = mergeMemory(emptyMemory(), { facts: ['prefers earth tones; no brights'] });
+    const afterNextCall = mergeMemory(stored, { facts: ['prefers earth tones no brights', 'likes linen'] });
+    assert.deepEqual(afterNextCall.facts, ['prefers earth tones no brights', 'likes linen']);
+    // A row written before this rule is cleaned when it is read.
+    assert.deepEqual(parseStoredMemory({ facts_json: '["a; b", "a b"]', sizes_json: '{}' }).facts, ['a b']);
   });
 
   it('merges a patch without losing what was stored', () => {
@@ -543,6 +584,55 @@ describe('accounts service', () => {
       assert.equal((raw.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n, 0);
     }
     assert.equal((await accounts.signUp({ email: 'a@b.co', password: GOOD_PASSWORD })).ok, true);
+  });
+
+  it('makes one-call save tickets that outlive a restart and end when they should', async () => {
+    const dir = tempDir();
+    const file = path.join(dir, 'alice.db');
+    let t = 1_000;
+    const first = createAccounts({ db: openAccountsDb({ path: file }), scrypt: FAST, now: () => t });
+    const a = await first.signUp({ email: 'a@b.co', password: GOOD_PASSWORD });
+    const b = await first.signUp({ email: 'b@b.co', password: GOOD_PASSWORD });
+    assert.ok(a.ok && b.ok);
+    if (!a.ok || !b.ok) return;
+    const ticketA = first.issueCallTicket(a.account.id);
+    const ticketB = first.issueCallTicket(b.account.id);
+    assert.match(ticketA, /^[A-Za-z0-9_-]{32}$/);
+    assert.notEqual(ticketA, ticketB);
+    assert.equal(first.callTicketAccount(ticketA), a.account.id);
+    for (const bad of [null, undefined, '', 'short', 'A'.repeat(32), `${ticketA}x`, { ticket: ticketA }, "' OR 1=1 --"]) {
+      assert.equal(first.callTicketAccount(bad), null);
+    }
+    first.close();
+
+    // The server restarts in the middle of a call: the ticket is still good.
+    const second = createAccounts({ db: openAccountsDb({ path: file }), scrypt: FAST, now: () => t });
+    assert.equal(second.callTicketAccount(ticketA), a.account.id);
+    const dump = JSON.stringify(openAccountsDbRows(file));
+    assert.ok(!dump.includes(ticketA), 'only a hash of the ticket is stored');
+
+    // "Forget everything" ends an account's tickets; another account's are untouched.
+    assert.equal(second.revokeCallTickets(a.account.id), 1);
+    assert.equal(second.callTicketAccount(ticketA), null);
+    assert.equal(second.callTicketAccount(ticketB), b.account.id);
+
+    // Deleting the account takes its tickets with it.
+    second.deleteAccount(b.account.id);
+    assert.equal(second.callTicketAccount(ticketB), null);
+
+    // They run out after three hours, and only the newest twenty per account are kept.
+    const again = second.issueCallTicket(a.account.id);
+    t += 3 * 60 * 60 * 1000 - 1;
+    assert.equal(second.callTicketAccount(again), a.account.id);
+    t += 1;
+    assert.equal(second.callTicketAccount(again), null);
+    const many = Array.from({ length: 25 }, () => { t += 1; return second.issueCallTicket(a.account.id); });
+    assert.deepEqual(many.map((ticket) => second.callTicketAccount(ticket) !== null), [...Array(5).fill(false), ...Array(20).fill(true)]);
+    t += 4 * 60 * 60 * 1000;
+    second.pruneExpired();
+    assert.equal(openAccountsDbRows(file).length, 0, 'expired tickets are cleared out');
+    second.close();
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it('updates the display name through the same cleaning rules', async () => {

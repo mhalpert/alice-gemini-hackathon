@@ -11,11 +11,14 @@
 // account it is.
 import {
   decodeCallMemory,
+  hasShopperDetails,
   isReturningShopper,
   type CallMemory,
   type CallShopper,
 } from '../accounts/call-memory.ts';
-import { cleanDepartment, cleanFacts, cleanName, cleanSizes } from '../accounts/memory.ts';
+import { cleanDepartment, cleanFacts, cleanName, cleanSizes, plainForStateLine } from '../accounts/memory.ts';
+
+export { plainForStateLine } from '../accounts/memory.ts';
 import type { PageActions } from '../types.ts';
 import type { PageSender } from './page.ts';
 import type { CallState, CallStateAction, CallStateStore } from './state.ts';
@@ -30,19 +33,21 @@ export function readCallMemory(metadata: unknown): CallMemory | null {
   return decodeCallMemory(metadata);
 }
 
-// The call state is shown to the model as one line: "shopper=Ana; sizes={top:M}; notes=[a | b]".
-// Stored text is someone's typing, so the characters that give that line its structure are
-// taken out before it goes in. Otherwise a saved note could pose as other fields.
-const STATE_LINE_SYNTAX = /[[\]{}|;=]/g;
+/** Marks a note in the call state as coming from an earlier call, not from this one. */
+export const EARLIER_NOTE_PREFIX = 'earlier call: ';
 
-export function plainForStateLine(text: string): string {
-  return text.replace(STATE_LINE_SYNTAX, ' ').replace(/\s+/g, ' ').trim();
-}
+// A note Alice makes for the flow of one call ("second outfit offered"; src/agent/state.ts
+// turns it into a flag). It says nothing lasting about the shopper, so it is not kept.
+const CALL_ONLY_NOTE = /\bsecond\s+(?:outfit|look)\b.*\boffered\b|\boffered\b.*\bsecond\s+(?:outfit|look)\b/i;
 
-/** The slice of call state a returning shopper starts with. Empty for everyone else. */
+/**
+ * The slice of call state a signed-in shopper starts with. Empty for everyone else.
+ * Notes from earlier calls are labelled as such, so the model can tell "she told me last
+ * time" from "she just told me" and does not take an old occasion or budget for today's.
+ */
 export function initialStateFromMemory(memory: CallMemory | null): Partial<CallState> {
   const shopper = memory?.shopper;
-  if (!shopper || !isReturningShopper(shopper)) return {};
+  if (!shopper || !hasShopperDetails(shopper)) return {};
   const name = shopper.name ? plainForStateLine(shopper.name) : '';
   const sizes: Record<string, string> = {};
   for (const [slot, size] of Object.entries(shopper.sizes)) {
@@ -50,7 +55,10 @@ export function initialStateFromMemory(memory: CallMemory | null): Partial<CallS
     const cleanSize = plainForStateLine(size);
     if (cleanSlot && cleanSize) sizes[cleanSlot] = cleanSize;
   }
-  const facts = shopper.facts.map(plainForStateLine).filter(Boolean);
+  const facts = shopper.facts
+    .map(plainForStateLine)
+    .filter(Boolean)
+    .map((fact) => `${EARLIER_NOTE_PREFIX}${fact}`);
   return {
     ...(name ? { shopperName: name } : {}),
     ...(shopper.department ? { department: shopper.department } : {}),
@@ -61,12 +69,16 @@ export function initialStateFromMemory(memory: CallMemory | null): Partial<CallS
 
 export type MemorySnapshot = Omit<PageActions['saveMemory'], 'ticket'>;
 
+/** What gets saved: lasting things only, with the "earlier call" label taken back off. */
 export function memoryFromState(state: CallState): MemorySnapshot {
+  const facts = state.facts
+    .map((fact) => (fact.startsWith(EARLIER_NOTE_PREFIX) ? fact.slice(EARLIER_NOTE_PREFIX.length) : fact))
+    .filter((fact) => !CALL_ONLY_NOTE.test(fact));
   return {
     name: cleanName(state.shopperName),
     department: cleanDepartment(state.department),
     sizes: cleanSizes(state.sizes),
-    facts: cleanFacts(state.facts),
+    facts: cleanFacts(facts),
   };
 }
 
@@ -76,6 +88,16 @@ export function isReturning(memory: CallMemory | null): boolean {
 
 export function returningShopper(memory: CallMemory | null): CallShopper | null {
   return memory?.shopper && isReturningShopper(memory.shopper) ? memory.shopper : null;
+}
+
+/**
+ * What the opening line needs to know: the shopper's name if Alice has one, and whether
+ * she has styled them before. Null when she knows nothing (the usual greeting).
+ */
+export function greetingFor(memory: CallMemory | null): { name: string | null; returning: boolean } | null {
+  const shopper = memory?.shopper;
+  if (!shopper || !hasShopperDetails(shopper)) return null;
+  return { name: shopper.name, returning: isReturningShopper(shopper) };
 }
 
 export interface MemorySyncOptions {

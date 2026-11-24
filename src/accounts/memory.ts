@@ -56,12 +56,22 @@ export function cleanText(value: unknown, maxLength: number): string {
   return points.length > maxLength ? points.slice(0, maxLength).join('').trim() : flat;
 }
 
+// Alice's call state is shown to the model as one line, "shopper=Ana; sizes={top:M};
+// notes=[a | b]". The characters that give that line its structure are taken out of
+// stored text here, once, so that a saved note can never pose as other fields and so
+// that what is stored is exactly what a later call starts with.
+const STATE_LINE_SYNTAX = /[[\]{}|;=]/g;
+
+export function plainForStateLine(text: string): string {
+  return text.replace(STATE_LINE_SYNTAX, ' ').replace(/\s+/g, ' ').trim();
+}
+
 export function cleanDepartment(value: unknown): Department | null {
   return value === 'men' || value === 'women' ? value : null;
 }
 
 export function cleanName(value: unknown): string | null {
-  const name = cleanText(value, MAX_NAME_LENGTH);
+  const name = plainForStateLine(cleanText(value, MAX_NAME_LENGTH));
   return name || null;
 }
 
@@ -74,7 +84,7 @@ export function cleanSizes(value: unknown): Record<string, string> {
       .toLowerCase()
       .replace(/[^a-z0-9 _-]/g, '')
       .trim();
-    const size = cleanText(typeof rawSize === 'number' ? String(rawSize) : rawSize, MAX_SIZE_VALUE_LENGTH);
+    const size = plainForStateLine(cleanText(typeof rawSize === 'number' ? String(rawSize) : rawSize, MAX_SIZE_VALUE_LENGTH));
     // '__proto__' and friends are plain data here, but skip them anyway.
     if (!key || !size || key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
     out[key] = size;
@@ -89,7 +99,7 @@ export function cleanFacts(value: unknown): string[] {
   const out: string[] = [];
   // Walk from the end so that when two facts repeat, the newer position wins.
   for (let i = value.length - 1; i >= 0 && out.length < MAX_FACTS; i -= 1) {
-    const fact = cleanText(value[i], MAX_FACT_LENGTH);
+    const fact = plainForStateLine(cleanText(value[i], MAX_FACT_LENGTH));
     if (!fact) continue;
     const key = fact.toLowerCase();
     if (seen.has(key)) continue;

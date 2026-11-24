@@ -6,9 +6,8 @@
 //
 // Switched off unless ALICE_ACCOUNTS is on: `handle` then answers nothing and the routes
 // fall through to the server's usual 404.
-import crypto from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { cleanTicket, encodeCallMemory, toCallShopper, type CallShopper } from './call-memory.ts';
+import { encodeCallMemory, toCallShopper, type CallShopper } from './call-memory.ts';
 import { createAttemptLimiter, type AttemptLimiter } from './limiter.ts';
 import { cleanName, emptyMemory, type ShopperMemory } from './memory.ts';
 import { HashBusyError, MIN_PASSWORD_LENGTH } from './passwords.ts';
@@ -21,8 +20,6 @@ export const SESSION_COOKIE = 'alice_session';
  * over HTTPS, so a page on a sibling subdomain cannot plant one.
  */
 export const SECURE_SESSION_COOKIE = '__Host-alice_session';
-const TICKET_TTL_MS = 3 * 60 * 60 * 1000;
-const MAX_TICKETS = 20_000;
 /** Ties a pending "Sign in with Shop" to the browser that started it. */
 export const SHOP_FLOW_COOKIE = 'alice_shop_flow';
 /** Over HTTPS, for the same reason as the session cookie: only this exact host can set it. */
@@ -303,50 +300,12 @@ export function createAccountRoutes(deps: AccountHttpDeps): AccountRoutes {
     return accounts.sessionAccount(sessionToken(req));
   }
 
-  // ---- save tickets ---------------------------------------------------------------
-  // One per call, made when a signed-in shopper's call token is minted. The agent gets
-  // it in its job metadata and returns it with every saveMemory. A save is accepted only
-  // when its ticket belongs to the same account as the browser's session, so what Alice
-  // learned in one person's call can never land in another person's account (a second
-  // tab that signed in as someone else, a link that points the page at a stranger's room).
-  const tickets = new Map<string, { accountId: string; expiresAt: number }>();
-  const ticketKey = (ticket: string): string => crypto.createHash('sha256').update(ticket, 'utf8').digest('hex');
-
-  function issueTicket(accountId: string): string {
-    const t = now();
-    if (tickets.size >= MAX_TICKETS) {
-      for (const [key, entry] of tickets) {
-        if (entry.expiresAt <= t) tickets.delete(key);
-      }
-      while (tickets.size >= MAX_TICKETS) {
-        const oldest = tickets.keys().next();
-        if (oldest.done) break;
-        tickets.delete(oldest.value);
-      }
-    }
-    const ticket = crypto.randomBytes(24).toString('base64url');
-    tickets.set(ticketKey(ticket), { accountId, expiresAt: t + TICKET_TTL_MS });
-    return ticket;
-  }
-
-  function ticketAccountId(raw: unknown): string | null {
-    const ticket = cleanTicket(raw);
-    if (!ticket) return null;
-    const key = ticketKey(ticket);
-    const entry = tickets.get(key);
-    if (!entry) return null;
-    if (entry.expiresAt <= now()) {
-      tickets.delete(key);
-      return null;
-    }
-    return entry.accountId;
-  }
-
-  function revokeTickets(accountId: string): void {
-    for (const [key, entry] of tickets) {
-      if (entry.accountId === accountId) tickets.delete(key);
-    }
-  }
+  // Save tickets: one per call, made when a signed-in shopper's call token is minted and
+  // kept in the database (index.ts). The agent gets it in its job metadata and returns it
+  // with every saveMemory. A save is accepted only when its ticket belongs to the same
+  // account as the browser's session, so what Alice learned in one person's call can
+  // never land in another person's account (a second tab that signed in as someone else,
+  // a link that points the page at a stranger's room).
 
   function signedInPayload(account: PublicAccount, memory: ShopperMemory): Record<string, unknown> {
     return { enabled: true, account: publicView(account), memory };
@@ -560,6 +519,9 @@ export function createAccountRoutes(deps: AccountHttpDeps): AccountRoutes {
         }
         return true;
       }
+      // A browser that was signed in as someone else: end that session, as sign-in does.
+      const previous = sessionToken(req);
+      if (previous) accounts.signOut(previous);
       deps.log('account', { action: 'signup', ok: true });
       send(res, 201, signedInPayload(result.account, emptyMemory()), {
         'Set-Cookie': sessionCookieHeader(result.session, now(), secure),
@@ -655,7 +617,7 @@ export function createAccountRoutes(deps: AccountHttpDeps): AccountRoutes {
     // ---- PUT /api/account/memory: add to what Alice remembers ------------------------
     if (route === '/memory' && method === 'PUT') {
       // Only the call that this account started may add to its memory.
-      if (ticketAccountId(body.ticket) !== account.id) {
+      if (accounts.callTicketAccount(body.ticket) !== account.id) {
         deps.log('account_refused', { action: 'memory_saved', reason: 'wrong_call' });
         send(res, 403, { error: 'wrong_call' });
         return true;
@@ -681,7 +643,7 @@ export function createAccountRoutes(deps: AccountHttpDeps): AccountRoutes {
     if (route === '/memory' && method === 'DELETE') {
       accounts.clearMemory(account.id);
       // A call in progress still holds what it learned; stop it from saving it back.
-      revokeTickets(account.id);
+      accounts.revokeCallTickets(account.id);
       deps.log('account', { action: 'memory_cleared' });
       send(res, 200, signedInPayload(account, emptyMemory()));
       return true;
@@ -689,8 +651,7 @@ export function createAccountRoutes(deps: AccountHttpDeps): AccountRoutes {
 
     // ---- DELETE /api/account: delete the account and everything stored with it -------
     if (route === '/' && method === 'DELETE') {
-      accounts.deleteAccount(account.id);
-      revokeTickets(account.id);
+      accounts.deleteAccount(account.id); // its sessions, memory and tickets go with it
       deps.log('account', { action: 'deleted' });
       send(res, 200, { ok: true }, { 'Set-Cookie': clearedCookieHeader(secure) });
       return true;
@@ -708,7 +669,7 @@ export function createAccountRoutes(deps: AccountHttpDeps): AccountRoutes {
       const account = accounts ? currentAccount(req, accounts) : null;
       if (accounts && account) {
         shopper = toCallShopper(account.display_name, accounts.getMemory(account.id));
-        ticket = issueTicket(account.id);
+        ticket = accounts.issueCallTicket(account.id);
       }
     } catch (err) {
       console.error('[accounts] could not read memory for a call:', (err as Error)?.message);

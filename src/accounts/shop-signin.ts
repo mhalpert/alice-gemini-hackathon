@@ -254,12 +254,19 @@ export function createShopSignIn(options: ShopSignInOptions = {}): ShopSignIn {
 
   async function askShop(flowId: string, flow: Flow): Promise<ShopPollResult> {
     try {
-      const { data } = await postForm(tokenEndpoint, {
+      const { status, data } = await postForm(tokenEndpoint, {
         grant_type: DEVICE_GRANT,
         client_id: clientId,
         device_code: flow.deviceCode,
       });
       const error = typeof data?.error === 'string' ? data.error : '';
+      // Shop having a bad moment (a 5xx, "too many requests", an error page instead of
+      // JSON) says nothing about the shopper's answer: keep waiting.
+      if (!error && (status >= 500 || status === 429 || data === null)) {
+        log('shop_signin', { step: 'poll', result: 'retry', http: status });
+        flow.nextPollAtMs = now() + flow.intervalS * 1000;
+        return { status: 'pending', interval_s: flow.intervalS };
+      }
       if (error === 'authorization_pending') {
         flow.nextPollAtMs = now() + flow.intervalS * 1000;
         return { status: 'pending', interval_s: flow.intervalS };

@@ -106,9 +106,17 @@ export function decodeCallMemory(raw: unknown): CallMemory | null {
   return { v: CALL_MEMORY_VERSION, accounts: note.accounts === true, shopper, ticket: cleanTicket(note.ticket) };
 }
 
+/**
+ * True when Alice has something from an earlier call: a department, a size or a note.
+ * A name alone does not count. Every new account can have one from sign-up or from Shop,
+ * and a shopper on their first call must not be greeted as a regular.
+ */
 export function isReturningShopper(shopper: CallShopper | null | undefined): boolean {
   if (!shopper) return false;
-  return Boolean(
-    shopper.name || shopper.department || shopper.facts.length > 0 || Object.keys(shopper.sizes).length > 0,
-  );
+  return Boolean(shopper.department || shopper.facts.length > 0 || Object.keys(shopper.sizes).length > 0);
+}
+
+/** True when there is anything at all to start the call with, a name included. */
+export function hasShopperDetails(shopper: CallShopper | null | undefined): boolean {
+  return Boolean(shopper && (shopper.name || isReturningShopper(shopper)));
 }

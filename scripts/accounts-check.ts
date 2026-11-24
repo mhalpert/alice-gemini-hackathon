@@ -182,9 +182,30 @@ async function runAt(browser: Browser, baseUrl: string, label: string, viewport:
         ticket,
       );
       await page.locator('.account-notes li').nth(2).waitFor();
-      assert.equal(await page.locator('.account-notes li').nth(2).textContent(), '<img src=x onerror="window.__pwned=1">');
+      // Stored text loses a few punctuation marks ("=" among them) but keeps its angle brackets.
+      assert.equal(await page.locator('.account-notes li').nth(2).textContent(), '<img src x onerror "window.__pwned 1">');
       assert.equal(await page.locator('.account-notes img').count(), 0);
       assert.equal(await page.evaluate(() => (window as any).__pwned), undefined);
+    });
+
+    await stage('a save that fails for a moment is tried again, not lost', async () => {
+      const ticket = (await callNote()).note?.ticket;
+      let failures = 0;
+      await page.route('**/api/account/memory', async (route) => {
+        if (route.request().method() === 'PUT' && failures < 2) {
+          failures += 1;
+          await (failures === 1 ? route.abort('connectionfailed') : route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"busy"}' }));
+          return;
+        }
+        await route.continue();
+      });
+      await page.evaluate(
+        (t) => (window as any).alice.handlers.saveMemory({ ticket: t, name: 'Priya', department: 'women', sizes: { top: 'M', shoes: '8' }, facts: ['Wears a size 8 shoe'] }),
+        ticket,
+      );
+      await page.locator('.account-notes li').filter({ hasText: 'Wears a size 8 shoe' }).waitFor({ timeout: 15_000 });
+      assert.equal(failures, 2, 'the first two tries failed (offline, then busy)');
+      await page.unroute('**/api/account/memory');
     });
 
     await stage('fresh page load with the #account link: still signed in, panel opens, memory is there', async () => {
@@ -193,6 +214,7 @@ async function runAt(browser: Browser, baseUrl: string, label: string, viewport:
       await page.waitForFunction(() => document.querySelector('.panel-layer--account')?.classList.contains('is-open'));
       await page.locator('.account-notes li').first().waitFor();
       assert.equal((await memoryRows()).length, 4);
+      assert.equal(await page.locator('.account-notes li').count(), 4);
       assert.equal(await page.evaluate(() => location.hash), '', 'the link fragment is removed once used');
     });
 
@@ -246,6 +268,21 @@ async function runAt(browser: Browser, baseUrl: string, label: string, viewport:
       await status.filter({ hasText: 'Forgotten' }).waitFor();
       assert.deepEqual(await memoryRows(), ['Name: Priya']);
       assert.equal(await page.getByRole('button', { name: 'Forget everything' }).isDisabled(), true);
+    });
+
+    await stage('delete with a session that has already ended says so, and deletes nothing', async () => {
+      const saved = await context.cookies();
+      await context.clearCookies(); // as if this account was signed out in another tab
+      await page.getByRole('button', { name: 'Delete account' }).click();
+      await page.getByRole('button', { name: 'Yes, delete my account' }).click();
+      await status.filter({ hasText: 'signed out' }).waitFor();
+      assert.equal(await status.filter({ hasText: 'deleted' }).count(), 0, 'it must not claim the account was deleted');
+      // The account is still there: the same email and password sign in.
+      await context.addCookies(saved.filter((c) => c.name !== 'alice_session'));
+      await page.locator('#account-email').fill(EMAIL);
+      await page.locator('#account-password').fill(PASSWORD);
+      await page.locator('.account-submit').click();
+      await page.locator('.account-signed-in').filter({ hasText: EMAIL }).waitFor();
     });
 
     await stage('delete account: asks first, then the account is gone', async () => {

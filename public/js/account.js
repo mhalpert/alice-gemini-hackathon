@@ -9,6 +9,7 @@
 const API = '/api/account';
 const SAVE_DELAY_MS = 400;
 const REFRESH_RETRY_MS = [2000, 6000, 15000];
+const SAVE_RETRY_MS = [1000, 3000, 8000, 20000];
 
 const MESSAGES = {
   invalid_email: "That email address doesn't look right.",
@@ -133,6 +134,10 @@ export function mountAccount(options = {}) {
   let pendingSave = null;
   let saveTimer = null;
   let saving = false;
+  let saveAttempt = 0;
+  // Goes up every time who is signed in changes, so a slow reply that was asked for
+  // before the change can be recognised and ignored when it finally arrives.
+  let authEpoch = 0;
   let lastFocus = null;
 
   let buttonEl = null;
@@ -478,16 +483,22 @@ export function mountAccount(options = {}) {
     if (!waiting) return;
     waiting.timer = null;
     const reply = await request('POST', '/shop/poll', {});
-    if (state.shop !== waiting) return; // cancelled while the request was out
     const status = reply.data && reply.data.status;
+    const givenUp = state.shop !== waiting; // cancelled, or the panel closed, while the request was out
     if (reply.status === 200 && status === 'signed_in') {
-      stopShopTimer();
-      state.shop = null;
+      // The server has already set the session cookie, so the browser IS signed in, even
+      // if the panel stopped waiting a moment ago. Show it, or the page and the server
+      // would disagree until the next reload.
+      if (!givenUp) {
+        stopShopTimer();
+        state.shop = null;
+      }
+      authEpoch += 1;
       state.account = reply.data.account;
       state.memory = reply.data.memory;
       state.error = '';
       state.notice = isLive() ? "You're signed in. Alice will know you from your next call." : "You're signed in.";
-      if (state.open) {
+      if (state.open && !state.shop) {
         render();
         focusFirst();
       } else {
@@ -495,6 +506,7 @@ export function mountAccount(options = {}) {
       }
       return;
     }
+    if (givenUp) return;
     if (reply.status === 200 && status === 'pending') {
       waiting.intervalMs = Math.max(2000, Number(reply.data.interval_s || 5) * 1000);
       scheduleShopPoll();
@@ -553,6 +565,7 @@ export function mountAccount(options = {}) {
     setBusy(false);
 
     if (reply.status === 200 || reply.status === 201) {
+      authEpoch += 1;
       state.account = reply.data.account;
       state.memory = reply.data.memory;
       state.error = '';
@@ -654,6 +667,7 @@ export function mountAccount(options = {}) {
   }
 
   function signedOutLocally(notice) {
+    authEpoch += 1;
     state.account = null;
     state.memory = null;
     state.confirm = null;
@@ -705,7 +719,15 @@ export function mountAccount(options = {}) {
     setBusy(true);
     const reply = await request('DELETE', '', {});
     setBusy(false);
-    if (reply.status !== 200 && reply.status !== 401) {
+    if (reply.status === 401) {
+      // The session had already ended (signed out in another tab, or expired): the server
+      // deleted nothing, so do not say it did.
+      signedOutLocally(MESSAGES.not_signed_in);
+      render();
+      focusFirst();
+      return;
+    }
+    if (reply.status !== 200) {
       state.error = messageFor(reply);
       state.confirm = null;
       render();
@@ -719,7 +741,10 @@ export function mountAccount(options = {}) {
   // ---- loading, and saving what Alice learns ----------------------------------------
 
   async function refresh() {
+    const epoch = authEpoch;
     const reply = await request('GET', '');
+    // Someone signed in or out while this was on its way: what it says is out of date.
+    if (epoch !== authEpoch) return 'stale';
     if (reply.status !== 200 || !reply.data || reply.data.enabled !== true) {
       // 404 means accounts are switched off. Anything else (offline, busy, an error) is
       // passing: leave what is showing alone and let the caller try again.
@@ -750,6 +775,17 @@ export function mountAccount(options = {}) {
     saving = true;
     const reply = await request('PUT', '/memory', body);
     saving = false;
+    const passing = reply.status === 0 || reply.status === 429 || reply.status >= 500;
+    if (passing && state.account === savedFor && saveAttempt < SAVE_RETRY_MS.length) {
+      // Offline for a moment, or the server is busy: the agent has been told "saved", so
+      // this is the only copy. Keep it (unless a newer one has arrived) and try again.
+      if (!pendingSave) pendingSave = body;
+      if (saveTimer !== null) clearTimeout(saveTimer);
+      saveTimer = setTimeout(flushSave, SAVE_RETRY_MS[saveAttempt]);
+      saveAttempt += 1;
+      return;
+    }
+    saveAttempt = 0;
     if (reply.status === 200 && state.account === savedFor) {
       state.account = reply.data.account;
       state.memory = reply.data.memory;
@@ -760,7 +796,7 @@ export function mountAccount(options = {}) {
       if (state.open) renderKeepingFocus();
       else renderButton();
     }
-    if (pendingSave) saveTimer = setTimeout(flushSave, SAVE_DELAY_MS);
+    if (pendingSave && saveTimer === null) saveTimer = setTimeout(flushSave, SAVE_DELAY_MS);
   }
 
   // Page action. Must answer at once (the agent is waiting), so the save runs afterwards.
