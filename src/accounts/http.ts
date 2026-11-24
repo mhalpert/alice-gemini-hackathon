@@ -10,7 +10,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { encodeCallMemory, toCallShopper, type CallShopper } from './call-memory.ts';
 import { createAttemptLimiter, type AttemptLimiter } from './limiter.ts';
 import { cleanName, emptyMemory, type ShopperMemory } from './memory.ts';
-import { MIN_PASSWORD_LENGTH } from './passwords.ts';
+import { HashBusyError, MIN_PASSWORD_LENGTH } from './passwords.ts';
 import type { Accounts, PublicAccount, SessionGrant } from './index.ts';
 
 export const SESSION_COOKIE = 'alice_session';
@@ -136,6 +136,10 @@ export function createAccountRoutes(deps: AccountHttpDeps): AccountRoutes {
   const signInFailuresPerEmail = limiter(8, 15 * 60_000);
   const signUpPerIp = limiter(5, 60 * 60_000);
   const signUpGlobal = limiter(200, 60 * 60_000);
+  // Refused sign-ups (bad address, short password, address already taken) are counted
+  // apart from accounts actually made, so a typo does not use up the five an hour, while
+  // someone probing which addresses have accounts still runs out of tries.
+  const signUpRefusalsPerIp = limiter(30, 60 * 60_000);
   const writesPerAccount = limiter(60, 60_000);
   const writesPerIp = limiter(120, 60_000);
   let lastPruneMs = -Infinity;
@@ -153,6 +157,18 @@ export function createAccountRoutes(deps: AccountHttpDeps): AccountRoutes {
   function slowDown(res: ServerResponse, retryAfterS: number): void {
     const wait = Math.max(1, retryAfterS);
     send(res, 429, { error: 'slow_down', retry_after_s: wait }, { 'Retry-After': String(wait) });
+  }
+
+  /** Runs a sign-up or sign-in; answers "busy" itself when too many are already waiting. */
+  async function withHashing<T>(res: ServerResponse, action: string, work: () => Promise<T>): Promise<T | null> {
+    try {
+      return await work();
+    } catch (err) {
+      if (!(err instanceof HashBusyError)) throw err;
+      deps.log('account_refused', { action, reason: 'busy' });
+      send(res, 503, { error: 'busy', retry_after_s: 5 }, { 'Retry-After': '5' });
+      return null;
+    }
   }
 
   function service(env: Env): Accounts | null {
@@ -285,9 +301,20 @@ export function createAccountRoutes(deps: AccountHttpDeps): AccountRoutes {
     if (route === '/signup') {
       const body = await guardedBody(req, res, MAX_CREDENTIALS_BODY_BYTES);
       if (!body) return true;
-      if (signUpPerIp.blocked(`signup:${ip}`) || signUpGlobal.blocked('signup')) {
+      if (
+        signUpPerIp.blocked(`signup:${ip}`) ||
+        signUpGlobal.blocked('signup') ||
+        signUpRefusalsPerIp.blocked(`signup-refused:${ip}`)
+      ) {
         deps.log('account_refused', { action: 'signup', reason: 'slow_down' });
-        slowDown(res, Math.max(signUpPerIp.retryAfterS(`signup:${ip}`), signUpGlobal.retryAfterS('signup')));
+        slowDown(
+          res,
+          Math.max(
+            signUpPerIp.retryAfterS(`signup:${ip}`),
+            signUpGlobal.retryAfterS('signup'),
+            signUpRefusalsPerIp.retryAfterS(`signup-refused:${ip}`),
+          ),
+        );
         return true;
       }
       if (accounts.countAccounts() >= parseMaxAccounts(env)) {
@@ -295,9 +322,16 @@ export function createAccountRoutes(deps: AccountHttpDeps): AccountRoutes {
         send(res, 503, { error: 'accounts_full' });
         return true;
       }
-      signUpPerIp.hit(`signup:${ip}`);
-      signUpGlobal.hit('signup');
-      const result = await accounts.signUp({ email: body.email, password: body.password, display_name: body.name });
+      const result = await withHashing(res, 'signup', () =>
+        accounts.signUp({ email: body.email, password: body.password, display_name: body.name }),
+      );
+      if (!result) return true;
+      if (result.ok) {
+        signUpPerIp.hit(`signup:${ip}`);
+        signUpGlobal.hit('signup');
+      } else {
+        signUpRefusalsPerIp.hit(`signup-refused:${ip}`);
+      }
       if (!result.ok) {
         deps.log('account', { action: 'signup', ok: false, reason: result.code });
         if (result.code === 'email_taken') {
@@ -334,7 +368,10 @@ export function createAccountRoutes(deps: AccountHttpDeps): AccountRoutes {
         return true;
       }
       signInPerIp.hit(`signin:${ip}`);
-      const result = await accounts.signIn({ email: body.email, password: body.password });
+      const result = await withHashing(res, 'signin', () =>
+        accounts.signIn({ email: body.email, password: body.password }),
+      );
+      if (!result) return true;
       if (!result.ok) {
         if (emailKey !== null) signInFailuresPerEmail.hit(emailKey);
         deps.log('account', { action: 'signin', ok: false });

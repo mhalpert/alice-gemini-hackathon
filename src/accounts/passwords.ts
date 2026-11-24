@@ -137,11 +137,21 @@ export function getDecoyHash(params: ScryptParams = DEFAULT_SCRYPT): Promise<str
   return decoy;
 }
 
+/** Thrown when too many password checks are already queued. The caller answers "busy". */
+export class HashBusyError extends Error {
+  constructor() {
+    super('too many password checks are waiting');
+    this.name = 'HashBusyError';
+  }
+}
+
 /**
  * Runs at most `limit` hashes at a time. Each hash holds about 32 MiB, so an unbounded
- * burst of sign-in requests could otherwise exhaust a small server.
+ * burst of sign-in requests could otherwise exhaust a small server. At most `maxWaiting`
+ * more may queue; past that the job is refused at once, so a flood cannot build an
+ * endless line in front of real shoppers.
  */
-export function createHashGate(limit = 2): <T>(job: () => Promise<T>) => Promise<T> {
+export function createHashGate(limit = 2, maxWaiting = 24): <T>(job: () => Promise<T>) => Promise<T> {
   let running = 0;
   const waiting: (() => void)[] = [];
   const release = (): void => {
@@ -151,6 +161,7 @@ export function createHashGate(limit = 2): <T>(job: () => Promise<T>) => Promise
   };
   return async function gated<T>(job: () => Promise<T>): Promise<T> {
     if (running >= limit) {
+      if (waiting.length >= maxWaiting) throw new HashBusyError();
       await new Promise<void>((resolve) => waiting.push(resolve));
     }
     running += 1;

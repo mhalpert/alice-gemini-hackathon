@@ -42,13 +42,25 @@ function cookieFrom(reply: Reply): string {
 }
 
 async function withAccountsServer(
-  options: { env?: Record<string, string | undefined>; injectAccounts?: boolean; now?: () => number },
+  options: {
+    env?: Record<string, string | undefined>;
+    injectAccounts?: boolean;
+    now?: () => number;
+    hashConcurrency?: number;
+    hashQueue?: number;
+  },
   fn: (h: Harness) => Promise<void>,
 ): Promise<void> {
   const publicDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alice-acct-public-'));
   fs.writeFileSync(path.join(publicDir, 'index.html'), '<!doctype html><h1>Alice</h1>');
   const logs: Harness['logs'] = [];
-  const accounts = createAccounts({ db: openAccountsDb({ path: ':memory:' }), scrypt: FAST, now: options.now });
+  const accounts = createAccounts({
+    db: openAccountsDb({ path: ':memory:' }),
+    scrypt: FAST,
+    now: options.now,
+    hashConcurrency: options.hashConcurrency,
+    hashQueue: options.hashQueue,
+  });
   const env = { ALICE_ACCOUNTS: 'on', ...(options.env ?? {}) };
   const server = createAliceServer({
     publicDir,
@@ -389,6 +401,39 @@ describe('/api/account routes', () => {
       const full = await call('POST', '/api/account/signup', { body: { email: 'two@example.com', password: PASSWORD } });
       assert.equal(full.status, 503);
       assert.equal(full.json.error, 'accounts_full');
+    });
+  });
+
+  it('do not let typos use up the sign-up allowance, but do stop someone probing for addresses', async () => {
+    await withAccountsServer({}, async ({ call }) => {
+      await call('POST', '/api/account/signup', { body: { email: 'taken@example.com', password: PASSWORD } });
+      for (let i = 0; i < 8; i += 1) {
+        assert.equal((await call('POST', '/api/account/signup', { body: { email: 'not-an-address', password: PASSWORD } })).status, 400);
+      }
+      assert.equal((await call('POST', '/api/account/signup', { body: { email: EMAIL, password: PASSWORD } })).status, 201);
+      // 8 refusals so far; 22 more "is this address taken?" probes reach the cap of 30 an hour.
+      for (let i = 0; i < 22; i += 1) {
+        assert.equal((await call('POST', '/api/account/signup', { body: { email: 'taken@example.com', password: PASSWORD } })).status, 409);
+      }
+      const probe = await call('POST', '/api/account/signup', { body: { email: 'taken@example.com', password: PASSWORD } });
+      assert.equal(probe.status, 429);
+      assert.ok(Number(probe.headers['retry-after']) >= 1);
+    });
+  });
+
+  it('answer "busy" instead of queueing without end when sign-ins flood in', async () => {
+    await withAccountsServer({ hashConcurrency: 1, hashQueue: 1 }, async ({ call }) => {
+      await call('POST', '/api/account/signup', { body: { email: EMAIL, password: PASSWORD } });
+      const replies = await Promise.all(
+        Array.from({ length: 8 }, () => call('POST', '/api/account/signin', { body: { email: EMAIL, password: PASSWORD } })),
+      );
+      const statuses = replies.map((r) => r.status);
+      assert.ok(statuses.includes(200), `some succeed: ${statuses}`);
+      assert.ok(statuses.includes(503), `some are told busy: ${statuses}`);
+      const busy = replies.find((r) => r.status === 503)!;
+      assert.equal(busy.json.error, 'busy');
+      assert.equal(busy.headers['retry-after'], '5');
+      assert.ok(statuses.every((s) => s === 200 || s === 503));
     });
   });
 

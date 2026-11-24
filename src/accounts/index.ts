@@ -26,7 +26,7 @@ import {
 
 export type { ShopperMemory, MemoryPatch, Department } from './memory.ts';
 export { emptyMemory, isEmptyMemory } from './memory.ts';
-export { MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH } from './passwords.ts';
+export { HashBusyError, MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH } from './passwords.ts';
 export { createAttemptLimiter, type AttemptLimiter } from './limiter.ts';
 
 export type AccountProvider = 'password' | 'shop';
@@ -63,6 +63,8 @@ export interface AccountsOptions {
   maxSessionsPerAccount?: number;
   scrypt?: ScryptParams;
   hashConcurrency?: number;
+  /** How many password checks may wait for a free slot before new ones are refused. */
+  hashQueue?: number;
 }
 
 export interface Accounts {
@@ -141,7 +143,7 @@ export function createAccounts(opts?: AccountsOptions): Accounts {
   const sessionTtlMs = opts?.sessionTtlMs ?? SESSION_TTL_MS;
   const maxSessions = Math.max(1, opts?.maxSessionsPerAccount ?? MAX_SESSIONS_PER_ACCOUNT);
   const scrypt = opts?.scrypt ?? DEFAULT_SCRYPT;
-  const gate = createHashGate(opts?.hashConcurrency ?? 2);
+  const gate = createHashGate(opts?.hashConcurrency ?? 2, opts?.hashQueue ?? 24);
 
   const q = {
     accountByEmail: db.prepare(

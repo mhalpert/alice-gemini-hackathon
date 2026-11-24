@@ -17,6 +17,7 @@ const MESSAGES = {
   bad_credentials: "That email and password don't match.",
   slow_down: 'Too many tries. Wait a few minutes and try again.',
   accounts_full: 'New accounts are closed for now.',
+  busy: 'Alice is busy right now. Try again in a moment.',
   accounts_unavailable: 'Accounts are not available right now. Try again in a moment.',
   not_signed_in: 'You have been signed out. Sign in again.',
   offline: "Couldn't reach Alice. Check your connection and try again.",

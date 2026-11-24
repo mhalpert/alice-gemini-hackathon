@@ -29,6 +29,7 @@ import {
 import {
   checkPassword,
   createHashGate,
+  HashBusyError,
   hashPassword,
   MAX_PASSWORD_LENGTH,
   needsRehash,
@@ -204,6 +205,34 @@ describe('passwords', () => {
     // A failing job still frees its slot.
     await assert.rejects(gate(async () => { throw new Error('boom'); }), /boom/);
     assert.equal(await gate(async () => 'after'), 'after');
+  });
+});
+
+describe('password check queue', () => {
+  it('refuses new work at once when the line is full, and recovers when it drains', async () => {
+    const gate = createHashGate(1, 2);
+    let release: (() => void) | null = null;
+    const blocker = gate(() => new Promise<string>((resolve) => { release = () => resolve('first'); }));
+    const queuedA = gate(async () => 'a');
+    const queuedB = gate(async () => 'b');
+    await assert.rejects(gate(async () => 'overflow'), HashBusyError);
+    release!();
+    assert.deepEqual(await Promise.all([blocker, queuedA, queuedB]), ['first', 'a', 'b']);
+    assert.equal(await gate(async () => 'after'), 'after');
+  });
+
+  it('surfaces as HashBusyError from sign-in when the service is flooded', async () => {
+    const accounts = createAccounts({ db: openAccountsDb({ path: ':memory:' }), scrypt: FAST, hashConcurrency: 1, hashQueue: 1 });
+    await accounts.signUp({ email: 'a@b.co', password: GOOD_PASSWORD });
+    const results = await Promise.allSettled(
+      Array.from({ length: 6 }, () => accounts.signIn({ email: 'a@b.co', password: GOOD_PASSWORD })),
+    );
+    const busy = results.filter((r) => r.status === 'rejected' && r.reason instanceof HashBusyError).length;
+    const ok = results.filter((r) => r.status === 'fulfilled' && r.value.ok).length;
+    assert.ok(busy >= 1, 'some sign-ins are refused as busy');
+    assert.ok(ok >= 1, 'the ones that got a place still succeed');
+    assert.equal(busy + ok, 6);
+    assert.equal((await accounts.signIn({ email: 'a@b.co', password: GOOD_PASSWORD })).ok, true);
   });
 });
 
